@@ -44,15 +44,25 @@ func DefaultConfigPath() string {
 
 func loadStore(path string) (credentialStore, error) {
 	store := credentialStore{Version: 1, Profiles: map[string]Credential{}}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return store, errors.New("credential store must not be a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return store, errors.New("credential store must be a regular file")
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return store, fmt.Errorf("secure credentials %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return store, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil
 	}
 	if err != nil {
 		return store, err
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return store, fmt.Errorf("secure credentials %s: %w", path, err)
 	}
 	if err := json.Unmarshal(data, &store); err != nil {
 		return store, fmt.Errorf("decode credentials %s: %w", path, err)
@@ -68,7 +78,19 @@ func saveStore(path string, store credentialStore) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	_ = os.Chmod(dir, 0o700)
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("credential store must not be a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("credential store must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
@@ -94,7 +116,16 @@ func saveStore(path string, store credentialStore) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = dirFile.Sync()
+	_ = dirFile.Close()
+	return err
 }
 
 func SavedRelayForDevice(path, device string) (string, bool, error) {

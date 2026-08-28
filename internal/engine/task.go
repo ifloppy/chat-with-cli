@@ -328,10 +328,7 @@ func (m *TaskManager) persist(info TaskInfo) {
 		return
 	}
 	path := filepath.Join(m.dir, info.ID+".json")
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, data, 0o600) == nil {
-		_ = os.Rename(tmp, path)
-	}
+	_ = atomicWriteFileMode(path, data, 0o600)
 }
 
 func shellCommand(command string) *exec.Cmd {

@@ -365,6 +365,9 @@ func writeTextFile(path, content string, mode os.FileMode, force bool) error {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("refusing to write through symlink")
 		}
+		if !info.Mode().IsRegular() {
+			return errors.New("refusing to replace a non-regular file")
+		}
 		if !force {
 			return fmt.Errorf("file already exists: %s", path)
 		}
@@ -395,7 +398,16 @@ func writeTextFile(path, content string, mode os.FileMode, force bool) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	_ = dir.Close()
+	return err
 }
 
 func defaultRelayConfigPath() string {

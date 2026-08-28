@@ -17,6 +17,16 @@ import (
 type Values map[string]string
 
 func Load(path string) (Values, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("configuration path must not be a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("configuration path must be a regular file")
+	}
 	data, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -140,9 +150,14 @@ func Write(path string, values map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("configuration path must not be a symlink")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("configuration path must not be a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("configuration path must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	lines := []string{"# chat-with-cli configuration; secrets belong in the environment, not this file", ""}

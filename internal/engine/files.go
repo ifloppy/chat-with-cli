@@ -283,11 +283,7 @@ func (e *Engine) WriteCheckpoint(in CheckpointWriteInput) error {
 		return err
 	}
 	content := "# chat-with-cli checkpoint\n\nWorkspace: `" + workspace + "`\n\n" + in.Content + "\n"
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicWriteFileMode(path, []byte(content), 0o600)
 }
 
 func (e *Engine) ReadCheckpoint(in CheckpointReadInput) (CheckpointOutput, error) {
@@ -337,8 +333,28 @@ func (e *Engine) PatchFile(in FilePatchInput) (FilePatchOutput, error) {
 
 func atomicWriteFile(path string, data []byte) error {
 	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("refusing to replace a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("refusing to replace a non-regular file")
+		}
 		mode = info.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return atomicWriteFileMode(path, data, mode)
+}
+
+func atomicWriteFileMode(path string, data []byte, mode os.FileMode) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("refusing to replace a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("refusing to replace a non-regular file")
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -363,5 +379,14 @@ func atomicWriteFile(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	_ = dir.Close()
+	return err
 }

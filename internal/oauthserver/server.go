@@ -161,6 +161,7 @@ type Server struct {
 	setupTokenPath      string
 	securityEvents      []SecurityEvent
 	statusProvider      func() map[string]DeviceStatus
+	startedAt           time.Time
 }
 
 type DeviceStatus struct {
@@ -217,6 +218,7 @@ func New(cfg Config) (*Server, error) {
 		dcrEnabled:          true,
 		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
 		rates: make(map[string]rateWindow), setupTokenPath: cfg.SetupTokenPath,
+		startedAt: time.Now(),
 	}
 	if cfg.SetupToken != "" {
 		s.setupTokenHash = tokenKey(cfg.SetupToken)
@@ -1283,7 +1285,13 @@ func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
 		return false
 	}
 	_, device, _, ok := s.resourceParts(resource)
-	return ok && !s.disabledDevices[device]
+	if !ok || s.disabledDevices[device] {
+		return false
+	}
+	if record, exists := s.deviceRecords[device]; exists && record.Disabled {
+		return false
+	}
+	return true
 }
 
 func (s *Server) ProtectResource(staticToken string, next http.Handler) http.Handler {

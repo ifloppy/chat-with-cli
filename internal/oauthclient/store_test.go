@@ -1,10 +1,33 @@
 package oauthclient
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCredentialStoreRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	link := filepath.Join(dir, "link.json")
+	if err := os.WriteFile(target, []byte(`{"version":1,"profiles":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skip("symlinks are unavailable")
+		}
+		t.Fatal(err)
+	}
+	if _, err := loadStore(link); err == nil {
+		t.Fatal("loadStore followed a credential-store symlink")
+	}
+	if err := saveStore(link, credentialStore{Version: 1, Profiles: map[string]Credential{}}); err == nil {
+		t.Fatal("saveStore replaced a credential-store symlink")
+	}
+}
 
 func TestSavedRelayForDevice(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credentials.json")
