@@ -9,7 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Version = "0.1.0-alpha.2"
+const Version = "0.1.0-alpha.3"
 
 type Caller interface {
 	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)
@@ -49,7 +49,7 @@ func boolPtr(value bool) *bool { return &value }
 
 func toolAnnotations(name string) *mcp.ToolAnnotations {
 	switch name {
-	case "system_info", "computer_info", "computer_screenshot", "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "computer_ui_get_text", "task_read", "task_wait", "task_list", "fs_read", "fs_list", "fs_search", "checkpoint_read":
+	case "system_info", "computer_info", "computer_screenshot", "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "computer_ui_get_text", "task_read", "task_wait", "task_list", "audit_recent", "fs_read", "fs_list", "fs_search", "checkpoint_read":
 		return &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: boolPtr(false)}
 	case "fs_write", "fs_patch", "checkpoint_write":
 		return &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
@@ -154,6 +154,8 @@ func New(caller Caller) *mcp.Server {
 		"Signal an active task and its process group. Defaults to TERM; supports INT, HUP, and KILL.")
 	addTool[struct{}, engine.TaskListOutput](server, caller, "task_list",
 		"List active and historical tasks so multiple workstreams can be coordinated without losing task IDs.")
+	addTool[engine.AuditRecentInput, engine.AuditRecentOutput](server, caller, "audit_recent",
+		"Read recent bounded local audit metadata (time, method, duration, success) without request arguments or result contents.")
 
 	addTool[engine.FileReadInput, engine.FileReadOutput](server, caller, "fs_read",
 		"Read a bounded byte range from a regular file inside an allowed root. Use next_offset for large files.")

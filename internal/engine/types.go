@@ -132,6 +132,22 @@ type TaskListOutput struct {
 	Tasks []TaskInfo `json:"tasks"`
 }
 
+type AuditEvent struct {
+	ID         string    `json:"id"`
+	Time       time.Time `json:"time"`
+	Method     string    `json:"method"`
+	DurationMS int64     `json:"duration_ms"`
+	OK         bool      `json:"ok"`
+}
+
+type AuditRecentInput struct {
+	Limit int `json:"limit,omitempty" jsonschema:"number of recent audit events; default 100, max 500"`
+}
+
+type AuditRecentOutput struct {
+	Events []AuditEvent `json:"events"`
+}
+
 type FileListOutput struct {
 	Entries []FileEntry `json:"entries"`
 }

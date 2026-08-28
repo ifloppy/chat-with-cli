@@ -68,21 +68,20 @@ func (e *Engine) WriteFile(in FileWriteInput) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	switch strings.ToLower(strings.TrimSpace(in.Mode)) {
 	case "", "rewrite":
+		return atomicWriteFile(path, []byte(in.Content))
 	case "append":
-		flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		_, err = io.WriteString(file, in.Content)
+		return err
 	default:
 		return fmt.Errorf("unsupported write mode %q", in.Mode)
 	}
-	file, err := os.OpenFile(path, flags, 0o644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	_, err = io.WriteString(file, in.Content)
-	return err
 }
 
 func (e *Engine) ListFiles(in FileListInput) (FileListOutput, error) {
@@ -328,17 +327,19 @@ func (e *Engine) PatchFile(in FilePatchInput) (FilePatchOutput, error) {
 }
 
 func atomicWriteFile(path string, data []byte) error {
-	info, err := os.Stat(path)
-	if err != nil {
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".chat-with-cli-patch-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".chat-with-cli-write-*")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		return err
 	}

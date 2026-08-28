@@ -119,6 +119,8 @@ WantedBy=default.target
 
 The Agent defaults to at most 32 concurrent PTY tasks; lower `--max-active-tasks` on small machines. For read-only screenshot/AT-SPI access, append `--allow-screen`. For keyboard, pointer, or semantic UI actions, append `--allow-computer-use` only when needed. Portal restore policy defaults to `--computer-persist=process`; use `none` for no restoration or explicitly choose `persistent` for restart-surviving consent.
 
+The Agent writes privacy-preserving audit metadata under its `--state-dir` (default `~/.local/state/chat-with-cli/audit/events.jsonl`). It records method/time/duration/success only, never MCP arguments or results. Use the read-only `audit_recent` MCP tool for recent events; the file is size-bounded and rotated once.
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now chat-with-cli-agent

@@ -158,3 +158,46 @@ func TestMaxActiveTasksHasHardUpperBound(t *testing.T) {
 		t.Fatalf("expected upper-bound error, got %v", err)
 	}
 }
+
+func TestAuditRecordsMethodWithoutPayload(t *testing.T) {
+	root, stateDir := t.TempDir(), t.TempDir()
+	eng, err := New(Config{Roots: []string{root}, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "audit-secret-marker-must-not-appear"
+	raw := []byte(`{"path":"note.txt","content":"` + secret + `","mode":"rewrite"}`)
+	if _, err := eng.Invoke(context.Background(), "fs_write", raw); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(stateDir, "audit", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), secret) || !strings.Contains(string(data), `"method":"fs_write"`) {
+		t.Fatalf("unsafe or missing audit data: %s", data)
+	}
+	info, err := os.Stat(filepath.Join(stateDir, "audit", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("audit mode=%o, want 600", info.Mode().Perm())
+	}
+	out, err := eng.audit.recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Events) != 1 || out.Events[0].Method != "fs_write" || !out.Events[0].OK {
+		t.Fatalf("unexpected audit events: %#v", out.Events)
+	}
+}
+
+func TestScreenshotPayloadLeavesWebSocketHeadroom(t *testing.T) {
+	encoded := ((maxScreenshotBytes + 2) / 3) * 4
+	const websocketLimit = 32 << 20
+	const envelopeHeadroom = 1 << 20
+	if encoded+envelopeHeadroom >= websocketLimit {
+		t.Fatalf("screenshot cap %d leaves insufficient WebSocket headroom", maxScreenshotBytes)
+	}
+}

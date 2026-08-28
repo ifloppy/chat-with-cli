@@ -51,12 +51,19 @@ An optional static MCP bearer token remains available for legacy/debug clients. 
 
 Use TLS for every non-loopback deployment. The built-in HTTP server is intentionally suitable for binding behind a reverse proxy; it is not a certificate-management stack. OAuth access is bound to the exact `/mcp/<device>` resource. Refresh tokens rotate on use; revocation and Relay state deletion can invalidate issued credentials.
 
+## Audit metadata
+
+The Agent records one bounded JSONL audit event for every Engine tool call: event ID, UTC time, method name, duration, and success/failure. Request arguments and result contents are deliberately never recorded, so file contents, terminal input, UI text, and credentials are not duplicated into the audit trail. The current log and one rotated log are capped at roughly 8 MiB each and stored beneath the Agent state directory with restrictive permissions. `audit_recent` exposes only this metadata.
+
+This is an operational audit trail, not tamper-evident forensic storage. An Agent granted `--allow-exec` intentionally provides arbitrary commands with the desktop user’s OS permissions, so that user (or an authorized shell task) may be able to modify the Agent state directory. Export audit events to a separate append-only system if stronger evidence guarantees are required.
+
 ## Resource limits
 
 - Agent WebSocket messages are capped.
 - Screenshots have a hard encoded-input size bound before MCP delivery.
 - File reads/search results are bounded.
 - Per-task persisted PTY logs are capped; output continues to be drained after truncation.
+- Audit metadata is bounded to the current 8 MiB JSONL file plus one rotated file.
 - Concurrent remote requests are bounded inside the Agent.
 - Concurrent PTY tasks are capped (32 by default, configurable with `--max-active-tasks`).
 - OAuth registration, authorization requests, codes, access tokens, and refresh tokens have bounded counts and/or lifetimes; repeated bad consent-password attempts lock that authorization request.

@@ -16,7 +16,8 @@ import (
 	"time"
 )
 
-const maxScreenshotBytes = 24 * 1024 * 1024
+// Keep enough headroom for base64 + JSON inside the 32 MiB Agent/Relay WebSocket limit.
+const maxScreenshotBytes = 20 * 1024 * 1024
 
 func (e *Engine) ComputerInfo() ComputerInfoOutput {
 	backend := detectScreenshotBackend()

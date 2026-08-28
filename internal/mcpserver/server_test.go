@@ -156,7 +156,7 @@ func TestHighLevelComputerToolsAreAdvertisedWithSafetyHints(t *testing.T) {
 	for _, tool := range listed.Tools {
 		tools[tool.Name] = tool
 	}
-	for _, name := range []string{"computer_observe", "computer_ui_get_text"} {
+	for _, name := range []string{"computer_observe", "computer_ui_get_text", "audit_recent"} {
 		tool := tools[name]
 		if tool == nil || tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
 			t.Fatalf("%s missing read-only annotation: %#v", name, tool)

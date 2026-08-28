@@ -17,7 +17,8 @@ The project is designed for long-running application development rather than one
 - Multiple independent workstreams on one machine.
 - Explicit capability gates for shell, screenshots, and keyboard/mouse control.
 - Filesystem roots that are opt-in and symlink-aware.
-- Safe surgical file edits with exact-match validation.
+- Safe surgical file edits with exact-match validation and atomic rewrites.
+- Bounded privacy-preserving local audit metadata for every MCP tool call.
 - Simple self-hosting behind Caddy/Nginx without inbound ports on the workstation.
 
 ## Architecture
@@ -61,7 +62,7 @@ All powerful capabilities are disabled unless explicitly granted:
 
 The public Relay supports MCP OAuth 2.1-style authorization with RFC 9728 protected-resource discovery, Dynamic Client Registration, mandatory PKCE S256, rotating refresh tokens, and resource-bound access tokens. OAuth state survives Relay restarts without storing raw access/refresh tokens. A separate high-entropy Agent bearer token authenticates workstation WebSocket connections; an optional static MCP bearer remains available for CLI/debug compatibility. Terminate public traffic with TLS in a trusted reverse proxy.
 
-Task logs are capped at 64 MiB per task by default. After the cap is reached, the PTY continues to be drained so the child process does not deadlock; the task is marked `log_truncated`. Concurrent PTY tasks are capped at 32 by default and can be tuned with `--max-active-tasks`.
+Task logs are capped at 64 MiB per task by default. After the cap is reached, the PTY continues to be drained so the child process does not deadlock; the task is marked `log_truncated`. Concurrent PTY tasks are capped at 32 by default and can be tuned with `--max-active-tasks`. Every Engine tool call also writes bounded audit metadata (time, method, duration, success) without arguments or result contents; `audit_recent` exposes recent events.
 
 See [SECURITY.md](SECURITY.md) for the threat model and residual risks.
 
@@ -187,11 +188,12 @@ ChatGPT product availability is separate from server compatibility. OpenAI curre
 ### Files and continuity
 
 - `fs_read` — bounded byte-range reads.
-- `fs_write` — rewrite or append inside an allowed root.
+- `fs_write` — atomically rewrite or append inside an allowed root.
 - `fs_patch` — exact-match surgical replacement with expected-count validation.
 - `fs_list` — bounded-depth tree listing with dependency/cache noise skipped.
 - `fs_search` — bounded regex search with binary/large-file protection.
 - `checkpoint_write` / `checkpoint_read` — durable workspace handoff between chats or agents.
+- `audit_recent` — recent bounded tool-call audit metadata without request arguments or result contents.
 
 ### Computer Use
 
@@ -212,7 +214,6 @@ ChatGPT product availability is separate from server compatibility. OpenAI curre
 - Per-device credentials and key rotation.
 - Configurable task-log retention and garbage collection.
 - Task groups/dependencies for larger multi-agent workstreams.
-- Optional audit event stream with secret redaction.
 - Signed release binaries and reproducible release metadata.
 
 ## Non-goals

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -18,6 +19,7 @@ type Engine struct {
 	cfg   Config
 	roots []string
 	tasks *TaskManager
+	audit *auditLog
 
 	computerMu           sync.Mutex
 	kwinDBusDisabled     bool
@@ -77,6 +79,10 @@ func New(cfg Config) (*Engine, error) {
 	}
 	e := &Engine{cfg: cfg, roots: roots}
 	e.tasks = NewTaskManager(e, filepath.Join(cfg.StateDir, "tasks"))
+	e.audit, err = newAuditLog(cfg.StateDir)
+	if err != nil {
+		return nil, fmt.Errorf("initialize audit log: %w", err)
+	}
 	return e, nil
 }
 
@@ -172,7 +178,13 @@ func decode[T any](raw json.RawMessage) (T, error) {
 	return value, nil
 }
 
-func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage) (any, error) {
+func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage) (result any, err error) {
+	started := time.Now()
+	defer func() { e.audit.record(method, started, err) }()
+	return e.invoke(ctx, method, raw)
+}
+
+func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage) (any, error) {
 	switch method {
 	case "system_info":
 		host, _ := os.Hostname()
@@ -233,6 +245,12 @@ func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage)
 		return e.tasks.Wait(ctx, in)
 	case "task_list":
 		return e.tasks.List(), nil
+	case "audit_recent":
+		in, err := decode[AuditRecentInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.audit.recent(in.Limit)
 	}
 
 	switch method {
