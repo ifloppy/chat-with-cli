@@ -115,7 +115,10 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	if err != nil {
 		return TaskInfo{}, err
 	}
-	cmd := shellCommand(in.Command)
+	cmd, err := m.engine.command(in.Command)
+	if err != nil {
+		return TaskInfo{}, err
+	}
 	cmd.Dir = cwd
 	cmd.Env = mergeEnv(os.Environ(), in.Env)
 	ptmx, err := pty.Start(cmd)
@@ -336,6 +339,29 @@ func shellCommand(command string) *exec.Cmd {
 		return exec.Command("cmd.exe", "/C", command)
 	}
 	return exec.Command("/bin/sh", "-lc", command)
+}
+
+func (e *Engine) command(command string) (*exec.Cmd, error) {
+	if e.cfg.ExecSandbox == "none" {
+		return shellCommand(command), nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve chat-with-cli executable for exec sandbox: %w", err)
+	}
+	args := []string{"exec-sandbox"}
+	for _, root := range e.roots {
+		args = append(args, "--root", root)
+	}
+	if e.cfg.AllowFileWrite {
+		args = append(args, "--allow-write")
+	}
+	if runtime.GOOS == "windows" {
+		args = append(args, "--", "cmd.exe", "/C", command)
+	} else {
+		args = append(args, "--", "/bin/sh", "-lc", command)
+	}
+	return exec.Command(executable, args...), nil
 }
 
 func mergeEnv(base []string, extra map[string]string) []string {

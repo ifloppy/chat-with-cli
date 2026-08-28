@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -23,6 +24,7 @@ import (
 )
 
 var requestIDPattern = regexp.MustCompile(`name="request_id" value="([^"]+)"`)
+var csrfTokenPattern = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
 
 func testListener(t *testing.T) (net.Listener, string) {
 	t.Helper()
@@ -69,7 +71,11 @@ func startOAuthMCPServer(t *testing.T) (*Server, string, func()) {
 func browserFetcher(t *testing.T, username, password string) auth.AuthorizationCodeFetcher {
 	t.Helper()
 	return func(ctx context.Context, args *auth.AuthorizationArgs) (*auth.AuthorizationResult, error) {
-		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			return nil, err
+		}
+		client := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, args.URL, nil)
 		if err != nil {
 			return nil, err
@@ -87,8 +93,12 @@ func browserFetcher(t *testing.T, username, password string) auth.AuthorizationC
 		if len(match) != 2 {
 			t.Fatalf("authorization page missing request id: status=%d body=%s", resp.StatusCode, body)
 		}
+		csrf := csrfTokenPattern.FindSubmatch(body)
+		if len(csrf) != 2 {
+			t.Fatalf("authorization page missing CSRF token: status=%d body=%s", resp.StatusCode, body)
+		}
 		authURL, _ := url.Parse(args.URL)
-		form := url.Values{"request_id": {string(match[1])}, "username": {username}, "password": {password}, "decision": {"login"}}
+		form := url.Values{"request_id": {string(match[1])}, "csrf_token": {string(csrf[1])}, "username": {username}, "password": {password}, "decision": {"login"}}
 		post, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL.Scheme+"://"+authURL.Host+"/oauth/authorize", strings.NewReader(form.Encode()))
 		if err != nil {
 			return nil, err
@@ -281,11 +291,13 @@ func TestAuthorizationPasswordAttemptsAreBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.pending["request"] = pendingAuth{RedirectURI: "http://127.0.0.1:43120/callback", Expires: time.Now().Add(time.Minute)}
+	csrf := "test-csrf-token"
+	s.pending["request"] = pendingAuth{RedirectURI: "http://127.0.0.1:43120/callback", CSRFTokenHash: tokenKey(csrf), Expires: time.Now().Add(time.Minute)}
 	for attempt := 1; attempt <= 5; attempt++ {
-		form := url.Values{"request_id": {"request"}, "password": {"wrong-password"}, "decision": {"allow"}}
+		form := url.Values{"request_id": {"request"}, "csrf_token": {csrf}, "password": {"wrong-password"}, "decision": {"allow"}}
 		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:18892/oauth/authorize", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: oauthCSRFCookie, Value: csrf})
 		rr := httptest.NewRecorder()
 		s.handleAuthorizePOST(rr, req)
 		want := http.StatusUnauthorized
@@ -384,5 +396,184 @@ func TestPublicDeviceOwnershipIsIsolated(t *testing.T) {
 	}
 	if s.VerifyAccessScope(access, s.absolute("/agent/alice-laptop"), "mcp") {
 		t.Fatal("agent token unexpectedly has MCP scope")
+	}
+}
+
+func TestRefreshTokenReplayRevokesTokenFamily(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18904", Password: "replay-test-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	access, refresh, _, err := s.issueTokensLocked("client", ownerID, s.absolute("/mcp/device"), "mcp offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {"client"}}
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	s.handleToken(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("first refresh status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var rotated struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &rotated); err != nil {
+		t.Fatal(err)
+	}
+	if !s.VerifyAccess(access, s.absolute("/mcp/device")) {
+		t.Fatal("original access token unexpectedly revoked before replay")
+	}
+	replay := httptest.NewRecorder()
+	replayReq := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(form.Encode()))
+	replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	s.handleToken(replay, replayReq)
+	if replay.Code != http.StatusBadRequest {
+		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	if s.VerifyAccess(access, s.absolute("/mcp/device")) || s.VerifyAccess(rotated.AccessToken, s.absolute("/mcp/device")) {
+		t.Fatal("refresh replay did not revoke the entire token family")
+	}
+	_ = rotated.RefreshToken
+}
+
+func TestSetupIsOneTimeAndLandingIsGeneric(t *testing.T) {
+	stateDir := t.TempDir()
+	setupFile := filepath.Join(stateDir, "setup-token")
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18905", StateDir: stateDir, SetupToken: "one-time-setup-token-123456", SetupTokenPath: setupFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	secured := SecurityHeaders(mux)
+	landing := httptest.NewRecorder()
+	secured.ServeHTTP(landing, httptest.NewRequest(http.MethodGet, s.absolute("/"), nil))
+	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), "Chat with CLI") || strings.Contains(landing.Body.String(), "hostname") {
+		t.Fatalf("unexpected landing page: status=%d body=%s", landing.Code, landing.Body.String())
+	}
+	if landing.Header().Get("Content-Security-Policy") == "" || landing.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("security headers missing: %#v", landing.Header())
+	}
+	setupGet := httptest.NewRecorder()
+	secured.ServeHTTP(setupGet, httptest.NewRequest(http.MethodGet, s.absolute("/setup"), nil))
+	csrfMatch := csrfTokenPattern.FindSubmatch(setupGet.Body.Bytes())
+	if setupGet.Code != http.StatusOK || len(csrfMatch) != 2 {
+		t.Fatalf("setup page missing CSRF token: status=%d body=%s", setupGet.Code, setupGet.Body.String())
+	}
+	setCookie := setupGet.Result().Cookies()
+	if len(setCookie) != 1 {
+		t.Fatalf("setup response cookies=%v", setCookie)
+	}
+	form := url.Values{"csrf_token": {string(csrfMatch[1])}, "setup_token": {"one-time-setup-token-123456"}, "username": {"owner"}, "password": {"setup-owner-password-12345"}, "mode": {"private"}}
+	setupPost := httptest.NewRecorder()
+	postReq := httptest.NewRequest(http.MethodPost, s.absolute("/setup"), strings.NewReader(form.Encode()))
+	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postReq.AddCookie(setCookie[0])
+	secured.ServeHTTP(setupPost, postReq)
+	if setupPost.Code != http.StatusSeeOther {
+		t.Fatalf("setup POST status=%d body=%s", setupPost.Code, setupPost.Body.String())
+	}
+	after := httptest.NewRecorder()
+	secured.ServeHTTP(after, httptest.NewRequest(http.MethodGet, s.absolute("/setup"), nil))
+	if after.Code != http.StatusNotFound {
+		t.Fatalf("setup remained available after initialization: status=%d", after.Code)
+	}
+	if _, err := os.Stat(setupFile); !os.IsNotExist(err) {
+		t.Fatalf("setup token file was not removed: %v", err)
+	}
+}
+
+func TestImmutableDeviceResourceRouteIsAccepted(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18906", Password: "device-id-test-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "0123456789abcdef0123456789abcdef"
+	kind, route, canonical, ok := s.resourceParts(s.absolute("/agent/id/" + id))
+	if !ok || kind != "agent" || route != "id/"+id || canonical != s.absolute("/agent/id/"+id) {
+		t.Fatalf("unexpected immutable resource parts: %q %q %q %v", kind, route, canonical, ok)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	if err := s.authorizeResourceLocked(ownerID, canonical); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	record := s.deviceRecords[route]
+	s.mu.Unlock()
+	if record.ID != id || record.OwnerID != ownerID {
+		t.Fatalf("unexpected device record: %+v", record)
+	}
+}
+
+func TestAdminCanRevokeDeviceAndDisableMCP(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18907", Password: "admin-test-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.devices["admin-device"] = ownerID
+	if _, _, _, err := s.issueTokensLocked("client", ownerID, s.absolute("/mcp/admin-device"), "mcp offline_access"); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	session, err := s.createSession(ownerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := httptest.NewRequest(http.MethodGet, s.absolute("/admin"), nil)
+	get.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	getResponse := httptest.NewRecorder()
+	mux.ServeHTTP(getResponse, get)
+	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), "admin-device") {
+		t.Fatalf("admin dashboard status=%d body=%s", getResponse.Code, getResponse.Body.String())
+	}
+	csrf := csrfTokenPattern.FindSubmatch(getResponse.Body.Bytes())
+	if len(csrf) != 2 {
+		t.Fatal("admin dashboard did not contain CSRF token")
+	}
+	var csrfCookie *http.Cookie
+	for _, cookie := range getResponse.Result().Cookies() {
+		if cookie.Name == adminCSRFCookie {
+			csrfCookie = cookie
+		}
+	}
+	if csrfCookie == nil {
+		t.Fatal("admin dashboard did not set CSRF cookie")
+	}
+	form := url.Values{"csrf_token": {string(csrf[1])}, "action": {"revoke-device"}, "target": {"admin-device"}, "confirm": {"REVOKE"}}
+	post := httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), strings.NewReader(form.Encode()))
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	post.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	post.AddCookie(csrfCookie)
+	postResponse := httptest.NewRecorder()
+	mux.ServeHTTP(postResponse, post)
+	if postResponse.Code != http.StatusSeeOther {
+		t.Fatalf("revoke device status=%d body=%s", postResponse.Code, postResponse.Body.String())
+	}
+	if _, ok := s.DeviceOwner("admin-device"); ok {
+		t.Fatal("revoked device remained owned")
+	}
+	if s.VerifyAccess("not-a-token", s.absolute("/mcp/admin-device")) {
+		t.Fatal("invalid token unexpectedly verified")
+	}
+	s.mu.Lock()
+	s.mcpEnabled = false
+	s.mu.Unlock()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/mcp/admin-device"), nil)
+	s.ProtectResource("", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("disabled MCP reached handler") })).ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled MCP status=%d", rr.Code)
 	}
 }

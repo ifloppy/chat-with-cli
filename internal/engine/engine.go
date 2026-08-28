@@ -45,6 +45,16 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.MaxActiveTasks > 256 {
 		return nil, fmt.Errorf("max active tasks must be <= 256, got %d", cfg.MaxActiveTasks)
 	}
+	cfg.ExecSandbox = strings.ToLower(strings.TrimSpace(cfg.ExecSandbox))
+	if cfg.ExecSandbox == "" {
+		cfg.ExecSandbox = "none"
+	}
+	if cfg.ExecSandbox != "none" && cfg.ExecSandbox != "landlock" {
+		return nil, fmt.Errorf("unsupported exec sandbox %q", cfg.ExecSandbox)
+	}
+	if cfg.ExecSandbox == "landlock" && runtime.GOOS != "linux" {
+		return nil, errors.New("the Landlock exec sandbox is supported on Linux only")
+	}
 	mode, err := normalizeComputerPersistMode(cfg.ComputerPersistMode)
 	if err != nil {
 		return nil, err
@@ -84,6 +94,14 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("initialize audit log: %w", err)
 	}
 	return e, nil
+}
+
+func (e *Engine) killSwitchActive() bool {
+	if strings.TrimSpace(e.cfg.KillSwitchPath) == "" {
+		return false
+	}
+	_, err := os.Lstat(e.cfg.KillSwitchPath)
+	return err == nil
 }
 
 func (e *Engine) Close() error {
@@ -181,6 +199,9 @@ func decode[T any](raw json.RawMessage) (T, error) {
 func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage) (result any, err error) {
 	started := time.Now()
 	defer func() { e.audit.record(method, started, err) }()
+	if e.killSwitchActive() {
+		return nil, errors.New("local emergency kill switch is active")
+	}
 	return e.invoke(ctx, method, raw)
 }
 
@@ -190,8 +211,10 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		host, _ := os.Hostname()
 		return SystemInfoOutput{
 			Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH,
-			PID: os.Getpid(), Roots: append([]string(nil), e.roots...), AllowExec: e.cfg.AllowExec,
+			PID: os.Getpid(), Roots: append([]string(nil), e.roots...), AllowFileWrite: e.cfg.AllowFileWrite,
+			AllowExec: e.cfg.AllowExec, ExecSandbox: e.cfg.ExecSandbox,
 			AllowScreen: e.cfg.AllowScreen, AllowComputerControl: e.cfg.AllowComputerControl, MaxActiveTasks: e.cfg.MaxActiveTasks,
+			KillSwitchActive: e.killSwitchActive(),
 		}, nil
 	case "computer_info":
 		return e.ComputerInfo(), nil

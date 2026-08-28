@@ -61,6 +61,9 @@ func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
 }
 
 func (e *Engine) WriteFile(in FileWriteInput) error {
+	if !e.cfg.AllowFileWrite {
+		return errors.New("filesystem write is disabled; start the agent with --allow-file-write")
+	}
 	path, err := e.ResolvePath(in.Path)
 	if err != nil {
 		return err
@@ -272,6 +275,9 @@ func (e *Engine) checkpointPath(workspace string) (string, string, error) {
 }
 
 func (e *Engine) WriteCheckpoint(in CheckpointWriteInput) error {
+	if !e.cfg.AllowFileWrite {
+		return errors.New("checkpoint writes are disabled; start the agent with --allow-file-write")
+	}
 	workspace, path, err := e.checkpointPath(in.Workspace)
 	if err != nil {
 		return err
@@ -300,6 +306,9 @@ func (e *Engine) ReadCheckpoint(in CheckpointReadInput) (CheckpointOutput, error
 }
 
 func (e *Engine) PatchFile(in FilePatchInput) (FilePatchOutput, error) {
+	if !e.cfg.AllowFileWrite {
+		return FilePatchOutput{}, errors.New("filesystem write is disabled; start the agent with --allow-file-write")
+	}
 	path, err := e.ResolvePath(in.Path)
 	if err != nil {
 		return FilePatchOutput{}, err

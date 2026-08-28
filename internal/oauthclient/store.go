@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
 type Credential struct {
@@ -30,6 +32,14 @@ func DefaultCredentialsPath() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "chat-with-cli", "credentials.json")
+}
+
+func DefaultConfigPath() string {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return filepath.Join(xdg, "chat-with-cli", "config.toml")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "chat-with-cli", "config.toml")
 }
 
 func loadStore(path string) (credentialStore, error) {
@@ -104,6 +114,32 @@ func SavedRelayForDevice(path, device string) (string, bool, error) {
 		base := strings.TrimSuffix(resource, suffix)
 		if match != "" && match != base {
 			return "", false, fmt.Errorf("multiple saved relays match device %q; specify --relay", device)
+		}
+		match = base
+	}
+	return match, match != "", nil
+}
+
+func SavedRelayForDeviceID(path, deviceID string) (string, bool, error) {
+	if path == "" {
+		path = DefaultCredentialsPath()
+	}
+	if !protocol.ValidDeviceID(strings.TrimSpace(deviceID)) {
+		return "", false, fmt.Errorf("invalid immutable device ID")
+	}
+	store, err := loadStore(path)
+	if err != nil {
+		return "", false, err
+	}
+	suffix := "/agent/id/" + url.PathEscape(strings.TrimSpace(deviceID))
+	match := ""
+	for resource := range store.Profiles {
+		if !strings.HasSuffix(resource, suffix) {
+			continue
+		}
+		base := strings.TrimSuffix(resource, suffix)
+		if match != "" && match != base {
+			return "", false, fmt.Errorf("multiple saved relays match device ID %q; specify --relay", deviceID)
 		}
 		match = base
 	}

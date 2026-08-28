@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 )
 
 var requestIDPattern = regexp.MustCompile(`name="request_id" value="([^"]+)"`)
+var csrfTokenPattern = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
 
 func startTestOAuthServer(t *testing.T, mode string) (*oauthserver.Server, string, func()) {
 	t.Helper()
@@ -50,7 +52,11 @@ func loginBrowser(t *testing.T, username, password, decision string, calls *int)
 	t.Helper()
 	return func(target string) error {
 		*calls = *calls + 1
-		client := &http.Client{}
+		cookieJar, err := cookiejar.New(nil)
+		if err != nil {
+			return err
+		}
+		client := &http.Client{Jar: cookieJar}
 		resp, err := client.Get(target)
 		if err != nil {
 			return err
@@ -64,10 +70,14 @@ func loginBrowser(t *testing.T, username, password, decision string, calls *int)
 		if len(match) != 2 {
 			t.Fatalf("authorization page missing request_id: %s", body)
 		}
+		csrf := csrfTokenPattern.FindSubmatch(body)
+		if len(csrf) != 2 {
+			t.Fatalf("authorization page missing CSRF token: %s", body)
+		}
 		u, _ := url.Parse(target)
 		form := url.Values{
 			"request_id": {string(match[1])}, "username": {username},
-			"password": {password}, "decision": {decision},
+			"password": {password}, "decision": {decision}, "csrf_token": {string(csrf[1])},
 		}
 		post, err := http.NewRequest(http.MethodPost, u.Scheme+"://"+u.Host+"/oauth/authorize", strings.NewReader(form.Encode()))
 		if err != nil {

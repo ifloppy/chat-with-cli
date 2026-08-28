@@ -10,24 +10,30 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
 type Broker struct {
-	mu    sync.RWMutex
-	peers map[string]*peer
+	mu             sync.RWMutex
+	peers          map[string]*peer
+	callSlots      chan struct{}
+	maxConnections int
 }
 
 type peer struct {
-	device    string
-	conn      *websocket.Conn
-	writeMu   sync.Mutex
-	pendingMu sync.Mutex
-	pending   map[string]chan protocol.Response
-	done      chan struct{}
-	doneOnce  sync.Once
+	device      string
+	conn        *websocket.Conn
+	writeMu     sync.Mutex
+	pendingMu   sync.Mutex
+	pending     map[string]chan protocol.Response
+	done        chan struct{}
+	doneOnce    sync.Once
+	stateMu     sync.RWMutex
+	connectedAt time.Time
+	lastSeen    time.Time
 }
 
 type RemoteCaller struct {
@@ -36,7 +42,7 @@ type RemoteCaller struct {
 }
 
 func NewBroker() *Broker {
-	return &Broker{peers: make(map[string]*peer)}
+	return &Broker{peers: make(map[string]*peer), callSlots: make(chan struct{}, 32), maxConnections: 64}
 }
 
 func (c RemoteCaller) Call(ctx context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
@@ -49,6 +55,12 @@ func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMe
 	b.mu.RUnlock()
 	if p == nil {
 		return nil, fmt.Errorf("device %q is offline", device)
+	}
+	select {
+	case b.callSlots <- struct{}{}:
+		defer func() { <-b.callSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 
 	id := protocol.NewID()
@@ -99,6 +111,9 @@ func (p *peer) readLoop(onClose func()) {
 		if err != nil {
 			return
 		}
+		p.stateMu.Lock()
+		p.lastSeen = time.Now()
+		p.stateMu.Unlock()
 		var response protocol.Response
 		if json.Unmarshal(data, &response) != nil || response.ID == "" {
 			continue
@@ -122,13 +137,23 @@ func (p *peer) close(reason string) {
 
 func (b *Broker) AgentHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		device := strings.TrimSpace(r.PathValue("device"))
-		if !protocol.ValidDeviceName(device) {
+		device := deviceRoute(r)
+		if device == "" {
 			http.Error(w, "invalid device", http.StatusBadRequest)
 			return
 		}
 		b.acceptAgent(w, r, device)
 	}
+}
+
+func deviceRoute(r *http.Request) string {
+	if device := strings.TrimSpace(r.PathValue("device")); protocol.ValidDeviceName(device) {
+		return device
+	}
+	if id := strings.TrimSpace(r.PathValue("id")); protocol.ValidDeviceID(id) {
+		return "id/" + id
+	}
+	return ""
 }
 
 func (b *Broker) LegacyAgentHandler(agentToken string) http.HandlerFunc {
@@ -147,12 +172,21 @@ func (b *Broker) LegacyAgentHandler(agentToken string) http.HandlerFunc {
 }
 
 func (b *Broker) acceptAgent(w http.ResponseWriter, r *http.Request, device string) {
+	b.mu.RLock()
+	_, replacing := b.peers[device]
+	full := len(b.peers) >= b.maxConnections
+	b.mu.RUnlock()
+	if full && !replacing {
+		http.Error(w, "agent connection limit reached", http.StatusServiceUnavailable)
+		return
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
 	if err != nil {
 		return
 	}
 	conn.SetReadLimit(32 << 20)
-	p := &peer{device: device, conn: conn, pending: make(map[string]chan protocol.Response), done: make(chan struct{})}
+	now := time.Now()
+	p := &peer{device: device, conn: conn, pending: make(map[string]chan protocol.Response), done: make(chan struct{}), connectedAt: now, lastSeen: now}
 
 	b.mu.Lock()
 	old := b.peers[device]
@@ -195,4 +229,26 @@ func (b *Broker) Devices() []string {
 	b.mu.RUnlock()
 	sort.Strings(devices)
 	return devices
+}
+
+type DeviceStatus struct {
+	Device      string
+	Online      bool
+	ConnectedAt time.Time
+	LastSeen    time.Time
+	InFlight    int
+}
+
+func (b *Broker) DeviceStatuses() map[string]DeviceStatus {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	statuses := make(map[string]DeviceStatus, len(b.peers))
+	for name, peer := range b.peers {
+		peer.stateMu.RLock()
+		peer.pendingMu.Lock()
+		statuses[name] = DeviceStatus{Device: name, Online: true, ConnectedAt: peer.connectedAt, LastSeen: peer.lastSeen, InFlight: len(peer.pending)}
+		peer.pendingMu.Unlock()
+		peer.stateMu.RUnlock()
+	}
+	return statuses
 }

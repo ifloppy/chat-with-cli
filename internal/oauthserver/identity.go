@@ -28,6 +28,13 @@ const (
 	argonKeyLen  uint32 = 32
 )
 
+var dummyPasswordHash = func() string {
+	salt := []byte("chat-with-cli-dummy")
+	key := argon2.IDKey([]byte("dummy-password-for-timing-only"), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	return fmt.Sprintf("argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", argonMemory, argonTime, argonThreads,
+		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(key))
+}()
+
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$`)
 
 type User struct {
@@ -35,11 +42,17 @@ type User struct {
 	Username     string `json:"username"`
 	PasswordHash string `json:"password_hash"`
 	CreatedAt    int64  `json:"created_at"`
+	LastLoginAt  int64  `json:"last_login_at,omitempty"`
+	Admin        bool   `json:"admin,omitempty"`
+	Disabled     bool   `json:"disabled,omitempty"`
 }
 
 type sessionRecord struct {
-	UserID  string `json:"user_id"`
-	Expires int64  `json:"expires"`
+	UserID       string `json:"user_id"`
+	CreatedAt    int64  `json:"created_at"`
+	LastSeenAt   int64  `json:"last_seen_at"`
+	LastReauthAt int64  `json:"last_reauth_at,omitempty"`
+	Expires      int64  `json:"expires"`
 }
 
 func normalizeMode(mode string) (string, error) {
@@ -109,7 +122,7 @@ func verifyPassword(encoded, password string) bool {
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
-func (s *Server) createUserLocked(username, password string) (User, error) {
+func (s *Server) createUserLocked(username, password string, admin ...bool) (User, error) {
 	normalized, ok := normalizeUsername(username)
 	if !ok {
 		return User{}, errors.New("username must be 3-64 letters, digits, dot, underscore, or hyphen")
@@ -124,7 +137,8 @@ func (s *Server) createUserLocked(username, password string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
-	user := User{ID: randomToken(18), Username: strings.TrimSpace(username), PasswordHash: hash, CreatedAt: time.Now().Unix()}
+	isAdmin := len(admin) > 0 && admin[0]
+	user := User{ID: randomToken(18), Username: strings.TrimSpace(username), PasswordHash: hash, CreatedAt: time.Now().Unix(), Admin: isAdmin}
 	s.users[user.ID] = user
 	s.usernames[normalized] = user.ID
 	return user, nil
@@ -132,23 +146,35 @@ func (s *Server) createUserLocked(username, password string) (User, error) {
 
 func (s *Server) authenticate(username, password string) (User, bool, bool) {
 	normalized, ok := normalizeUsername(username)
-	if !ok || len(password) > 1024 {
+	if len(password) > 1024 {
 		return User{}, false, false
 	}
 	s.mu.Lock()
-	userID := s.usernames[normalized]
-	user := s.users[userID]
-	s.mu.Unlock()
-	if user.ID == "" {
-		return User{}, false, false
+	user := User{}
+	if ok {
+		user = s.users[s.usernames[normalized]]
 	}
+	s.mu.Unlock()
 	select {
 	case s.passwordSlots <- struct{}{}:
 		defer func() { <-s.passwordSlots }()
 	case <-time.After(2 * time.Second):
 		return User{}, false, true
 	}
-	return user, verifyPassword(user.PasswordHash, password), false
+	if user.ID == "" || user.Disabled {
+		_ = verifyPassword(dummyPasswordHash, password)
+		return User{}, false, false
+	}
+	ok = verifyPassword(user.PasswordHash, password)
+	if ok {
+		s.mu.Lock()
+		if current := s.users[user.ID]; current.ID != "" && !current.Disabled {
+			current.LastLoginAt = time.Now().Unix()
+			s.users[user.ID] = current
+		}
+		s.mu.Unlock()
+	}
+	return user, ok, false
 }
 
 func (s *Server) register(username, password string) (User, error, bool) {
@@ -214,13 +240,23 @@ func (s *Server) sessionUser(r *http.Request) (User, bool) {
 		return User{}, false
 	}
 	user, ok := s.users[record.UserID]
-	return user, ok
+	if !ok || user.Disabled {
+		return User{}, false
+	}
+	now := time.Now()
+	if record.LastSeenAt == 0 || now.Sub(time.Unix(record.LastSeenAt, 0)) >= 5*time.Minute {
+		record.LastSeenAt = now.Unix()
+		s.sessions[tokenKey(cookie.Value)] = record
+		_ = s.saveLocked()
+	}
+	return user, true
 }
 
 func (s *Server) createSession(userID string) (string, error) {
 	token := randomToken(32)
 	s.mu.Lock()
-	s.sessions[tokenKey(token)] = sessionRecord{UserID: userID, Expires: time.Now().Add(sessionLifetime).Unix()}
+	now := time.Now().Unix()
+	s.sessions[tokenKey(token)] = sessionRecord{UserID: userID, CreatedAt: now, LastSeenAt: now, LastReauthAt: now, Expires: time.Now().Add(sessionLifetime).Unix()}
 	err := s.saveLocked()
 	s.mu.Unlock()
 	if err != nil {

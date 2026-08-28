@@ -175,3 +175,58 @@ func TestHighLevelComputerToolsAreAdvertisedWithSafetyHints(t *testing.T) {
 		}
 	}
 }
+
+func TestToolDescriptorsMeetChatGPTRequirements(t *testing.T) {
+	ctx := context.Background()
+	server := New(fakeCaller{})
+	client := mcp.NewClient(&mcp.Implementation{Name: "descriptor-test", Version: "1"}, nil)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	listed, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Tools) != 31 {
+		t.Fatalf("tool count=%d want=31", len(listed.Tools))
+	}
+	seen := map[string]bool{}
+	for _, tool := range listed.Tools {
+		if tool.Name == "" || seen[tool.Name] {
+			t.Fatalf("invalid or duplicate tool name %q", tool.Name)
+		}
+		seen[tool.Name] = true
+		if tool.Title == "" {
+			t.Fatalf("%s missing human-readable title", tool.Name)
+		}
+		if tool.Description == "" || tool.InputSchema == nil {
+			t.Fatalf("%s missing description/input schema", tool.Name)
+		}
+		raw, err := json.Marshal(tool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var descriptor map[string]any
+		if err := json.Unmarshal(raw, &descriptor); err != nil {
+			t.Fatal(err)
+		}
+		annotations, ok := descriptor["annotations"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s missing annotations", tool.Name)
+		}
+		for _, key := range []string{"readOnlyHint", "destructiveHint", "openWorldHint"} {
+			if _, ok := annotations[key]; !ok {
+				t.Fatalf("%s missing required annotation %s: %s", tool.Name, key, raw)
+			}
+		}
+	}
+}

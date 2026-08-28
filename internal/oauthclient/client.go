@@ -9,11 +9,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
 type Manager struct {
 	RelayURL        string
 	Device          string
+	DeviceID        string
 	CredentialsPath string
 	HTTPClient      *http.Client
 	OpenBrowser     func(string) error
@@ -64,8 +67,18 @@ func (m *Manager) Resource() (string, error) {
 		return "", err
 	}
 	device := strings.TrimSpace(m.Device)
-	if device == "" {
-		return "", errors.New("device is required")
+	deviceID := strings.TrimSpace(m.DeviceID)
+	if device == "" && deviceID == "" {
+		return "", errors.New("device or immutable device ID is required")
+	}
+	if deviceID != "" {
+		if !protocol.ValidDeviceID(deviceID) {
+			return "", errors.New("invalid immutable device ID")
+		}
+		return base + "/agent/id/" + url.PathEscape(deviceID), nil
+	}
+	if !protocol.ValidDeviceName(device) {
+		return "", errors.New("invalid device name")
 	}
 	return base + "/agent/" + url.PathEscape(device), nil
 }

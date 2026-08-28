@@ -20,6 +20,7 @@ type Client struct {
 	Engine        *engine.Engine
 	URL           string
 	Device        string
+	DeviceID      string
 	Token         string
 	TokenProvider func(context.Context) (string, error)
 }
@@ -28,13 +29,13 @@ func (c *Client) Run(ctx context.Context) error {
 	if c.Engine == nil {
 		return errors.New("engine is required")
 	}
-	if strings.TrimSpace(c.Device) == "" {
-		return errors.New("device name is required")
+	if strings.TrimSpace(c.Device) == "" && strings.TrimSpace(c.DeviceID) == "" {
+		return errors.New("device name or immutable device ID is required")
 	}
 	if c.Token == "" && c.TokenProvider == nil {
 		return errors.New("agent OAuth token provider or legacy token is required")
 	}
-	endpoint, err := agentURL(c.URL, c.Device)
+	endpoint, err := agentURLForRoute(c.URL, c.Device, c.DeviceID)
 	if err != nil {
 		return err
 	}
@@ -76,6 +77,10 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func agentURL(base, device string) (string, error) {
+	return agentURLForRoute(base, device, "")
+}
+
+func agentURLForRoute(base, device, deviceID string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", err
@@ -89,7 +94,16 @@ func agentURL(base, device string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported relay scheme %q", u.Scheme)
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/agent/" + url.PathEscape(device)
+	route := strings.TrimSpace(device)
+	if strings.TrimSpace(deviceID) != "" {
+		if !protocol.ValidDeviceID(strings.TrimSpace(deviceID)) {
+			return "", errors.New("invalid immutable device ID")
+		}
+		route = "id/" + strings.TrimSpace(deviceID)
+	} else if !protocol.ValidDeviceName(route) {
+		return "", errors.New("invalid device name")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/agent/" + route
 	u.RawQuery = ""
 	return u.String(), nil
 }
@@ -98,7 +112,7 @@ func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	var writeMu sync.Mutex
-	sem := make(chan struct{}, 64)
+	sem := make(chan struct{}, 32)
 
 	for {
 		_, data, err := conn.Read(ctx)

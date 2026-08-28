@@ -4,11 +4,14 @@ import "time"
 
 type Config struct {
 	Roots                []string
+	AllowFileWrite       bool
 	AllowExec            bool
+	ExecSandbox          string
 	AllowScreen          bool
 	AllowComputerControl bool
 	ComputerPersistMode  string
 	StateDir             string
+	KillSwitchPath       string
 	MaxReadBytes         int
 	MaxTaskLogBytes      int64
 	MaxActiveTasks       int
@@ -122,10 +125,13 @@ type SystemInfoOutput struct {
 	Arch                 string   `json:"arch"`
 	PID                  int      `json:"pid"`
 	Roots                []string `json:"roots"`
+	AllowFileWrite       bool     `json:"allow_file_write"`
 	AllowExec            bool     `json:"allow_exec"`
+	ExecSandbox          string   `json:"exec_sandbox"`
 	AllowScreen          bool     `json:"allow_screen"`
 	AllowComputerControl bool     `json:"allow_computer_control"`
 	MaxActiveTasks       int      `json:"max_active_tasks"`
+	KillSwitchActive     bool     `json:"kill_switch_active"`
 }
 
 type TaskListOutput struct {

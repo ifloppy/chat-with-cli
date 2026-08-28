@@ -13,13 +13,29 @@ func testEngine(t *testing.T, allowExec bool) *Engine {
 	t.Helper()
 	root := t.TempDir()
 	eng, err := New(Config{
-		Roots: []string{root}, AllowExec: allowExec,
+		Roots: []string{root}, AllowFileWrite: true, AllowExec: allowExec,
 		StateDir: t.TempDir(), MaxReadBytes: 64 * 1024,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return eng
+}
+
+func TestFilesystemWritesAreOptIn(t *testing.T) {
+	eng, err := New(Config{Roots: []string{t.TempDir()}, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.WriteFile(FileWriteInput{Path: "new.txt", Content: "blocked"}); err == nil {
+		t.Fatal("filesystem write unexpectedly succeeded without capability")
+	}
+	if _, err := eng.PatchFile(FilePatchInput{Path: "new.txt", OldText: "x", NewText: "y"}); err == nil {
+		t.Fatal("filesystem patch unexpectedly succeeded without capability")
+	}
+	if err := eng.WriteCheckpoint(CheckpointWriteInput{Workspace: ".", Content: "blocked"}); err == nil {
+		t.Fatal("checkpoint write unexpectedly succeeded without capability")
+	}
 }
 
 func TestPatchFileRequiresExactMatchCount(t *testing.T) {
@@ -161,7 +177,7 @@ func TestMaxActiveTasksHasHardUpperBound(t *testing.T) {
 
 func TestAuditRecordsMethodWithoutPayload(t *testing.T) {
 	root, stateDir := t.TempDir(), t.TempDir()
-	eng, err := New(Config{Roots: []string{root}, StateDir: stateDir})
+	eng, err := New(Config{Roots: []string{root}, AllowFileWrite: true, StateDir: stateDir})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Version = "0.1.0-alpha.4"
+const Version = "0.1.0-alpha.5"
 
 type Caller interface {
 	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)
@@ -41,22 +41,58 @@ func addTool[In, Out any](server *mcp.Server, caller Caller, name, description s
 		}
 		return nil, out, nil
 	}
-	tool := &mcp.Tool{Name: name, Description: description, Annotations: toolAnnotations(name)}
+	tool := &mcp.Tool{Name: name, Title: toolTitle(name), Description: description, Annotations: toolAnnotations(name)}
 	mcp.AddTool(server, tool, handler)
 }
 
 func boolPtr(value bool) *bool { return &value }
 
+var toolTitles = map[string]string{
+	"audit_recent":         "Read recent audit events",
+	"checkpoint_read":      "Read workspace checkpoint",
+	"checkpoint_write":     "Write workspace checkpoint",
+	"computer_click":       "Click pointer",
+	"computer_info":        "Inspect computer capabilities",
+	"computer_key":         "Send keyboard shortcut",
+	"computer_move":        "Move pointer",
+	"computer_observe":     "Observe desktop",
+	"computer_screenshot":  "Capture desktop screenshot",
+	"computer_scroll":      "Scroll desktop",
+	"computer_type":        "Type text",
+	"computer_ui_action":   "Invoke UI action",
+	"computer_ui_find":     "Find UI elements",
+	"computer_ui_focus":    "Focus UI element",
+	"computer_ui_get_text": "Read UI text",
+	"computer_ui_invoke":   "Invoke UI element",
+	"computer_ui_set_text": "Set UI text",
+	"computer_ui_tree":     "Inspect UI tree",
+	"computer_ui_wait":     "Wait for UI element",
+	"fs_list":              "List files",
+	"fs_patch":             "Patch file",
+	"fs_read":              "Read file",
+	"fs_search":            "Search files",
+	"fs_write":             "Write file",
+	"system_info":          "Inspect system",
+	"task_list":            "List tasks",
+	"task_read":            "Read task output",
+	"task_send":            "Send task input",
+	"task_start":           "Start task",
+	"task_stop":            "Stop task",
+	"task_wait":            "Wait for task output",
+}
+
+func toolTitle(name string) string { return toolTitles[name] }
+
 func toolAnnotations(name string) *mcp.ToolAnnotations {
 	switch name {
 	case "system_info", "computer_info", "computer_screenshot", "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "computer_ui_get_text", "task_read", "task_wait", "task_list", "audit_recent", "fs_read", "fs_list", "fs_search", "checkpoint_read":
-		return &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: boolPtr(false)}
+		return &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(false), IdempotentHint: true, OpenWorldHint: boolPtr(false)}
 	case "fs_write", "fs_patch", "checkpoint_write":
-		return &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
+		return &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
 	case "computer_ui_focus", "computer_ui_action", "computer_ui_invoke", "computer_ui_set_text", "computer_move", "computer_click", "computer_scroll", "computer_type", "computer_key", "task_start", "task_send", "task_stop":
-		return &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(true)}
+		return &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(true)}
 	default:
-		return nil
+		return &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(true)}
 	}
 }
 
@@ -78,7 +114,7 @@ func addScreenshotTool(server *mcp.Server, caller Caller) {
 		content := []mcp.Content{&mcp.ImageContent{MIMEType: shot.MIMEType, Data: shot.Data}}
 		return &mcp.CallToolResult{Content: content}, meta, nil
 	}
-	tool := &mcp.Tool{Name: "computer_screenshot", Description: "Capture the current desktop and return it directly as MCP image content for visual reasoning.", Annotations: toolAnnotations("computer_screenshot")}
+	tool := &mcp.Tool{Name: "computer_screenshot", Title: toolTitle("computer_screenshot"), Description: "Capture the current desktop and return it directly as MCP image content for visual reasoning.", Annotations: toolAnnotations("computer_screenshot")}
 	mcp.AddTool(server, tool, handler)
 }
 
@@ -106,7 +142,7 @@ func addObserveTool(server *mcp.Server, caller Caller) {
 		}
 		return &mcp.CallToolResult{Content: content}, meta, nil
 	}
-	tool := &mcp.Tool{Name: "computer_observe", Description: "Observe the current GUI in one call using bounded semantic UI data and an optional screenshot. screenshot=auto avoids image transfer when semantic UI is sufficient.", Annotations: toolAnnotations("computer_observe")}
+	tool := &mcp.Tool{Name: "computer_observe", Title: toolTitle("computer_observe"), Description: "Observe the current GUI in one call using bounded semantic UI data and an optional screenshot. screenshot=auto avoids image transfer when semantic UI is sufficient.", Annotations: toolAnnotations("computer_observe")}
 	mcp.AddTool(server, tool, handler)
 }
 

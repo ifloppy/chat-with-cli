@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,6 +29,8 @@ const (
 	codeLifetime    = 5 * time.Minute
 	pendingLifetime = 10 * time.Minute
 	maxClients      = 2048
+	maxPendingAuth  = 1024
+	maxPendingIP    = 8
 )
 
 type Config struct {
@@ -36,6 +39,18 @@ type Config struct {
 	Mode          string
 	OwnerUsername string
 	OwnerPassword string
+	// RegistrationDisabled closes public account registration. Private mode is
+	// always closed regardless of this value.
+	RegistrationDisabled bool
+	// TrustedProxyCIDRs controls whether X-Forwarded-For/X-Real-IP are used for
+	// abuse limits. No proxy headers are trusted when it is empty.
+	TrustedProxyCIDRs []string
+	// SetupToken enables the local first-run setup endpoint. It is intentionally
+	// supplied out-of-band and is never persisted in OAuth state.
+	SetupToken     string
+	SetupTokenPath string
+	Version        string
+	GitHubURL      string
 	// Password is the legacy private-instance bootstrap password alias.
 	Password string
 }
@@ -53,16 +68,49 @@ type tokenRecord struct {
 	UserID   string `json:"user_id"`
 	Resource string `json:"resource"`
 	Scope    string `json:"scope"`
+	Family   string `json:"family,omitempty"`
 	Expires  int64  `json:"expires"`
 }
 
 type diskState struct {
-	Clients  map[string]Client        `json:"clients"`
-	Access   map[string]tokenRecord   `json:"access"`
-	Refresh  map[string]tokenRecord   `json:"refresh"`
-	Users    map[string]User          `json:"users"`
-	Devices  map[string]string        `json:"devices"`
-	Sessions map[string]sessionRecord `json:"sessions"`
+	Clients         map[string]Client        `json:"clients"`
+	Access          map[string]tokenRecord   `json:"access"`
+	Refresh         map[string]tokenRecord   `json:"refresh"`
+	RefreshUsed     map[string]tokenRecord   `json:"refresh_used,omitempty"`
+	Users           map[string]User          `json:"users"`
+	Devices         map[string]string        `json:"devices"`
+	DisabledDevices map[string]bool          `json:"disabled_devices,omitempty"`
+	DeviceRecords   map[string]DeviceRecord  `json:"device_records,omitempty"`
+	Sessions        map[string]sessionRecord `json:"sessions"`
+	Settings        *settingsState           `json:"settings,omitempty"`
+	SecurityEvents  []SecurityEvent          `json:"security_events,omitempty"`
+}
+
+type settingsState struct {
+	Mode                string `json:"mode"`
+	RegistrationEnabled bool   `json:"registration_enabled"`
+	DCREnabled          bool   `json:"dcr_enabled"`
+	MCPEnabled          bool   `json:"mcp_enabled"`
+	AgentEnabled        bool   `json:"agent_enabled"`
+	KillSwitch          bool   `json:"kill_switch"`
+}
+
+type SecurityEvent struct {
+	Time     time.Time `json:"time"`
+	Event    string    `json:"event"`
+	User     string    `json:"user,omitempty"`
+	Device   string    `json:"device,omitempty"`
+	RemoteIP string    `json:"remote_ip,omitempty"`
+	Success  bool      `json:"success"`
+}
+
+type DeviceRecord struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	OwnerID     string `json:"owner_id"`
+	CreatedAt   int64  `json:"created_at"`
+	LastSeenAt  int64  `json:"last_seen_at,omitempty"`
+	Disabled    bool   `json:"disabled,omitempty"`
 }
 type pendingAuth struct {
 	ClientID      string
@@ -71,6 +119,8 @@ type pendingAuth struct {
 	Scope         string
 	Resource      string
 	CodeChallenge string
+	CSRFTokenHash string
+	RemoteIP      string
 	Expires       time.Time
 	Attempts      int
 	UserID        string
@@ -82,20 +132,43 @@ type authCode struct {
 }
 
 type Server struct {
-	cfg           Config
-	base          *url.URL
-	mu            sync.Mutex
-	clients       map[string]Client
-	access        map[string]tokenRecord
-	refresh       map[string]tokenRecord
-	pending       map[string]pendingAuth
-	codes         map[string]authCode
-	users         map[string]User
-	usernames     map[string]string
-	devices       map[string]string
-	sessions      map[string]sessionRecord
-	passwordSlots chan struct{}
-	stateFile     string
+	cfg                 Config
+	base                *url.URL
+	mu                  sync.Mutex
+	clients             map[string]Client
+	access              map[string]tokenRecord
+	refresh             map[string]tokenRecord
+	refreshUsed         map[string]tokenRecord
+	pending             map[string]pendingAuth
+	codes               map[string]authCode
+	users               map[string]User
+	usernames           map[string]string
+	devices             map[string]string
+	disabledDevices     map[string]bool
+	deviceRecords       map[string]DeviceRecord
+	sessions            map[string]sessionRecord
+	passwordSlots       chan struct{}
+	stateFile           string
+	registrationEnabled bool
+	dcrEnabled          bool
+	mcpEnabled          bool
+	agentEnabled        bool
+	killSwitch          bool
+	trustedProxies      []*net.IPNet
+	rateMu              sync.Mutex
+	rates               map[string]rateWindow
+	setupTokenHash      string
+	setupTokenPath      string
+	securityEvents      []SecurityEvent
+	statusProvider      func() map[string]DeviceStatus
+}
+
+type DeviceStatus struct {
+	Device      string
+	Online      bool
+	ConnectedAt time.Time
+	LastSeen    time.Time
+	InFlight    int
 }
 
 func New(cfg Config) (*Server, error) {
@@ -117,8 +190,18 @@ func New(cfg Config) (*Server, error) {
 	if cfg.StateDir == "" {
 		return nil, errors.New("OAuth state directory must not be empty")
 	}
+	trustedProxies, err := parseTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create OAuth state directory: %w", err)
+	}
+	if info, err := os.Lstat(cfg.StateDir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err != nil {
+			return nil, fmt.Errorf("inspect OAuth state directory: %w", err)
+		}
+		return nil, errors.New("OAuth state directory must be a real directory")
 	}
 	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure OAuth state directory: %w", err)
@@ -126,26 +209,39 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		cfg: cfg, base: base,
 		clients: make(map[string]Client), access: make(map[string]tokenRecord),
-		refresh: make(map[string]tokenRecord), pending: make(map[string]pendingAuth),
+		refresh: make(map[string]tokenRecord), refreshUsed: make(map[string]tokenRecord), pending: make(map[string]pendingAuth),
 		codes: make(map[string]authCode), users: make(map[string]User), usernames: make(map[string]string),
-		devices: make(map[string]string), sessions: make(map[string]sessionRecord), passwordSlots: make(chan struct{}, 4),
-		stateFile: filepath.Join(cfg.StateDir, "oauth-state.json"),
+		devices: make(map[string]string), disabledDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), passwordSlots: make(chan struct{}, 4),
+		stateFile:           filepath.Join(cfg.StateDir, "oauth-state.json"),
+		registrationEnabled: mode == ModePublic && !cfg.RegistrationDisabled,
+		dcrEnabled:          true,
+		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
+		rates: make(map[string]rateWindow), setupTokenPath: cfg.SetupTokenPath,
+	}
+	if cfg.SetupToken != "" {
+		s.setupTokenHash = tokenKey(cfg.SetupToken)
 	}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
-	if mode == ModePrivate && len(s.users) == 0 {
+	if len(s.users) > 0 {
+		s.setupTokenHash = ""
+	}
+	if s.cfg.Mode == ModePrivate && len(s.users) == 0 {
 		if cfg.OwnerPassword == "" {
-			return nil, errors.New("private instance has no owner yet; provide an owner bootstrap password")
-		}
-		s.mu.Lock()
-		_, err = s.createUserLocked(cfg.OwnerUsername, cfg.OwnerPassword)
-		if err == nil {
-			err = s.saveLocked()
-		}
-		s.mu.Unlock()
-		if err != nil {
-			return nil, fmt.Errorf("create private owner: %w", err)
+			if s.setupTokenHash == "" {
+				return nil, errors.New("private instance has no owner yet; provide an owner bootstrap password or setup token")
+			}
+		} else {
+			s.mu.Lock()
+			_, err = s.createUserLocked(cfg.OwnerUsername, cfg.OwnerPassword, true)
+			if err == nil {
+				err = s.saveLocked()
+			}
+			s.mu.Unlock()
+			if err != nil {
+				return nil, fmt.Errorf("create private owner: %w", err)
+			}
 		}
 	}
 	return s, nil
@@ -187,66 +283,158 @@ func tokenKey(token string) string {
 func (s *Server) absolute(path string) string {
 	return strings.TrimRight(s.base.String(), "/") + path
 }
+
+const oauthCSRFCookie = "cwc_oauth_csrf"
+
+func (s *Server) setCSRFCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: oauthCSRFCookie, Value: token, Path: "/oauth/authorize", MaxAge: int(pendingLifetime.Seconds()),
+		HttpOnly: true, Secure: s.base.Scheme == "https", SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func csrfMatches(r *http.Request, expectedHash string) bool {
+	if expectedHash == "" {
+		return false
+	}
+	cookie, err := r.Cookie(oauthCSRFCookie)
+	if err != nil || cookie.Value == "" || r.FormValue("csrf_token") == "" {
+		return false
+	}
+	provided := r.FormValue("csrf_token")
+	return len(cookie.Value) == len(provided) &&
+		subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(provided)) == 1 &&
+		len(expectedHash) == len(tokenKey(provided)) &&
+		subtle.ConstantTimeCompare([]byte(expectedHash), []byte(tokenKey(provided))) == 1
+}
+
 func (s *Server) load() error {
-	data, err := os.ReadFile(s.stateFile)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read OAuth state: %w", err)
-	}
-	var state diskState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return fmt.Errorf("decode OAuth state: %w", err)
-	}
-	if state.Clients != nil {
-		s.clients = state.Clients
-	}
-	if state.Access != nil {
-		s.access = state.Access
-	}
-	if state.Refresh != nil {
-		s.refresh = state.Refresh
-	}
-	if state.Users != nil {
-		s.users = state.Users
-	}
-	if state.Devices != nil {
-		s.devices = state.Devices
-	}
-	if state.Sessions != nil {
-		s.sessions = state.Sessions
-	}
-	for id, user := range s.users {
-		if normalized, ok := normalizeUsername(user.Username); ok {
-			s.usernames[normalized] = id
+	return withStateFileLock(s.stateFile, func() error {
+		if info, err := os.Lstat(s.stateFile); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("OAuth state file must not be a symlink")
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect OAuth state: %w", err)
 		}
-	}
-	s.cleanupLocked(time.Now())
-	return s.saveLocked()
+		data, err := os.ReadFile(s.stateFile)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read OAuth state: %w", err)
+		}
+		var state diskState
+		if err := json.Unmarshal(data, &state); err != nil {
+			return fmt.Errorf("decode OAuth state: %w", err)
+		}
+		if state.Clients != nil {
+			s.clients = state.Clients
+		}
+		if state.Access != nil {
+			s.access = state.Access
+		}
+		if state.Refresh != nil {
+			s.refresh = state.Refresh
+		}
+		if state.RefreshUsed != nil {
+			s.refreshUsed = state.RefreshUsed
+		}
+		if state.Users != nil {
+			s.users = state.Users
+		}
+		if state.Devices != nil {
+			s.devices = state.Devices
+		}
+		if state.DisabledDevices != nil {
+			s.disabledDevices = state.DisabledDevices
+		}
+		if state.DeviceRecords != nil {
+			s.deviceRecords = state.DeviceRecords
+		}
+		if state.Sessions != nil {
+			s.sessions = state.Sessions
+		}
+		if state.Settings != nil {
+			if persistedMode, err := normalizeMode(state.Settings.Mode); err == nil && state.Settings.Mode != "" {
+				s.cfg.Mode = persistedMode
+			}
+			s.registrationEnabled = state.Settings.RegistrationEnabled && s.cfg.Mode == ModePublic
+			s.dcrEnabled = state.Settings.DCREnabled
+			s.mcpEnabled = state.Settings.MCPEnabled
+			s.agentEnabled = state.Settings.AgentEnabled
+			s.killSwitch = state.Settings.KillSwitch
+		}
+		if state.SecurityEvents != nil {
+			s.securityEvents = append([]SecurityEvent(nil), state.SecurityEvents...)
+		}
+		for id, user := range s.users {
+			if normalized, ok := normalizeUsername(user.Username); ok {
+				s.usernames[normalized] = id
+			}
+			if !user.Admin && strings.EqualFold(user.Username, s.cfg.OwnerUsername) && s.cfg.Mode == ModePrivate {
+				user.Admin = true
+				s.users[id] = user
+			}
+		}
+		for route, ownerID := range s.devices {
+			s.ensureDeviceRecordLocked(route, ownerID)
+		}
+		s.cleanupLocked(time.Now())
+		return s.saveLockedUnlocked()
+	})
 }
 
 func (s *Server) saveLocked() error {
-	approvedClients := make(map[string]Client)
-	for id, client := range s.clients {
-		if client.Approved {
-			approvedClients[id] = client
-		}
+	return withStateFileLock(s.stateFile, s.saveLockedUnlocked)
+}
+
+func (s *Server) saveLockedUnlocked() error {
+	registrationEnabled := s.registrationEnabled && s.cfg.Mode == ModePublic
+	state := diskState{
+		Clients: s.clients, Access: s.access, Refresh: s.refresh, RefreshUsed: s.refreshUsed,
+		Users: s.users, Devices: s.devices, DisabledDevices: s.disabledDevices, DeviceRecords: s.deviceRecords, Sessions: s.sessions,
+		Settings:       &settingsState{Mode: s.cfg.Mode, RegistrationEnabled: registrationEnabled, DCREnabled: s.dcrEnabled, MCPEnabled: s.mcpEnabled, AgentEnabled: s.agentEnabled, KillSwitch: s.killSwitch},
+		SecurityEvents: append([]SecurityEvent(nil), s.securityEvents...),
 	}
-	state := diskState{Clients: approvedClients, Access: s.access, Refresh: s.refresh, Users: s.users, Devices: s.devices, Sessions: s.sessions}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.stateFile + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+	if info, err := os.Lstat(s.stateFile); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("OAuth state file must not be a symlink")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
+	tmpFile, err := os.CreateTemp(filepath.Dir(s.stateFile), ".oauth-state-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.stateFile)
+	tmp := tmpFile.Name()
+	defer os.Remove(tmp)
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if _, err := tmpFile.Write(append(data, '\n')); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.stateFile); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(s.stateFile))
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	_ = dir.Close()
+	return err
 }
 
 func (s *Server) cleanupLocked(now time.Time) {
@@ -259,6 +447,11 @@ func (s *Server) cleanupLocked(now time.Time) {
 	for key, rec := range s.refresh {
 		if rec.Expires <= unix || rec.UserID == "" || s.users[rec.UserID].ID == "" {
 			delete(s.refresh, key)
+		}
+	}
+	for key, rec := range s.refreshUsed {
+		if rec.Expires <= unix || rec.UserID == "" || s.users[rec.UserID].ID == "" {
+			delete(s.refreshUsed, key)
 		}
 	}
 	for key, rec := range s.access {
@@ -288,10 +481,19 @@ func (s *Server) cleanupLocked(now time.Time) {
 	}
 }
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /{$}", s.handleLanding)
+	mux.HandleFunc("GET /setup", s.handleSetupGET)
+	mux.HandleFunc("POST /setup", s.handleSetupPOST)
+	mux.HandleFunc("GET /admin", s.handleAdmin)
+	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
+	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
+	mux.HandleFunc("POST /admin/action", s.handleAdminAction)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleAuthorizationMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleRootResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/{device}", s.handleMCPResourceMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/id/{id}", s.handleMCPResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/agent/{device}", s.handleAgentResourceMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/agent/id/{id}", s.handleAgentResourceMetadata)
 	mux.HandleFunc("POST /oauth/register", s.handleRegister)
 	mux.HandleFunc("GET /oauth/authorize", s.handleAuthorizeGET)
 	mux.HandleFunc("POST /oauth/authorize", s.handleAuthorizePOST)
@@ -345,7 +547,15 @@ func (s *Server) handleAgentResourceMetadata(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleDeviceResourceMetadata(w http.ResponseWriter, r *http.Request, kind, scope string) {
 	device := strings.TrimSpace(r.PathValue("device"))
-	if !protocol.ValidDeviceName(device) {
+	if device == "" {
+		id := strings.TrimSpace(r.PathValue("id"))
+		if !protocol.ValidDeviceID(id) {
+			http.NotFound(w, r)
+			return
+		}
+		device = "id/" + id
+	}
+	if !protocol.ValidDeviceName(device) && !(strings.HasPrefix(device, "id/") && protocol.ValidDeviceID(strings.TrimPrefix(device, "id/"))) {
 		http.NotFound(w, r)
 		return
 	}
@@ -355,14 +565,14 @@ func (s *Server) handleDeviceResourceMetadata(w http.ResponseWriter, r *http.Req
 
 func validRedirectURI(raw string) bool {
 	u, err := url.Parse(raw)
-	if err != nil || !u.IsAbs() || u.Fragment != "" || u.User != nil {
+	if err != nil || !u.IsAbs() || u.Host == "" || u.Fragment != "" || u.User != nil {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	if u.Scheme == "https" {
+	if strings.EqualFold(u.Scheme, "https") {
 		return true
 	}
-	return u.Scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
+	return strings.EqualFold(u.Scheme, "http") && (host == "localhost" || host == "127.0.0.1" || host == "::1")
 }
 
 type registrationRequest struct {
@@ -384,6 +594,17 @@ func contains(values []string, want string) bool {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(r, "dcr", 30, time.Minute) {
+		rateLimited(w, 60)
+		return
+	}
+	s.mu.Lock()
+	dcrEnabled := s.dcrEnabled
+	s.mu.Unlock()
+	if !dcrEnabled {
+		oauthError(w, http.StatusForbidden, "access_denied", "dynamic client registration is disabled")
+		return
+	}
 	body := http.MaxBytesReader(w, r.Body, 64<<10)
 	defer body.Close()
 	var req registrationRequest
@@ -393,6 +614,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.RedirectURIs) == 0 || len(req.RedirectURIs) > 8 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_redirect_uri"})
+		return
+	}
+	if len(req.ClientName) > 256 || len(req.Scope) > 512 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "client metadata is too large"})
 		return
 	}
 	for _, redirect := range req.RedirectURIs {
@@ -434,6 +659,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	clientID := randomToken(24)
 	client := Client{ID: clientID, Name: strings.TrimSpace(req.ClientName), RedirectURIs: append([]string(nil), req.RedirectURIs...), IssuedAt: time.Now().Unix()}
 	s.clients[clientID] = client
+	if err := s.saveLocked(); err != nil {
+		delete(s.clients, clientID)
+		oauthError(w, http.StatusInternalServerError, "server_error", "failed to persist client registration")
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id": clientID, "client_id_issued_at": client.IssuedAt, "client_name": client.Name,
 		"redirect_uris": client.RedirectURIs, "token_endpoint_auth_method": "none",
@@ -451,10 +681,46 @@ func (s *Server) resourceParts(raw string) (kind, device, canonical string, ok b
 		return "", "", "", false
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) != 2 || (parts[0] != "mcp" && parts[0] != "agent") || !protocol.ValidDeviceName(parts[1]) {
+	if len(parts) < 2 || len(parts) > 3 || (parts[0] != "mcp" && parts[0] != "agent") {
 		return "", "", "", false
 	}
-	return parts[0], parts[1], s.absolute("/" + parts[0] + "/" + parts[1]), true
+	device = parts[1]
+	if len(parts) == 2 {
+		if !protocol.ValidDeviceName(device) {
+			return "", "", "", false
+		}
+	} else {
+		if parts[1] != "id" || !protocol.ValidDeviceID(parts[2]) {
+			return "", "", "", false
+		}
+		device = "id/" + parts[2]
+	}
+	return parts[0], device, s.absolute("/" + parts[0] + "/" + strings.Join(parts[1:], "/")), true
+}
+
+func (s *Server) ensureDeviceRecordLocked(route, ownerID string) DeviceRecord {
+	record := s.deviceRecords[route]
+	if record.ID == "" {
+		if strings.HasPrefix(route, "id/") && protocol.ValidDeviceID(strings.TrimPrefix(route, "id/")) {
+			record.ID = strings.TrimPrefix(route, "id/")
+		} else {
+			record.ID = protocol.NewID()
+		}
+	}
+	if record.DisplayName == "" {
+		record.DisplayName = strings.TrimPrefix(route, "id/")
+	}
+	if record.OwnerID == "" {
+		record.OwnerID = ownerID
+	}
+	if record.CreatedAt == 0 {
+		record.CreatedAt = time.Now().Unix()
+	}
+	if s.disabledDevices[route] {
+		record.Disabled = true
+	}
+	s.deviceRecords[route] = record
+	return record
 }
 
 func (s *Server) validateResource(raw string) (string, bool) {
@@ -498,6 +764,10 @@ func exactRedirect(client Client, redirect string) bool {
 }
 
 func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(r, "authorize-get", 60, time.Minute) {
+		rateLimited(w, 60)
+		return
+	}
 	q := r.URL.Query()
 	if q.Get("response_type") != "code" || q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth client must use authorization code with PKCE S256")
@@ -505,6 +775,10 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 	}
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
+	if len(clientID) == 0 || len(clientID) > 256 || len(redirectURI) == 0 || len(redirectURI) > 2048 || len(q.Get("state")) > 512 || len(q.Get("code_challenge")) != 43 {
+		s.oauthPageError(w, http.StatusBadRequest, "OAuth authorization request is too large or has invalid PKCE parameters")
+		return
+	}
 	kind, _, resource, ok := s.resourceParts(q.Get("resource"))
 	if !ok {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth resource must be a local /mcp/<device> or /agent/<device> URL")
@@ -516,6 +790,8 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	csrfToken := randomToken(24)
+	remoteIP := requestIP(r, s.trustedProxies)
 	s.mu.Lock()
 	s.cleanupLocked(time.Now())
 	client, exists := s.clients[clientID]
@@ -524,35 +800,60 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		s.oauthPageError(w, http.StatusBadRequest, "unknown client or redirect URI")
 		return
 	}
+	if len(s.pending) >= maxPendingAuth {
+		s.mu.Unlock()
+		rateLimited(w, 60)
+		return
+	}
+	pendingForIP := 0
+	for _, pending := range s.pending {
+		if pending.RemoteIP == remoteIP {
+			pendingForIP++
+		}
+	}
+	if pendingForIP >= maxPendingIP {
+		s.mu.Unlock()
+		rateLimited(w, 60)
+		return
+	}
 	requestID := randomToken(24)
 	s.pending[requestID] = pendingAuth{
 		ClientID: clientID, RedirectURI: redirectURI, State: q.Get("state"), Scope: scope,
-		Resource: resource, CodeChallenge: q.Get("code_challenge"), Expires: time.Now().Add(pendingLifetime),
+		Resource: resource, CodeChallenge: q.Get("code_challenge"), CSRFTokenHash: tokenKey(csrfToken), RemoteIP: remoteIP,
+		Expires: time.Now().Add(pendingLifetime),
 	}
 	s.mu.Unlock()
+	s.setCSRFCookie(w, csrfToken)
 	user, loggedIn := s.sessionUser(r)
-	s.renderAuthorization(w, requestID, client, resource, scope, user, loggedIn)
+	s.renderAuthorizationWithCSRF(w, requestID, client, resource, scope, csrfToken, user, loggedIn)
 }
 
 var authorizationTemplate = template.Must(template.New("authorization").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Authorize chat-with-cli</title><style>body{font:16px system-ui;max-width:620px;margin:6vh auto;padding:24px}input,button{font:inherit;padding:10px;width:100%;box-sizing:border-box}button{margin-top:12px}.meta,form{background:#f3f3f3;padding:14px;border-radius:8px;margin-top:14px}.secondary{background:#fafafa}</style></head><body>
 <h1>Authorize chat-with-cli</h1><div class="meta"><b>Client:</b> {{.Client}}<br><b>Resource:</b> {{.Resource}}<br><b>Scope:</b> {{.Scope}}</div>
-{{if .LoggedIn}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><p>Signed in as <b>{{.Username}}</b>.</p><button name="decision" value="allow" type="submit">Authorize</button><button name="decision" value="deny" type="submit">Deny</button><button name="decision" value="logout" type="submit">Sign out</button></form>
-{{else}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><h2>Sign in</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="current-password" placeholder="Password" required><button name="decision" value="login" type="submit">Sign in and authorize</button></form>
-{{if .Public}}<form class="secondary" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><h2>Create account</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="new-password" placeholder="Password (12+ characters)" minlength="12" required><button name="decision" value="register" type="submit">Register and authorize</button></form>{{end}}{{end}}
+{{if .LoggedIn}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><p>Signed in as <b>{{.Username}}</b>.</p><button name="decision" value="allow" type="submit">Authorize</button><button name="decision" value="deny" type="submit">Deny</button><button name="decision" value="logout" type="submit">Sign out</button></form>
+{{else}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Sign in</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="current-password" placeholder="Password" required><button name="decision" value="login" type="submit">Sign in and authorize</button></form>
+{{if .Public}}<form class="secondary" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Create account</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="new-password" placeholder="Password (12+ characters)" minlength="12" required><button name="decision" value="register" type="submit">Register and authorize</button></form>{{end}}{{end}}
 </body></html>`))
 
 func (s *Server) renderAuthorization(w http.ResponseWriter, requestID string, client Client, resource, scope string, user User, loggedIn bool) {
+	s.renderAuthorizationWithCSRF(w, requestID, client, resource, scope, "", user, loggedIn)
+}
+
+func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID string, client Client, resource, scope, csrfToken string, user User, loggedIn bool) {
 	name := strings.TrimSpace(client.Name)
 	if name == "" {
 		name = client.ID
 	}
+	s.mu.Lock()
+	publicRegistration := s.cfg.Mode == ModePublic && s.registrationEnabled
+	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = authorizationTemplate.Execute(w, map[string]any{
 		"RequestID": requestID, "Client": name, "Resource": resource, "Scope": scope,
-		"LoggedIn": loggedIn, "Username": user.Username, "Public": s.cfg.Mode == ModePublic,
+		"CSRFToken": csrfToken, "LoggedIn": loggedIn, "Username": user.Username, "Public": publicRegistration,
 	})
 }
 
@@ -595,6 +896,11 @@ func (s *Server) failAuthorization(requestID string) (int, bool) {
 }
 
 func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(r, "authorize-post", 30, time.Minute) {
+		rateLimited(w, 60)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	if err := r.ParseForm(); err != nil {
 		s.oauthPageError(w, http.StatusBadRequest, "invalid form")
 		return
@@ -608,13 +914,23 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 		s.oauthPageError(w, http.StatusBadRequest, "authorization request expired")
 		return
 	}
+	if !csrfMatches(r, pending.CSRFTokenHash) {
+		s.oauthPageError(w, http.StatusForbidden, "invalid authorization form")
+		return
+	}
 	decision := r.Form.Get("decision")
 	if decision == "logout" {
 		s.clearSession(w, r)
+		csrfToken := randomToken(24)
 		s.mu.Lock()
 		client := s.clients[pending.ClientID]
+		if current, exists := s.pending[requestID]; exists {
+			current.CSRFTokenHash = tokenKey(csrfToken)
+			s.pending[requestID] = current
+		}
 		s.mu.Unlock()
-		s.renderAuthorization(w, requestID, client, pending.Resource, pending.Scope, User{}, false)
+		s.setCSRFCookie(w, csrfToken)
+		s.renderAuthorizationWithCSRF(w, requestID, client, pending.Resource, pending.Scope, csrfToken, User{}, false)
 		return
 	}
 	if decision == "deny" {
@@ -638,7 +954,10 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "register":
-		if s.cfg.Mode != ModePublic {
+		s.mu.Lock()
+		registrationEnabled := s.cfg.Mode == ModePublic && s.registrationEnabled
+		s.mu.Unlock()
+		if !registrationEnabled {
 			s.oauthPageError(w, http.StatusForbidden, "registration is disabled on this private instance")
 			return
 		}
@@ -690,10 +1009,23 @@ func (s *Server) authorizeResourceLocked(userID, resource string) error {
 	if s.users[userID].ID == "" {
 		return errors.New("unknown authorization user")
 	}
+	if s.killSwitch || (kind == "mcp" && !s.mcpEnabled) || (kind == "agent" && !s.agentEnabled) {
+		return errors.New("this capability is temporarily disabled by the administrator")
+	}
+	if s.disabledDevices[device] {
+		return errors.New("this device is disabled")
+	}
 	owner := s.devices[device]
+	record := s.ensureDeviceRecordLocked(device, owner)
+	if record.Disabled {
+		return errors.New("this device is disabled")
+	}
 	if kind == "agent" {
 		if owner == "" {
 			s.devices[device] = userID
+			record = s.ensureDeviceRecordLocked(device, userID)
+			record.OwnerID = userID
+			s.deviceRecords[device] = record
 			return nil
 		}
 		if owner != userID {
@@ -758,11 +1090,18 @@ func oauthError(w http.ResponseWriter, status int, code, description string) {
 }
 
 func (s *Server) issueTokensLocked(clientID, userID, resource, scope string) (access, refresh string, expiresIn int64, err error) {
+	return s.issueTokensInFamilyLocked(clientID, userID, resource, scope, randomToken(24))
+}
+
+func (s *Server) issueTokensInFamilyLocked(clientID, userID, resource, scope, family string) (access, refresh string, expiresIn int64, err error) {
 	now := time.Now()
 	access = randomToken(32)
 	refresh = randomToken(48)
-	s.access[tokenKey(access)] = tokenRecord{ClientID: clientID, UserID: userID, Resource: resource, Scope: scope, Expires: now.Add(accessLifetime).Unix()}
-	s.refresh[tokenKey(refresh)] = tokenRecord{ClientID: clientID, UserID: userID, Resource: resource, Scope: scope, Expires: now.Add(refreshLifetime).Unix()}
+	if family == "" {
+		family = randomToken(24)
+	}
+	s.access[tokenKey(access)] = tokenRecord{ClientID: clientID, UserID: userID, Resource: resource, Scope: scope, Family: family, Expires: now.Add(accessLifetime).Unix()}
+	s.refresh[tokenKey(refresh)] = tokenRecord{ClientID: clientID, UserID: userID, Resource: resource, Scope: scope, Family: family, Expires: now.Add(refreshLifetime).Unix()}
 	if err = s.saveLocked(); err != nil {
 		delete(s.access, tokenKey(access))
 		delete(s.refresh, tokenKey(refresh))
@@ -771,6 +1110,11 @@ func (s *Server) issueTokensLocked(clientID, userID, resource, scope string) (ac
 	return access, refresh, int64(accessLifetime.Seconds()), nil
 }
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(r, "token", 120, time.Minute) {
+		rateLimited(w, 60)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "invalid form")
 		return
@@ -829,15 +1173,24 @@ func (s *Server) exchangeRefresh(w http.ResponseWriter, r *http.Request) {
 	key := tokenKey(refreshValue)
 	record, ok := s.refresh[key]
 	if !ok || record.ClientID != clientID {
+		if used, replay := s.refreshUsed[key]; replay && (clientID == "" || used.ClientID == clientID) {
+			s.revokeFamilyLocked(used.Family)
+			_ = s.saveLocked()
+		}
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
 		return
 	}
 	delete(s.refresh, key)
-	access, refresh, expires, err := s.issueTokensLocked(record.ClientID, record.UserID, record.Resource, record.Scope)
+	if record.Family == "" {
+		record.Family = randomToken(24)
+	}
+	s.refreshUsed[key] = record
+	access, refresh, expires, err := s.issueTokensInFamilyLocked(record.ClientID, record.UserID, record.Resource, record.Scope, record.Family)
 	if err != nil {
 		// Keep the old refresh token usable in-memory if persistence of the
 		// replacement failed. This avoids turning a transient disk failure into
 		// an unnecessary re-authorization requirement.
+		delete(s.refreshUsed, key)
 		s.refresh[key] = record
 		oauthError(w, http.StatusInternalServerError, "server_error", "failed to persist token state")
 		return
@@ -847,15 +1200,47 @@ func (s *Server) exchangeRefresh(w http.ResponseWriter, r *http.Request) {
 		"refresh_token": refresh, "scope": record.Scope,
 	})
 }
+
+func (s *Server) revokeFamilyLocked(family string) {
+	if family == "" {
+		return
+	}
+	for key, record := range s.access {
+		if record.Family == family {
+			delete(s.access, key)
+		}
+	}
+	for key, record := range s.refresh {
+		if record.Family == family {
+			delete(s.refresh, key)
+		}
+	}
+	for key, record := range s.refreshUsed {
+		if record.Family == family {
+			delete(s.refreshUsed, key)
+		}
+	}
+}
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(r, "revoke", 60, time.Minute) {
+		rateLimited(w, 60)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	if err := r.ParseForm(); err != nil {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	key := tokenKey(r.Form.Get("token"))
 	s.mu.Lock()
+	if record, ok := s.refresh[key]; ok {
+		s.revokeFamilyLocked(record.Family)
+	} else if record, ok := s.refreshUsed[key]; ok {
+		s.revokeFamilyLocked(record.Family)
+	}
 	delete(s.access, key)
 	delete(s.refresh, key)
+	delete(s.refreshUsed, key)
 	_ = s.saveLocked()
 	s.mu.Unlock()
 	w.Header().Set("Cache-Control", "no-store")
@@ -886,8 +1271,19 @@ func (s *Server) VerifyAccessScope(token, resource, requiredScope string) bool {
 	defer s.mu.Unlock()
 	s.cleanupLocked(time.Now())
 	record, ok := s.access[tokenKey(token)]
-	return ok && record.UserID != "" && record.Resource == resource &&
+	if !ok || !s.resourceEnabledLocked(resource, requiredScope) {
+		return false
+	}
+	return record.UserID != "" && record.Resource == resource &&
 		strings.Contains(" "+record.Scope+" ", " "+requiredScope+" ")
+}
+
+func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
+	if s.killSwitch || (requiredScope == "mcp" && !s.mcpEnabled) || (requiredScope == "agent:connect" && !s.agentEnabled) {
+		return false
+	}
+	_, device, _, ok := s.resourceParts(resource)
+	return ok && !s.disabledDevices[device]
 }
 
 func (s *Server) ProtectResource(staticToken string, next http.Handler) http.Handler {
@@ -896,12 +1292,19 @@ func (s *Server) ProtectResource(staticToken string, next http.Handler) http.Han
 
 func (s *Server) ProtectScopedResource(staticToken, requiredScope string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resource := s.absolute(r.URL.EscapedPath())
+		s.mu.Lock()
+		enabled := s.resourceEnabledLocked(resource, requiredScope)
+		s.mu.Unlock()
+		if !enabled {
+			http.Error(w, "capability disabled", http.StatusServiceUnavailable)
+			return
+		}
 		token := bearerValue(r.Header.Get("Authorization"))
 		if staticToken != "" && len(token) == len(staticToken) && subtle.ConstantTimeCompare([]byte(token), []byte(staticToken)) == 1 {
 			next.ServeHTTP(w, r)
 			return
 		}
-		resource := s.absolute(r.URL.EscapedPath())
 		if s.VerifyAccessScope(token, resource, requiredScope) {
 			next.ServeHTTP(w, r)
 			return
