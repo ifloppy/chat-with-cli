@@ -384,21 +384,10 @@ func (e *Engine) savePortalRestoreTokenLocked(token string) error {
 		return nil
 	}
 	dir := filepath.Dir(e.portalTokenPath())
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ensurePrivateDir(dir); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
-	tmp := e.portalTokenPath() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(e.portalRestoreToken+"\n"), 0o600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, e.portalTokenPath())
+	return atomicWriteFileMode(e.portalTokenPath(), []byte(e.portalRestoreToken+"\n"), 0o600)
 }
 
 func (e *Engine) ensurePortalConnLocked() error {

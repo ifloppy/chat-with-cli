@@ -75,6 +75,13 @@ func (e *Engine) WriteFile(in FileWriteInput) error {
 	case "", "rewrite":
 		return atomicWriteFile(path, []byte(in.Content))
 	case "append":
+		if info, err := os.Lstat(path); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return errors.New("refusing to append to a non-regular file or symlink")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			return err
@@ -268,7 +275,7 @@ func (e *Engine) checkpointPath(workspace string) (string, string, error) {
 	sum := sha256.Sum256([]byte(resolved))
 	key := hex.EncodeToString(sum[:16])
 	dir := filepath.Join(e.cfg.StateDir, "checkpoints")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ensurePrivateDir(dir); err != nil {
 		return "", "", err
 	}
 	return resolved, filepath.Join(dir, key+".md"), nil

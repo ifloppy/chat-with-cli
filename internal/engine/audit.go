@@ -21,10 +21,7 @@ type auditLog struct {
 
 func newAuditLog(stateDir string) (*auditLog, error) {
 	dir := filepath.Join(stateDir, "audit")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := ensurePrivateDir(dir); err != nil {
 		return nil, err
 	}
 	return &auditLog{path: filepath.Join(dir, "events.jsonl")}, nil
@@ -40,6 +37,13 @@ func (a *auditLog) record(method string, started time.Time, callErr error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if info, err := os.Lstat(a.path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return
+	}
 	_ = a.rotateLocked(int64(len(data) + 1))
 	file, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -51,11 +55,17 @@ func (a *auditLog) record(method string, started time.Time, callErr error) {
 }
 
 func (a *auditLog) rotateLocked(incoming int64) error {
-	info, err := os.Stat(a.path)
+	info, err := os.Lstat(a.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil || info.Size()+incoming <= maxAuditLogBytes {
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		if err != nil {
+			return err
+		}
+		return errors.New("audit log must be a regular file")
+	}
+	if info.Size()+incoming <= maxAuditLogBytes {
 		return err
 	}
 	rotated := a.path + ".1"

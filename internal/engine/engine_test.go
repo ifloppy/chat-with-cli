@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,21 @@ func TestFilesystemWritesAreOptIn(t *testing.T) {
 	}
 	if err := eng.WriteCheckpoint(CheckpointWriteInput{Workspace: ".", Content: "blocked"}); err == nil {
 		t.Fatal("checkpoint write unexpectedly succeeded without capability")
+	}
+}
+
+func TestEngineRejectsSymlinkedStateDirectory(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "state")
+	if err := os.Symlink(target, link); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skip("symlinks are unavailable")
+		}
+		t.Fatal(err)
+	}
+	_, err := New(Config{Roots: []string{t.TempDir()}, StateDir: link})
+	if err == nil || !strings.Contains(err.Error(), "real directory") {
+		t.Fatalf("symlinked state directory was accepted: %v", err)
 	}
 }
 

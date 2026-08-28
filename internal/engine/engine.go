@@ -32,6 +32,11 @@ type Engine struct {
 	portalTokenLoaded    bool
 }
 
+const (
+	maxEngineMethodBytes = 128
+	maxEngineArgsBytes   = 8 << 20
+)
+
 func New(cfg Config) (*Engine, error) {
 	if cfg.MaxReadBytes <= 0 {
 		cfg.MaxReadBytes = 256 * 1024
@@ -45,6 +50,9 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.MaxActiveTasks > 256 {
 		return nil, fmt.Errorf("max active tasks must be <= 256, got %d", cfg.MaxActiveTasks)
 	}
+	// Computer control necessarily needs both visual and semantic UI access.
+	cfg.AllowScreen = cfg.AllowScreen || cfg.AllowComputerControl
+	cfg.AllowAccessibility = cfg.AllowAccessibility || cfg.AllowComputerControl
 	cfg.ExecSandbox = strings.ToLower(strings.TrimSpace(cfg.ExecSandbox))
 	if cfg.ExecSandbox == "" {
 		cfg.ExecSandbox = "none"
@@ -64,7 +72,7 @@ func New(cfg Config) (*Engine, error) {
 		home, _ := os.UserHomeDir()
 		cfg.StateDir = filepath.Join(home, ".local", "state", "chat-with-cli")
 	}
-	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+	if err := ensurePrivateDir(cfg.StateDir); err != nil {
 		return nil, err
 	}
 
@@ -88,12 +96,33 @@ func New(cfg Config) (*Engine, error) {
 		roots = append(roots, filepath.Clean(real))
 	}
 	e := &Engine{cfg: cfg, roots: roots}
-	e.tasks = NewTaskManager(e, filepath.Join(cfg.StateDir, "tasks"))
+	taskDir := filepath.Join(cfg.StateDir, "tasks")
+	if err := ensurePrivateDir(taskDir); err != nil {
+		return nil, fmt.Errorf("initialize task state: %w", err)
+	}
+	e.tasks = NewTaskManager(e, taskDir)
 	e.audit, err = newAuditLog(cfg.StateDir)
 	if err != nil {
 		return nil, fmt.Errorf("initialize audit log: %w", err)
 	}
 	return e, nil
+}
+
+func ensurePrivateDir(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("state directory must not be empty")
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("state directory %q must be a real directory", path)
+	}
+	return os.Chmod(path, 0o700)
 }
 
 func (e *Engine) killSwitchActive() bool {
@@ -198,9 +227,19 @@ func decode[T any](raw json.RawMessage) (T, error) {
 
 func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage) (result any, err error) {
 	started := time.Now()
-	defer func() { e.audit.record(method, started, err) }()
+	auditMethod := method
+	if len(auditMethod) > maxEngineMethodBytes {
+		auditMethod = auditMethod[:maxEngineMethodBytes]
+	}
+	defer func() { e.audit.record(auditMethod, started, err) }()
 	if e.killSwitchActive() {
 		return nil, errors.New("local emergency kill switch is active")
+	}
+	if len(method) == 0 || len(method) > maxEngineMethodBytes {
+		return nil, errors.New("method name is missing or too long")
+	}
+	if len(raw) > maxEngineArgsBytes {
+		return nil, errors.New("request arguments are too large")
 	}
 	return e.invoke(ctx, method, raw)
 }

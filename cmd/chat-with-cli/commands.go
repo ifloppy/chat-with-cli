@@ -62,6 +62,8 @@ func runAgentSetup(args []string) error {
 	if !validCapabilityProfile(*profile) {
 		return fmt.Errorf("invalid capability profile %q", *profile)
 	}
+	explicitFileWrite, explicitExec := *allowFileWrite, *allowExec
+	explicitScreen, explicitAccessibility, explicitComputer := *allowScreen, *allowAccessibility, *allowComputer
 	switch strings.ToLower(strings.TrimSpace(*profile)) {
 	case "read-only":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, false, false, false
@@ -69,6 +71,26 @@ func runAgentSetup(args []string) error {
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, false, false, false
 	case "computer-use":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, true, true, true
+	}
+	// Profiles provide a baseline; capability flags explicitly supplied to
+	// setup remain the final operator choice.
+	if flagWasSet(fs, "allow-file-write") {
+		*allowFileWrite = explicitFileWrite
+	}
+	if flagWasSet(fs, "allow-exec") {
+		*allowExec = explicitExec
+	}
+	if flagWasSet(fs, "allow-screen") {
+		*allowScreen = explicitScreen
+	}
+	if flagWasSet(fs, "allow-accessibility") {
+		*allowAccessibility = explicitAccessibility
+	}
+	if flagWasSet(fs, "allow-computer-use") {
+		*allowComputer = explicitComputer
+	}
+	if *allowComputer {
+		*allowScreen, *allowAccessibility = true, true
 	}
 	if !*allowExec {
 		*execSandbox = "none"
@@ -167,7 +189,11 @@ func runRelaySetup(args []string) error {
 	} else {
 		return fmt.Errorf("invalid instance mode %q", *mode)
 	}
-	if strings.TrimSpace(readTrimmedFile(*setupTokenFile)) == "" {
+	existingToken, err := readPrivateCredential(*setupTokenFile)
+	if err != nil {
+		return fmt.Errorf("read setup token: %w", err)
+	}
+	if existingToken == "" {
 		if err := writeTextFile(*setupTokenFile, protocol.NewID()+protocol.NewID()+"\n", 0o600, *force); err != nil {
 			return fmt.Errorf("write setup token: %w", err)
 		}
@@ -373,8 +399,10 @@ func localDoctorChecks(values config.Values) []doctorCheck {
 		}
 	}
 
-	gui := values.Bool(false, "agent.allow_screen") || values.Bool(false, "agent.allow_accessibility") || values.Bool(false, "agent.allow_computer_use")
+	screen := values.Bool(false, "agent.allow_screen")
+	accessibility := values.Bool(false, "agent.allow_accessibility")
 	computer := values.Bool(false, "agent.allow_computer_use")
+	gui := screen || accessibility || computer
 	if !gui {
 		for _, name := range []string{"desktop display", "session D-Bus", "AT-SPI", "screenshot backend"} {
 			checks = append(checks, doctorCheck{Name: name, Skip: true, Detail: ": GUI capabilities are disabled"})
@@ -394,11 +422,19 @@ func localDoctorChecks(values config.Values) []doctorCheck {
 		} else {
 			checks = append(checks, doctorCheck{Name: "session D-Bus", OK: true, Detail: ": session environment detected"})
 		}
-		checks = append(checks, desktopBusDoctorCheck("AT-SPI", "org.a11y.Bus", "/org/a11y/bus"))
-		if backend := firstCommand("spectacle", "grim", "gnome-screenshot", "import"); backend == "" {
-			checks = append(checks, doctorCheck{Name: "screenshot backend", Detail: ": spectacle, grim, gnome-screenshot, or import not found"})
+		if accessibility || computer {
+			checks = append(checks, desktopBusDoctorCheck("AT-SPI", "org.a11y.Bus", "/org/a11y/bus"))
 		} else {
-			checks = append(checks, doctorCheck{Name: "screenshot backend", OK: true, Detail: ": " + backend})
+			checks = append(checks, doctorCheck{Name: "AT-SPI", Skip: true, Detail: ": accessibility reads are disabled"})
+		}
+		if screen || computer {
+			if backend := firstCommand("spectacle", "grim", "gnome-screenshot", "import"); backend == "" {
+				checks = append(checks, doctorCheck{Name: "screenshot backend", Detail: ": spectacle, grim, gnome-screenshot, or import not found"})
+			} else {
+				checks = append(checks, doctorCheck{Name: "screenshot backend", OK: true, Detail: ": " + backend})
+			}
+		} else {
+			checks = append(checks, doctorCheck{Name: "screenshot backend", Skip: true, Detail: ": screenshots are disabled"})
 		}
 	}
 	if computer {

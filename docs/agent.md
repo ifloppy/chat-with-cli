@@ -46,6 +46,10 @@ process, and environment access. Landlock is filesystem-only defense in depth.
 It contains raw access/refresh tokens for unattended reconnects, but never the
 Relay account password. Deleting it removes local credentials; the Relay admin
 must revoke the server-side client or token family for immediate invalidation.
+Refresh and atomic replacement are serialized across Agent processes with an
+advisory lock. Remote Relay origins must use HTTPS/WSS (loopback HTTP is
+allowed for local development), and active Agent WebSockets revalidate their
+credential before every brokered RPC.
 
 Use the immutable device ID for both `login` and `agent` after setup. Keep the
 ID and credential file private even though the human-readable name is only a

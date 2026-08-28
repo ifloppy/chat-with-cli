@@ -75,8 +75,9 @@ browser-session cookies are never persisted or displayed in the admin UI.
 The local fallback file `~/.config/chat-with-cli/credentials.json` necessarily
 contains raw Agent OAuth access/refresh tokens for unattended reconnects. It is
 0600 beneath a 0700 directory; protect it as a login credential. The account
-password is never written there. Native Secret Service, KWallet, Keychain, and
-Credential Manager backends remain future work.
+password is never written there. Refresh and atomic replacement are serialized
+across Agent processes with an advisory lock. Native Secret Service, KWallet,
+Keychain, and Credential Manager backends remain future work.
 
 ## Device identity
 
@@ -90,7 +91,10 @@ authorization; knowing an ID is not a bearer credential.
 The admin control plane can rename labels without changing routes, disable or
 unlink devices, revoke device token families, and permanently disable Agent or
 MCP access. Device capabilities are still enforced locally by the Agent; Relay
-admin state cannot grant a capability the Agent did not enable.
+admin state cannot grant a capability the Agent did not enable. Authenticated
+Agent WebSockets revalidate their one-way bearer fingerprint before each
+brokered RPC, so token, device, Agent, and kill-switch revocation also stops
+already-open peers from making new calls.
 
 ## Prompt injection and Computer Use
 

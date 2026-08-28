@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -43,6 +44,9 @@ func (e *Engine) ComputerObserve(ctx context.Context, in ComputerObserveInput) (
 	if err != nil {
 		return ComputerObserveOutput{}, err
 	}
+	if !e.cfg.AllowAccessibility && !e.cfg.AllowScreen {
+		return ComputerObserveOutput{}, errors.New("computer observe requires screen or accessibility read permission")
+	}
 	maxResults := in.MaxResults
 	if maxResults <= 0 {
 		maxResults = 80
@@ -50,16 +54,26 @@ func (e *Engine) ComputerObserve(ctx context.Context, in ComputerObserveInput) (
 	if maxResults > 200 {
 		maxResults = 200
 	}
-	ui, err := e.ComputerUIFind(ctx, ComputerUIFindInput{
-		AppName: in.AppName, Query: in.Query, Role: in.Role,
-		RequiredStates: defaultObserveStates(in.RequiredStates), MaxDepth: in.MaxDepth,
-		MaxNodes: in.MaxNodes, MaxResults: maxResults,
-	})
-	if err != nil {
-		return ComputerObserveOutput{}, err
+	out := ComputerObserveOutput{Info: e.ComputerInfo()}
+	if e.cfg.AllowAccessibility {
+		ui, err := e.ComputerUIFind(ctx, ComputerUIFindInput{
+			AppName: in.AppName, Query: in.Query, Role: in.Role,
+			RequiredStates: defaultObserveStates(in.RequiredStates), MaxDepth: in.MaxDepth,
+			MaxNodes: in.MaxNodes, MaxResults: maxResults,
+		})
+		if err != nil {
+			return ComputerObserveOutput{}, err
+		}
+		out.UI = ui
 	}
-	out := ComputerObserveOutput{Info: e.ComputerInfo(), UI: ui}
-	capture := mode == "always" || (mode == "auto" && shouldAutoObserveScreenshot(in, ui))
+	if !e.cfg.AllowScreen {
+		if mode == "always" {
+			return ComputerObserveOutput{}, errors.New("screen capture is disabled; remove screenshot=always or start with --allow-screen")
+		}
+		out.ScreenshotReason = "screen_disabled"
+		return out, nil
+	}
+	capture := mode == "always" || (!e.cfg.AllowAccessibility && mode == "auto") || (mode == "auto" && shouldAutoObserveScreenshot(in, out.UI))
 	if !capture {
 		return out, nil
 	}

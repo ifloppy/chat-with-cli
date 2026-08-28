@@ -84,6 +84,12 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	if strings.TrimSpace(in.Command) == "" {
 		return TaskInfo{}, errors.New("command is required")
 	}
+	if len(in.Command) > 256*1024 {
+		return TaskInfo{}, errors.New("command is too large (maximum 256 KiB)")
+	}
+	if len(in.Name) > 256 {
+		return TaskInfo{}, errors.New("task name is too large (maximum 256 bytes)")
+	}
 	select {
 	case <-ctx.Done():
 		return TaskInfo{}, ctx.Err()
@@ -111,12 +117,14 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	}()
 	id := protocol.NewID()
 	logPath := filepath.Join(m.dir, id+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return TaskInfo{}, err
 	}
 	cmd, err := m.engine.command(in.Command)
 	if err != nil {
+		_ = logFile.Close()
+		_ = os.Remove(logPath)
 		return TaskInfo{}, err
 	}
 	cmd.Dir = cwd
@@ -124,6 +132,7 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		_ = logFile.Close()
+		_ = os.Remove(logPath)
 		return TaskInfo{}, fmt.Errorf("start PTY: %w", err)
 	}
 	name := strings.TrimSpace(in.Name)
@@ -251,6 +260,9 @@ func (m *TaskManager) Read(in ReadTaskInput) (ReadTaskOutput, error) {
 }
 
 func (m *TaskManager) Send(in SendTaskInput) error {
+	if len(in.Input) > 1024*1024 {
+		return errors.New("task input is too large (maximum 1 MiB)")
+	}
 	m.mu.RLock()
 	task := m.tasks[in.TaskID]
 	m.mu.RUnlock()

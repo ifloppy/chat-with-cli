@@ -104,7 +104,7 @@ func (e *Engine) Screenshot(ctx context.Context, in ComputerScreenshotInput) (Co
 		return ComputerScreenshotOutput{}, errors.New("no supported screenshot backend found")
 	}
 	dir := filepath.Join(e.cfg.StateDir, "computer")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ensurePrivateDir(dir); err != nil {
 		return ComputerScreenshotOutput{}, err
 	}
 	file, err := os.CreateTemp(dir, "screenshot-*.png")
@@ -317,6 +317,9 @@ func (e *Engine) ComputerType(ctx context.Context, in ComputerTypeInput) error {
 	backend, err := e.requireComputerControl()
 	if err != nil {
 		return err
+	}
+	if len(in.Text) > 256*1024 {
+		return errors.New("text is too large (maximum 256 KiB)")
 	}
 	if in.Text == "" {
 		return nil
