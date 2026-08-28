@@ -2,6 +2,7 @@ package oauthserver
 
 import (
 	"crypto/subtle"
+	"encoding/hex"
 	"html/template"
 	"net/http"
 	"sort"
@@ -42,10 +43,21 @@ type adminUserView struct {
 }
 
 type adminTokenView struct {
+	Handle   string
+	Label    string
 	Kind     string
 	ClientID string
 	Username string
 	Resource string
+	Expires  time.Time
+}
+
+type adminSessionView struct {
+	Handle   string
+	Label    string
+	Username string
+	Created  time.Time
+	LastSeen time.Time
 	Expires  time.Time
 }
 
@@ -66,6 +78,7 @@ type adminPageData struct {
 	UserList            []adminUserView
 	Clients             []Client
 	Tokens              []adminTokenView
+	SessionList         []adminSessionView
 	Events              []SecurityEvent
 	CSRFToken           string
 	Username            string
@@ -95,10 +108,12 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"
 
 <h2>Devices</h2><section><table><tr><th>Display name</th><th>Immutable ID / route</th><th>Owner</th><th>Connection</th><th>Actions</th></tr>{{range .Devices}}<tr><td><b>{{.Name}}</b></td><td><code>{{.ID}}</code><br><small>{{.Route}}</small></td><td>{{.Owner}}</td><td>{{if .Online}}<span class="ok">online</span>{{else}}<span class="muted">offline</span>{{end}}{{if .Disabled}} · <span class="bad">disabled</span>{{end}}{{if not .LastSeen.IsZero}}<br><small>last seen {{.LastSeen}}</small>{{end}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="rename-device"><input type="hidden" name="target" value="{{.Route}}"><input name="value" placeholder="new display name" size="14" required><button type="submit">Rename</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="disable-device"><input type="hidden" name="target" value="{{.Route}}"><input type="hidden" name="confirm" value="REVOKE"><button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-device"><input type="hidden" name="target" value="{{.Route}}"><input name="confirm" placeholder="REVOKE" size="8" required><button class="danger" type="submit">Revoke</button></form></td></tr>{{else}}<tr><td colspan="5" class="muted">No devices have been claimed.</td></tr>{{end}}</table></section>
 
-<h2>Users</h2><section><table><tr><th>Username</th><th>Role / state</th><th>Created / last login</th><th>Actions</th></tr>{{range .UserList}}<tr><td><b>{{.Username}}</b></td><td>{{if .Admin}}admin {{end}}{{if .Disabled}}<span class="bad">disabled</span>{{else}}<span class="ok">active</span>{{end}}<br>{{.Devices}} device(s)</td><td>{{.CreatedAt}}<br>{{if not .LastLoginAt.IsZero}}{{.LastLoginAt}}{{else}}<span class="muted">never</span>{{end}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="disable-user"><input type="hidden" name="target" value="{{.ID}}"><input type="hidden" name="confirm" value="REVOKE"><button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="logout-user"><input type="hidden" name="target" value="{{.ID}}"><button type="submit">Logout</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="rotate-password"><input type="hidden" name="target" value="{{.ID}}"><input name="value" type="password" minlength="12" placeholder="new password" required><button type="submit">Rotate password</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="delete-user"><input type="hidden" name="target" value="{{.ID}}"><input name="confirm" placeholder="DELETE" size="8" required><button class="danger" type="submit">Delete</button></form></td></tr>{{end}}</table></section>
+<h2>Users</h2><section><table><tr><th>Username</th><th>Role / state</th><th>Created / last login</th><th>Actions</th></tr>{{range .UserList}}<tr><td><b>{{.Username}}</b></td><td>{{if .Admin}}admin {{end}}{{if .Disabled}}<span class="bad">disabled</span>{{else}}<span class="ok">active</span>{{end}}<br>{{.Devices}} device(s)</td><td>{{.CreatedAt}}<br>{{if not .LastLoginAt.IsZero}}{{.LastLoginAt}}{{else}}<span class="muted">never</span>{{end}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="disable-user"><input type="hidden" name="target" value="{{.ID}}"><input type="hidden" name="confirm" value="REVOKE"><button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="logout-user"><input type="hidden" name="target" value="{{.ID}}"><button type="submit">Logout all</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="rotate-password"><input type="hidden" name="target" value="{{.ID}}"><input name="value" type="password" minlength="12" placeholder="new password" required><button type="submit">Rotate password</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="delete-user"><input type="hidden" name="target" value="{{.ID}}"><input name="confirm" placeholder="DELETE" size="8" required><button class="danger" type="submit">Delete</button></form></td></tr>{{end}}</table></section>
+
+<h2>Browser sessions</h2><section><p>Session handles are one-way identifiers; browser cookie values are never displayed.</p><table><tr><th>Handle</th><th>User</th><th>Created</th><th>Last seen</th><th>Expires</th><th>Action</th></tr>{{range .SessionList}}<tr><td><code>{{.Label}}</code></td><td>{{.Username}}</td><td>{{.Created}}</td><td>{{.LastSeen}}</td><td>{{.Expires}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="logout-session"><input type="hidden" name="target" value="{{.Handle}}"><button type="submit">Log out</button></form></td></tr>{{else}}<tr><td colspan="6" class="muted">No active browser sessions.</td></tr>{{end}}</table></section>
 
 <h2>OAuth clients and token metadata</h2><section><table><tr><th>Client</th><th>Name / redirects</th><th>Actions</th></tr>{{range .Clients}}<tr><td><code>{{.ID}}</code><br><small>{{.IssuedAt}}</small></td><td>{{.Name}}<br><small>{{join .RedirectURIs ", "}}</small></td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-client"><input type="hidden" name="target" value="{{.ID}}"><input name="confirm" placeholder="REVOKE" size="8" required><button class="danger" type="submit">Revoke client</button></form></td></tr>{{else}}<tr><td colspan="3" class="muted">No approved clients.</td></tr>{{end}}</table>
-<p><b>{{len .Tokens}}</b> active token records (metadata only; bearer values are never displayed).</p><table><tr><th>Kind</th><th>User</th><th>Resource</th><th>Expires</th></tr>{{range .Tokens}}<tr><td>{{.Kind}}</td><td>{{.Username}}</td><td><code>{{.Resource}}</code></td><td>{{.Expires}}</td></tr>{{else}}<tr><td colspan="4" class="muted">No active tokens.</td></tr>{{end}}</table></section>
+<p><b>{{len .Tokens}}</b> active token records (metadata only; bearer values are never displayed).</p><table><tr><th>Handle</th><th>Kind</th><th>User</th><th>Resource</th><th>Expires</th><th>Action</th></tr>{{range .Tokens}}<tr><td><code>{{.Label}}</code></td><td>{{.Kind}}</td><td>{{.Username}}</td><td><code>{{.Resource}}</code></td><td>{{.Expires}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-token"><input type="hidden" name="target" value="{{.Handle}}"><input name="confirm" placeholder="REVOKE" size="8" required><button class="danger" type="submit">Revoke</button></form></td></tr>{{else}}<tr><td colspan="6" class="muted">No active tokens.</td></tr>{{end}}</table></section>
 
 <h2>Recent security events</h2><section><table><tr><th>Time</th><th>Event</th><th>User / device</th><th>Result</th></tr>{{range .Events}}<tr><td>{{.Time}}</td><td>{{.Event}}</td><td>{{.User}}{{if .Device}} / {{.Device}}{{end}}</td><td>{{if .Success}}success{{else}}failure{{end}}</td></tr>{{else}}<tr><td colspan="4" class="muted">No events recorded.</td></tr>{{end}}</table></section>
 <p><a href="/">Back to home</a></p></body></html>`))
@@ -172,6 +187,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, current User) {
 
 func (s *Server) adminData(current User) adminPageData {
 	s.mu.Lock()
+	s.cleanupLocked(time.Now())
 	data := adminPageData{Version: s.cfg.Version, Mode: s.cfg.Mode, RegistrationEnabled: s.registrationEnabled, DCREnabled: s.dcrEnabled, MCPEnabled: s.mcpEnabled, AgentEnabled: s.agentEnabled, KillSwitch: s.killSwitch, Users: len(s.users), OAuthClients: len(s.clients), Sessions: len(s.sessions), Username: current.Username, Events: append([]SecurityEvent(nil), s.securityEvents...)}
 	provider := s.statusProvider
 	devices := make(map[string]string, len(s.devices))
@@ -204,13 +220,17 @@ func (s *Server) adminData(current User) adminPageData {
 			data.Clients = append(data.Clients, client)
 		}
 	}
-	for _, record := range s.access {
+	for handle, record := range s.access {
 		user := s.users[record.UserID]
-		data.Tokens = append(data.Tokens, adminTokenView{Kind: "access", ClientID: record.ClientID, Username: user.Username, Resource: record.Resource, Expires: time.Unix(record.Expires, 0)})
+		data.Tokens = append(data.Tokens, adminTokenView{Handle: handle, Label: shortHandle(handle), Kind: "access", ClientID: record.ClientID, Username: user.Username, Resource: record.Resource, Expires: time.Unix(record.Expires, 0)})
 	}
-	for _, record := range s.refresh {
+	for handle, record := range s.refresh {
 		user := s.users[record.UserID]
-		data.Tokens = append(data.Tokens, adminTokenView{Kind: "refresh", ClientID: record.ClientID, Username: user.Username, Resource: record.Resource, Expires: time.Unix(record.Expires, 0)})
+		data.Tokens = append(data.Tokens, adminTokenView{Handle: handle, Label: shortHandle(handle), Kind: "refresh", ClientID: record.ClientID, Username: user.Username, Resource: record.Resource, Expires: time.Unix(record.Expires, 0)})
+	}
+	for handle, record := range s.sessions {
+		user := s.users[record.UserID]
+		data.SessionList = append(data.SessionList, adminSessionView{Handle: handle, Label: shortHandle(handle), Username: user.Username, Created: time.Unix(record.CreatedAt, 0), LastSeen: time.Unix(record.LastSeenAt, 0), Expires: time.Unix(record.Expires, 0)})
 	}
 	data.RegisteredDevices = len(data.Devices)
 	s.mu.Unlock()
@@ -229,10 +249,18 @@ func (s *Server) adminData(current User) adminPageData {
 	sort.Slice(data.UserList, func(i, j int) bool { return data.UserList[i].Username < data.UserList[j].Username })
 	sort.Slice(data.Clients, func(i, j int) bool { return data.Clients[i].IssuedAt > data.Clients[j].IssuedAt })
 	sort.Slice(data.Tokens, func(i, j int) bool { return data.Tokens[i].Expires.Before(data.Tokens[j].Expires) })
+	sort.Slice(data.SessionList, func(i, j int) bool { return data.SessionList[i].LastSeen.After(data.SessionList[j].LastSeen) })
 	if len(data.Events) > 50 {
 		data.Events = data.Events[len(data.Events)-50:]
 	}
 	return data
+}
+
+func shortHandle(handle string) string {
+	if len(handle) <= 16 {
+		return handle
+	}
+	return handle[:16] + "…"
 }
 
 func (s *Server) handleAdminAction(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +296,7 @@ func (s *Server) handleAdminAction(w http.ResponseWriter, r *http.Request) {
 
 func isDangerousAdminAction(action string) bool {
 	switch action {
-	case "set-kill-switch", "disable-device", "revoke-device", "disable-user", "delete-user", "revoke-client", "rotate-password", "rename-device":
+	case "set-kill-switch", "disable-device", "revoke-device", "disable-user", "delete-user", "revoke-client", "revoke-token", "rotate-password", "rename-device":
 		return true
 	default:
 		return false
@@ -277,7 +305,7 @@ func isDangerousAdminAction(action string) bool {
 
 func isConfirmRequired(action string) bool {
 	switch action {
-	case "set-kill-switch", "revoke-device", "delete-user", "revoke-client", "disable-device", "disable-user":
+	case "set-kill-switch", "revoke-device", "delete-user", "revoke-client", "revoke-token", "disable-device", "disable-user":
 		return true
 	default:
 		return false
@@ -438,7 +466,18 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		}
 		s.deleteUserSessionsLocked(target)
 	case "logout-all":
+		if _, exists := s.users[target]; !exists {
+			return errUnknownUser
+		}
 		s.deleteUserSessionsLocked(target)
+	case "logout-session":
+		if !validOpaqueHandle(target) {
+			return errUnknownSession
+		}
+		if _, exists := s.sessions[target]; !exists {
+			return errUnknownSession
+		}
+		delete(s.sessions, target)
 	case "revoke-client":
 		if _, exists := s.clients[target]; !exists {
 			return errUnknownClient
@@ -459,14 +498,43 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 				delete(s.refreshUsed, key)
 			}
 		}
+	case "revoke-token":
+		if !validOpaqueHandle(target) {
+			return errUnknownToken
+		}
+		if record, exists := s.refresh[target]; exists {
+			s.revokeFamilyLocked(record.Family)
+			break
+		}
+		if record, exists := s.refreshUsed[target]; exists {
+			s.revokeFamilyLocked(record.Family)
+			break
+		}
+		if _, exists := s.access[target]; exists {
+			delete(s.access, target)
+			break
+		}
+		return errUnknownToken
 	default:
 		changed = false
 	}
 	if !changed {
 		return errInvalidAdminAction
 	}
-	s.recordSecurityLocked(SecurityEvent{Event: action, User: current.Username, Device: target, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
+	eventTarget := target
+	if action == "revoke-token" || action == "logout-session" {
+		eventTarget = shortHandle(target)
+	}
+	s.recordSecurityLocked(SecurityEvent{Event: action, User: current.Username, Device: eventTarget, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
 	return s.saveLocked()
+}
+
+func validOpaqueHandle(handle string) bool {
+	if len(handle) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(handle)
+	return err == nil
 }
 
 func (s *Server) recordSecurity(event SecurityEvent) {
@@ -564,6 +632,8 @@ var (
 	errUnknownUser        = &adminError{"unknown user"}
 	errUnknownDevice      = &adminError{"unknown device"}
 	errUnknownClient      = &adminError{"unknown OAuth client"}
+	errUnknownToken       = &adminError{"unknown token record"}
+	errUnknownSession     = &adminError{"unknown browser session"}
 	errDeviceNameTaken    = &adminError{"device name is already in use"}
 	errCannotDeleteSelf   = &adminError{"cannot delete the current administrator"}
 )

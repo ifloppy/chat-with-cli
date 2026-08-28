@@ -577,3 +577,69 @@ func TestAdminCanRevokeDeviceAndDisableMCP(t *testing.T) {
 		t.Fatalf("disabled MCP status=%d", rr.Code)
 	}
 }
+
+func TestAdminCanRevokeIndividualTokensAndSessions(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18908", Password: "admin-token-test-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	owner := s.users[ownerID]
+	access, refresh, _, err := s.issueTokensLocked("client", ownerID, s.absolute("/mcp/admin-device"), "mcp offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSession, err := s.createSession(ownerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSession, err := s.createSession(ownerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)
+	if err := s.applyAdminAction("revoke-token", tokenKey(refresh), "", owner, request); err != nil {
+		t.Fatal(err)
+	}
+	if s.VerifyAccess(access, s.absolute("/mcp/admin-device")) {
+		t.Fatal("revoking a refresh token left its access-token family usable")
+	}
+	s.mu.Lock()
+	_, refreshPresent := s.refresh[tokenKey(refresh)]
+	s.mu.Unlock()
+	if refreshPresent {
+		t.Fatal("revoked refresh token remained present")
+	}
+
+	s.mu.Lock()
+	access2, refresh2, _, err := s.issueTokensLocked("client", ownerID, s.absolute("/mcp/admin-device"), "mcp offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.applyAdminAction("revoke-token", tokenKey(access2), "", owner, request); err != nil {
+		t.Fatal(err)
+	}
+	if s.VerifyAccess(access2, s.absolute("/mcp/admin-device")) {
+		t.Fatal("revoked access token remained usable")
+	}
+	s.mu.Lock()
+	_, refresh2Present := s.refresh[tokenKey(refresh2)]
+	s.mu.Unlock()
+	if !refresh2Present {
+		t.Fatal("revoking an access token unexpectedly revoked its refresh token")
+	}
+
+	if err := s.applyAdminAction("logout-session", tokenKey(secondSession), "", owner, request); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	_, firstPresent := s.sessions[tokenKey(firstSession)]
+	_, secondPresent := s.sessions[tokenKey(secondSession)]
+	s.mu.Unlock()
+	if !firstPresent || secondPresent {
+		t.Fatalf("unexpected session state after individual logout: first=%v second=%v", firstPresent, secondPresent)
+	}
+}
