@@ -1,0 +1,7 @@
+/chat-with-cli
+/dist/
+*.log
+*.out
+.env
+.env.*
+!.env.example

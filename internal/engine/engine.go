@@ -1,0 +1,292 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+type Engine struct {
+	cfg   Config
+	roots []string
+	tasks *TaskManager
+}
+
+func New(cfg Config) (*Engine, error) {
+	if cfg.MaxReadBytes <= 0 {
+		cfg.MaxReadBytes = 256 * 1024
+	}
+	if cfg.MaxTaskLogBytes <= 0 {
+		cfg.MaxTaskLogBytes = 64 << 20
+	}
+	if cfg.StateDir == "" {
+		home, _ := os.UserHomeDir()
+		cfg.StateDir = filepath.Join(home, ".local", "state", "chat-with-cli")
+	}
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return nil, err
+	}
+
+	if len(cfg.Roots) == 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		cfg.Roots = []string{cwd}
+	}
+	roots := make([]string, 0, len(cfg.Roots))
+	for _, root := range cfg.Roots {
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return nil, fmt.Errorf("resolve root %q: %w", root, err)
+		}
+		real, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return nil, fmt.Errorf("resolve root symlinks %q: %w", root, err)
+		}
+		roots = append(roots, filepath.Clean(real))
+	}
+	e := &Engine{cfg: cfg, roots: roots}
+	e.tasks = NewTaskManager(e, filepath.Join(cfg.StateDir, "tasks"))
+	return e, nil
+}
+
+func (e *Engine) Config() Config {
+	cfg := e.cfg
+	cfg.Roots = append([]string(nil), e.roots...)
+	return cfg
+}
+
+func (e *Engine) ResolvePath(path string) (string, error) {
+	if path == "" {
+		return e.roots[0], nil
+	}
+	candidate := path
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(e.roots[0], candidate)
+	}
+	candidate = filepath.Clean(candidate)
+	real, err := filepath.EvalSymlinks(candidate)
+	if err == nil {
+		candidate = real
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	} else {
+		resolved, err := resolveMissingPath(candidate)
+		if err != nil {
+			return "", err
+		}
+		candidate = resolved
+	}
+	for _, root := range e.roots {
+		if pathWithin(root, candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("path %q is outside allowed roots", path)
+}
+
+func resolveMissingPath(path string) (string, error) {
+	probe := path
+	for {
+		if _, err := os.Lstat(probe); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", os.ErrNotExist
+		}
+		probe = parent
+	}
+	realBase, err := filepath.EvalSymlinks(probe)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(probe, path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(filepath.Join(realBase, rel)), nil
+}
+
+func pathWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func decode[T any](raw json.RawMessage) (T, error) {
+	var value T
+	if len(raw) == 0 || string(raw) == "null" {
+		return value, nil
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return value, fmt.Errorf("decode arguments: %w", err)
+	}
+	return value, nil
+}
+
+func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage) (any, error) {
+	switch method {
+	case "system_info":
+		host, _ := os.Hostname()
+		return SystemInfoOutput{
+			Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH,
+			PID: os.Getpid(), Roots: append([]string(nil), e.roots...), AllowExec: e.cfg.AllowExec,
+			AllowScreen: e.cfg.AllowScreen, AllowComputerControl: e.cfg.AllowComputerControl,
+		}, nil
+	case "computer_info":
+		return e.ComputerInfo(), nil
+	case "computer_screenshot":
+		in, err := decode[ComputerScreenshotInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.Screenshot(ctx, in)
+	case "task_start":
+		in, err := decode[StartTaskInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.tasks.Start(ctx, in)
+	case "task_read":
+		in, err := decode[ReadTaskInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.tasks.Read(in)
+	case "task_wait":
+		in, err := decode[WaitTaskInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.tasks.Wait(ctx, in)
+	case "task_list":
+		return e.tasks.List(), nil
+	}
+
+	switch method {
+	case "computer_move":
+		in, err := decode[ComputerMoveInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.ComputerMove(ctx, in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "computer_click":
+		in, err := decode[ComputerClickInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.ComputerClick(ctx, in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "computer_scroll":
+		in, err := decode[ComputerScrollInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.ComputerScroll(ctx, in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "computer_type":
+		in, err := decode[ComputerTypeInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.ComputerType(ctx, in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "computer_key":
+		in, err := decode[ComputerKeyInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.ComputerKey(ctx, in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "task_send":
+		in, err := decode[SendTaskInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.tasks.Send(in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "task_stop":
+		in, err := decode[StopTaskInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.tasks.Stop(in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "fs_read":
+		in, err := decode[FileReadInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ReadFile(in)
+	case "fs_write":
+		in, err := decode[FileWriteInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.WriteFile(in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "fs_patch":
+		in, err := decode[FilePatchInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.PatchFile(in)
+	case "fs_list":
+		in, err := decode[FileListInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ListFiles(in)
+	}
+
+	switch method {
+	case "fs_search":
+		in, err := decode[FileSearchInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.SearchFiles(ctx, in)
+	case "checkpoint_write":
+		in, err := decode[CheckpointWriteInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.WriteCheckpoint(in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "checkpoint_read":
+		in, err := decode[CheckpointReadInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ReadCheckpoint(in)
+	default:
+		return nil, fmt.Errorf("unknown method %q", method)
+	}
+}

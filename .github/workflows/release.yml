@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Test
+        run: go test ./...
+      - name: Build Linux binaries
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/chat-with-cli-linux-amd64 ./cmd/chat-with-cli
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o dist/chat-with-cli-linux-arm64 ./cmd/chat-with-cli
+          sha256sum dist/chat-with-cli-linux-* > dist/SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/chat-with-cli-linux-amd64 \
+            dist/chat-with-cli-linux-arm64 \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"
