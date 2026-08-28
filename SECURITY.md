@@ -35,7 +35,7 @@ Capability flags are therefore necessary but not sufficient. Operators should al
 - revoke Computer Use when a task no longer needs it;
 - prefer `--computer-persist=none` for one-off sessions, and use `persistent` only on machines intended for unattended recovery.
 
-Tool annotations mark read-only versus destructive/open-world actions, but annotations are hints, not an authorization system. `computer_ui_invoke` and `computer_ui_set_text` deliberately refuse ambiguous or incomplete selectors rather than choosing a control heuristically. Direct EditableText mutation avoids synthetic keystrokes but is still a consequential GUI write capability. AT-SPI inspection can reveal text and control names from other visible applications, so read-only UI access should still be treated as sensitive screen access.
+Tool annotations mark read-only versus destructive/open-world actions, but annotations are hints, not an authorization system. `computer_ui_invoke` and `computer_ui_set_text` deliberately refuse ambiguous or incomplete selectors rather than choosing a control heuristically. Direct EditableText mutation avoids synthetic keystrokes but is still a consequential GUI write capability. AT-SPI inspection and `computer_ui_get_text` can reveal text and control names from other visible applications, so read-only UI access should still be treated as sensitive screen access.
 
 ## Filesystem boundary
 

@@ -84,13 +84,13 @@ Preferred interaction loop:
 
 1. Start with `computer_observe` when GUI state is unknown. Its default `screenshot=auto` returns bounded visible AT-SPI data and only transfers an image when semantic UI is insufficient.
 2. Prefer `computer_ui_invoke` for a unique semantic action. It performs selection and action on one AT-SPI connection, refuses ambiguous selectors, and returns candidates instead of guessing. Set `timeout_ms` when the control may appear asynchronously.
-3. Prefer `computer_ui_set_text` for editable fields: it selects one visible/enabled AT-SPI `EditableText` control and replaces its UTF-8 contents directly, without pointer focus or simulated keystrokes.
+3. Prefer `computer_ui_get_text` / `computer_ui_set_text` for text controls: they uniquely select visible AT-SPI `Text` / `EditableText` elements, enabling bounded reads and direct UTF-8 replacement without OCR, pointer focus, or simulated keystrokes.
 4. Use `computer_ui_find` / `computer_ui_wait` for inspection, disambiguation, and state synchronization. Treat returned refs as short-lived handles.
 5. Fall back to `computer_screenshot` + pointer coordinates only when semantic UI is unavailable. Verify consequential results with semantic state or a screenshot.
 
 ### Agent-friendly call patterns
 
-Keep Computer Use calls narrow and state-driven. A recommended sequence is `computer_observe` -> `computer_ui_invoke`/`computer_ui_set_text` -> `computer_ui_wait`. Both atomic mutation tools can optionally wait for `not_found` selectors, avoiding a separate wait call. Avoid repeated screenshots when a semantic condition can be waited on. For `computer_ui_invoke`, zero matches return `not_found`, multiple matches return `ambiguous` with candidate nodes, and elements with multiple possible semantic actions return `ambiguous_action` unless an action name is supplied. If a bounded search ends before uniqueness can be proven, it returns `search_incomplete` and performs no action.
+Keep Computer Use calls narrow and state-driven. A recommended sequence is `computer_observe` -> `computer_ui_invoke`/`computer_ui_get_text`/`computer_ui_set_text` -> `computer_ui_wait`. Both atomic mutation tools can optionally wait for `not_found` selectors, avoiding a separate wait call. Avoid repeated screenshots when a semantic condition can be waited on. For `computer_ui_invoke`, zero matches return `not_found`, multiple matches return `ambiguous` with candidate nodes, and elements with multiple possible semantic actions return `ambiguous_action` unless an action name is supplied. If a bounded search ends before uniqueness can be proven, it returns `search_incomplete` and performs no action.
 
 For pixel-only applications, request JPEG screenshots for routine navigation and PNG only when exact pixels/text rendering matter. Low-level `move`/`click`/`type`/`key` remain deliberate escape hatches for canvas, games, remote desktops, and poorly accessible Electron/WebView interfaces.
 
@@ -187,6 +187,7 @@ The workstation needs only outbound HTTPS/WebSocket access. See [docs/deployment
 - `computer_info`, `computer_observe`, `computer_screenshot`
 - `computer_ui_tree`, `computer_ui_find`, `computer_ui_wait`
 - `computer_ui_invoke` — unique selector + optional wait + semantic action in one call; refuses ambiguity/incomplete searches.
+- `computer_ui_get_text` — bounded read from one unique visible AT-SPI Text control, avoiding OCR.
 - `computer_ui_set_text` — unique editable selector + direct AT-SPI text replacement, avoiding keyboard injection.
 - `computer_ui_focus`, `computer_ui_action` — lower-level short-lived-ref operations.
 - `computer_move`, `computer_click`, `computer_scroll`

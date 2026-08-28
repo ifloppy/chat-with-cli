@@ -49,7 +49,7 @@ func boolPtr(value bool) *bool { return &value }
 
 func toolAnnotations(name string) *mcp.ToolAnnotations {
 	switch name {
-	case "system_info", "computer_info", "computer_screenshot", "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "task_read", "task_wait", "task_list", "fs_read", "fs_list", "fs_search", "checkpoint_read":
+	case "system_info", "computer_info", "computer_screenshot", "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "computer_ui_get_text", "task_read", "task_wait", "task_list", "fs_read", "fs_list", "fs_search", "checkpoint_read":
 		return &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: boolPtr(false)}
 	case "fs_write", "fs_patch", "checkpoint_write":
 		return &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
@@ -113,7 +113,7 @@ func addObserveTool(server *mcp.Server, caller Caller) {
 func New(caller Caller) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name: "chat-with-cli", Version: Version,
-	}, &mcp.ServerOptions{Instructions: `For GUI work, start with computer_observe when state is unknown. Prefer computer_ui_invoke for a unique semantic action, then computer_ui_find/tree for inspection. Use screenshots and pointer tools only as fallbacks. For long commands use task_start and task_wait with next_offset. Do not restart a task merely because MCP or chat reconnects. Use checkpoint_write at meaningful development milestones so another agent can resume the workspace.`})
+	}, &mcp.ServerOptions{Instructions: `For GUI work, start with computer_observe when state is unknown. Prefer computer_ui_invoke for a unique semantic action and computer_ui_get_text/set_text for text fields, then computer_ui_find/tree for inspection. Use screenshots and pointer tools only as fallbacks. For long commands use task_start and task_wait with next_offset. Do not restart a task merely because MCP or chat reconnects. Use checkpoint_write at meaningful development milestones so another agent can resume the workspace.`})
 
 	addTool[struct{}, engine.SystemInfoOutput](server, caller, "system_info",
 		"Show the connected machine, allowed filesystem roots, and whether shell execution is enabled.")
@@ -133,6 +133,8 @@ func New(caller Caller) *mcp.Server {
 		"Invoke an accessibility-provided semantic action such as click/press/activate by opaque ref. Requires --allow-computer-use.")
 	addTool[engine.ComputerUIInvokeInput, engine.ComputerUIInvokeOutput](server, caller, "computer_ui_invoke",
 		"Atomically wait for/find one visible enabled accessible element and invoke its semantic action. Refuses ambiguous or incomplete searches instead of guessing. Requires --allow-computer-use.")
+	addTool[engine.ComputerUIGetTextInput, engine.ComputerUIGetTextOutput](server, caller, "computer_ui_get_text",
+		"Read bounded UTF-8 contents from one uniquely selected visible AT-SPI Text control without screenshots or OCR.")
 	addTool[engine.ComputerUISetTextInput, engine.ComputerUISetTextOutput](server, caller, "computer_ui_set_text",
 		"Atomically find one visible enabled AT-SPI EditableText control and replace its UTF-8 contents without pointer or keyboard injection. Requires --allow-computer-use.")
 	addTool[engine.ComputerMoveInput, engine.Ack](server, caller, "computer_move", "Move the pointer to absolute screen coordinates.")

@@ -303,6 +303,29 @@ type ComputerUIInvokeOutput struct {
 	Action     string           `json:"action,omitempty"`
 }
 
+type ComputerUIGetTextInput struct {
+	AppName        string   `json:"app_name,omitempty" jsonschema:"optional application name substring"`
+	Query          string   `json:"query,omitempty" jsonschema:"name, description, or role substring used to select one text element"`
+	Role           string   `json:"role,omitempty" jsonschema:"optional exact AT-SPI role name"`
+	RequiredStates []string `json:"required_states,omitempty" jsonschema:"defaults to showing and visible"`
+	MaxCharacters  int      `json:"max_characters,omitempty" jsonschema:"defaults to 4096; max 65536"`
+	MaxDepth       int      `json:"max_depth,omitempty"`
+	MaxNodes       int      `json:"max_nodes,omitempty"`
+	TimeoutMS      int      `json:"timeout_ms,omitempty" jsonschema:"optional wait for not_found; max 30000"`
+	PollIntervalMS int      `json:"poll_interval_ms,omitempty" jsonschema:"default 250; min 100; max 2000"`
+}
+
+type ComputerUIGetTextOutput struct {
+	Status         string           `json:"status"`
+	Message        string           `json:"message,omitempty"`
+	Matched        int              `json:"matched"`
+	Node           *ComputerUINode  `json:"node,omitempty"`
+	Candidates     []ComputerUINode `json:"candidates,omitempty"`
+	Text           string           `json:"text,omitempty"`
+	CharacterCount int              `json:"character_count,omitempty"`
+	Truncated      bool             `json:"truncated,omitempty"`
+}
+
 type ComputerUISetTextInput struct {
 	AppName        string   `json:"app_name,omitempty" jsonschema:"optional application name substring"`
 	Query          string   `json:"query,omitempty" jsonschema:"name, description, or role substring used to select one editable element"`

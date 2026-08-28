@@ -248,6 +248,12 @@ func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage)
 			return nil, err
 		}
 		return e.ComputerUIInvoke(ctx, in)
+	case "computer_ui_get_text":
+		in, err := decode[ComputerUIGetTextInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerUIGetText(ctx, in)
 	case "computer_ui_set_text":
 		in, err := decode[ComputerUISetTextInput](raw)
 		if err != nil {

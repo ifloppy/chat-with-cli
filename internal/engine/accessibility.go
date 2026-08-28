@@ -21,6 +21,7 @@ const (
 	atspiComponent    = "org.a11y.atspi.Component"
 	atspiAction       = "org.a11y.atspi.Action"
 	atspiEditableText = "org.a11y.atspi.EditableText"
+	atspiText         = "org.a11y.atspi.Text"
 )
 
 type atspiRef struct {
@@ -520,6 +521,11 @@ func normalizeUniqueUISelector(sel uniqueUISelector) (time.Duration, time.Durati
 	if sel.TimeoutMS < 0 || sel.TimeoutMS > 30000 {
 		return 0, 0, false, uniqueUISelection{Status: "invalid_timeout", Message: "timeout_ms must be between 0 and 30000"}
 	}
+	total := 15 * time.Second
+	wait := sel.TimeoutMS > 0
+	if !wait {
+		return total, 0, false, uniqueUISelection{}
+	}
 	poll := sel.PollMS
 	if poll <= 0 {
 		poll = 250
@@ -527,12 +533,8 @@ func normalizeUniqueUISelector(sel uniqueUISelector) (time.Duration, time.Durati
 	if poll < 100 || poll > 2000 {
 		return 0, 0, false, uniqueUISelection{Status: "invalid_poll_interval", Message: "poll_interval_ms must be between 100 and 2000"}
 	}
-	total := 15 * time.Second
-	wait := sel.TimeoutMS > 0
-	if wait {
-		total = time.Duration(sel.TimeoutMS) * time.Millisecond
-	}
-	return total, time.Duration(poll) * time.Millisecond, wait, uniqueUISelection{}
+	total = time.Duration(sel.TimeoutMS) * time.Millisecond
+	return total, time.Duration(poll) * time.Millisecond, true, uniqueUISelection{}
 }
 
 func resolveUniqueUI(ctx context.Context, conn *dbus.Conn, sel uniqueUISelector, poll time.Duration, wait bool) (uniqueUISelection, error) {
@@ -541,7 +543,7 @@ func resolveUniqueUI(ctx context.Context, conn *dbus.Conn, sel uniqueUISelector,
 			defaultInvokeStates(sel.RequiredStates), sel.MaxDepth, sel.MaxNodes, 2)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return uniqueUISelection{Status: "timeout", Message: "UI selector did not become safely invokable before timeout"}, nil
+				return uniqueUISelection{Status: "timeout", Message: "UI selector did not become uniquely resolvable before timeout"}, nil
 			}
 			return uniqueUISelection{}, err
 		}
@@ -565,7 +567,7 @@ func resolveUniqueUI(ctx context.Context, conn *dbus.Conn, sel uniqueUISelector,
 		}
 		select {
 		case <-ctx.Done():
-			return uniqueUISelection{Status: "timeout", Message: "UI selector did not become safely invokable before timeout"}, nil
+			return uniqueUISelection{Status: "timeout", Message: "UI selector did not become uniquely resolvable before timeout"}, nil
 		case <-time.After(poll):
 		}
 	}
@@ -619,6 +621,75 @@ func (e *Engine) ComputerUIInvoke(ctx context.Context, in ComputerUIInvokeInput)
 		return ComputerUIInvokeOutput{Status: status, Matched: 1, Node: &node, Message: msg}, nil
 	}
 	return ComputerUIInvokeOutput{Status: "ok", Matched: 1, Node: &node, Index: performed.Index, Action: performed.Action}, nil
+}
+
+func getTextOutputFromSelection(sel uniqueUISelection) ComputerUIGetTextOutput {
+	return ComputerUIGetTextOutput{Status: sel.Status, Message: sel.Message, Matched: sel.Matched, Node: sel.Node, Candidates: sel.Candidates}
+}
+
+func (e *Engine) ComputerUIGetText(ctx context.Context, in ComputerUIGetTextInput) (ComputerUIGetTextOutput, error) {
+	if err := e.requireUIRead(); err != nil {
+		return ComputerUIGetTextOutput{}, err
+	}
+	limit := in.MaxCharacters
+	if limit <= 0 {
+		limit = 4096
+	}
+	if limit > 65536 {
+		return ComputerUIGetTextOutput{Status: "invalid_limit", Message: "max_characters must be between 1 and 65536"}, nil
+	}
+	sel := uniqueUISelector{AppName: in.AppName, Query: in.Query, Role: in.Role,
+		RequiredStates: defaultObserveStates(in.RequiredStates), MaxDepth: in.MaxDepth, MaxNodes: in.MaxNodes,
+		TimeoutMS: in.TimeoutMS, PollMS: in.PollIntervalMS}
+	total, poll, wait, invalid := normalizeUniqueUISelector(sel)
+	if invalid.Status != "" {
+		return getTextOutputFromSelection(invalid), nil
+	}
+	conn, err := connectATSPI()
+	if err != nil {
+		return ComputerUIGetTextOutput{}, err
+	}
+	defer conn.Close()
+	readCtx, cancel := context.WithTimeout(ctx, total)
+	defer cancel()
+	resolved, err := resolveUniqueUI(readCtx, conn, sel, poll, wait)
+	if err != nil {
+		return ComputerUIGetTextOutput{}, err
+	}
+	if resolved.Status != "ready" || resolved.Node == nil {
+		return getTextOutputFromSelection(resolved), nil
+	}
+	node := *resolved.Node
+	ref, err := decodeUIRef(node.Ref)
+	if err != nil {
+		return ComputerUIGetTextOutput{Status: "stale", Matched: 1, Node: &node, Message: "matched UI ref could not be decoded"}, nil
+	}
+	ifaces := atspiInterfaces(readCtx, conn, ref)
+	if !ifaces["text"] {
+		return ComputerUIGetTextOutput{Status: "not_text", Matched: 1, Node: &node, Message: "matched UI element does not expose AT-SPI Text"}, nil
+	}
+	var countVariant dbus.Variant
+	call := conn.Object(ref.Bus, ref.Path).CallWithContext(readCtx, "org.freedesktop.DBus.Properties.Get", 0, atspiText, "CharacterCount")
+	if call.Err != nil || call.Store(&countVariant) != nil {
+		return ComputerUIGetTextOutput{Status: "failed", Matched: 1, Node: &node, Message: "could not read AT-SPI CharacterCount"}, nil
+	}
+	count, ok := variantInt(countVariant)
+	if !ok || count < 0 {
+		return ComputerUIGetTextOutput{Status: "failed", Matched: 1, Node: &node, Message: "AT-SPI CharacterCount had an unexpected type"}, nil
+	}
+	end := count
+	if end > limit {
+		end = limit
+	}
+	var text string
+	call = conn.Object(ref.Bus, ref.Path).CallWithContext(readCtx, atspiText+".GetText", 0, int32(0), int32(end))
+	if call.Err != nil {
+		return ComputerUIGetTextOutput{Status: "failed", Matched: 1, Node: &node, Message: call.Err.Error()}, nil
+	}
+	if err := call.Store(&text); err != nil {
+		return ComputerUIGetTextOutput{}, err
+	}
+	return ComputerUIGetTextOutput{Status: "ok", Matched: 1, Node: &node, Text: text, CharacterCount: count, Truncated: count > end}, nil
 }
 
 func setTextOutputFromSelection(sel uniqueUISelection) ComputerUISetTextOutput {

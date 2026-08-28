@@ -109,7 +109,7 @@ func TestUniqueSelectorValidation(t *testing.T) {
 	if invalid.Status != "invalid_timeout" {
 		t.Fatalf("unexpected timeout status %q", invalid.Status)
 	}
-	_, _, _, invalid = normalizeUniqueUISelector(uniqueUISelector{Query: "Save", PollMS: 50})
+	_, _, _, invalid = normalizeUniqueUISelector(uniqueUISelector{Query: "Save", TimeoutMS: 1000, PollMS: 50})
 	if invalid.Status != "invalid_poll_interval" {
 		t.Fatalf("unexpected poll status %q", invalid.Status)
 	}
@@ -129,6 +129,26 @@ func TestUISetTextRejectsNULBeforeDesktopAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.Status != "invalid_text" {
+		t.Fatalf("status=%q output=%+v", out.Status, out)
+	}
+}
+
+func TestUIGetTextRejectsOversizedReadBeforeDesktopAccess(t *testing.T) {
+	eng, err := New(Config{
+		Roots: []string{t.TempDir()}, AllowScreen: true,
+		StateDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	out, err := eng.ComputerUIGetText(context.Background(), ComputerUIGetTextInput{
+		Query: "field", MaxCharacters: 65537,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "invalid_limit" {
 		t.Fatalf("status=%q output=%+v", out.Status, out)
 	}
 }
