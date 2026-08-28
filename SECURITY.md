@@ -15,8 +15,9 @@ The Relay is a transport broker. It should not need filesystem access to the wor
 
 - Files are limited to explicit `--root` trees.
 - Arbitrary command execution requires `--allow-exec`.
-- Screenshots require `--allow-screen` or `--allow-computer-use`.
-- Keyboard and pointer injection requires `--allow-computer-use`.
+- Screenshots, `computer_observe`, and read-only AT-SPI UI inspection require `--allow-screen` or `--allow-computer-use`. `computer_observe` may include a screenshot automatically when semantic UI is insufficient.
+- Keyboard/pointer injection, semantic UI actions, and direct AT-SPI editable-text mutation require `--allow-computer-use`.
+- XDG RemoteDesktop consent persistence defaults to process lifetime; restart-surviving restore-token storage requires explicit `--computer-persist=persistent`.
 
 Do not grant capabilities merely because a client supports the corresponding MCP tool.
 
@@ -31,9 +32,10 @@ Capability flags are therefore necessary but not sufficient. Operators should al
 - use a dedicated browser/profile for autonomous GUI work where practical;
 - require user confirmation for consequential actions at the MCP/client layer;
 - keep secrets out of visible terminals and browser pages when screenshots are enabled;
-- revoke Computer Use when a task no longer needs it.
+- revoke Computer Use when a task no longer needs it;
+- prefer `--computer-persist=none` for one-off sessions, and use `persistent` only on machines intended for unattended recovery.
 
-Tool annotations mark read-only versus destructive/open-world actions, but annotations are hints, not an authorization system.
+Tool annotations mark read-only versus destructive/open-world actions, but annotations are hints, not an authorization system. `computer_ui_invoke` and `computer_ui_set_text` deliberately refuse ambiguous or incomplete selectors rather than choosing a control heuristically. Direct EditableText mutation avoids synthetic keystrokes but is still a consequential GUI write capability. AT-SPI inspection can reveal text and control names from other visible applications, so read-only UI access should still be treated as sensitive screen access.
 
 ## Filesystem boundary
 

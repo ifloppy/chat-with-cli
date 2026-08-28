@@ -7,6 +7,7 @@ type Config struct {
 	AllowExec            bool
 	AllowScreen          bool
 	AllowComputerControl bool
+	ComputerPersistMode  string
 	StateDir             string
 	MaxReadBytes         int
 	MaxTaskLogBytes      int64
@@ -160,12 +161,15 @@ type FilePatchOutput struct {
 }
 
 type ComputerInfoOutput struct {
-	ScreenAllowed     bool   `json:"screen_allowed"`
-	ControlAllowed    bool   `json:"control_allowed"`
-	SessionType       string `json:"session_type,omitempty"`
-	Desktop           string `json:"desktop,omitempty"`
-	ScreenshotBackend string `json:"screenshot_backend,omitempty"`
-	InputBackend      string `json:"input_backend,omitempty"`
+	ScreenAllowed        bool   `json:"screen_allowed"`
+	ControlAllowed       bool   `json:"control_allowed"`
+	SessionType          string `json:"session_type,omitempty"`
+	Desktop              string `json:"desktop,omitempty"`
+	ScreenshotBackend    string `json:"screenshot_backend,omitempty"`
+	InputBackend         string `json:"input_backend,omitempty"`
+	AccessibilityBackend string `json:"accessibility_backend,omitempty"`
+	ComputerPersistMode  string `json:"computer_persist_mode,omitempty"`
+	PortalSessionActive  bool   `json:"portal_session_active,omitempty"`
 }
 
 type ComputerScreenshotInput struct {
@@ -204,4 +208,145 @@ type ComputerTypeInput struct {
 }
 type ComputerKeyInput struct {
 	Keys string `json:"keys" jsonschema:"key chord such as ctrl+shift+p or Return"`
+}
+
+type ComputerUIBounds struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+type ComputerUIAction struct {
+	Index       int    `json:"index"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	KeyBinding  string `json:"key_binding,omitempty"`
+}
+
+type ComputerUINode struct {
+	Ref         string             `json:"ref"`
+	App         string             `json:"app,omitempty"`
+	Role        string             `json:"role,omitempty"`
+	Name        string             `json:"name,omitempty"`
+	Description string             `json:"description,omitempty"`
+	Bounds      ComputerUIBounds   `json:"bounds"`
+	Actions     []ComputerUIAction `json:"actions,omitempty"`
+	States      []string           `json:"states,omitempty"`
+	ChildCount  int                `json:"child_count"`
+	Depth       int                `json:"depth"`
+}
+
+type ComputerUITreeInput struct {
+	AppName  string `json:"app_name,omitempty" jsonschema:"optional application name substring"`
+	MaxDepth int    `json:"max_depth,omitempty" jsonschema:"default 8; max 20"`
+	MaxNodes int    `json:"max_nodes,omitempty" jsonschema:"default 400; max 2000"`
+}
+
+type ComputerUIFindInput struct {
+	AppName        string   `json:"app_name,omitempty" jsonschema:"optional application name substring"`
+	Query          string   `json:"query,omitempty" jsonschema:"case-insensitive name, description, or role substring"`
+	Role           string   `json:"role,omitempty" jsonschema:"optional exact AT-SPI role name"`
+	RequiredStates []string `json:"required_states,omitempty" jsonschema:"optional states such as showing, visible, enabled, focused"`
+	MaxDepth       int      `json:"max_depth,omitempty"`
+	MaxNodes       int      `json:"max_nodes,omitempty"`
+	MaxResults     int      `json:"max_results,omitempty" jsonschema:"default 100; max 500"`
+}
+
+type ComputerUIWaitInput struct {
+	ComputerUIFindInput
+	TimeoutMS      int `json:"timeout_ms,omitempty" jsonschema:"default 5000; max 30000"`
+	PollIntervalMS int `json:"poll_interval_ms,omitempty" jsonschema:"default 250; min 100; max 2000"`
+}
+
+type ComputerUIQueryOutput struct {
+	Nodes     []ComputerUINode `json:"nodes"`
+	Visited   int              `json:"visited"`
+	Truncated bool             `json:"truncated"`
+}
+
+type ComputerUIRefInput struct {
+	Ref string `json:"ref" jsonschema:"opaque ref returned by computer_ui_tree or computer_ui_find"`
+}
+
+type ComputerUIActionInput struct {
+	Ref    string `json:"ref" jsonschema:"opaque ref returned by computer_ui_tree or computer_ui_find"`
+	Action string `json:"action,omitempty" jsonschema:"semantic action name; preferred over index"`
+	Index  int    `json:"index,omitempty" jsonschema:"zero-based action index; defaults to 0"`
+}
+
+type ComputerUIActionOutput struct {
+	OK     bool   `json:"ok"`
+	Index  int    `json:"index"`
+	Action string `json:"action"`
+}
+
+type ComputerUIInvokeInput struct {
+	AppName        string   `json:"app_name,omitempty" jsonschema:"optional application name substring"`
+	Query          string   `json:"query,omitempty" jsonschema:"name, description, or role substring used to select one element"`
+	Role           string   `json:"role,omitempty" jsonschema:"optional exact AT-SPI role name"`
+	RequiredStates []string `json:"required_states,omitempty" jsonschema:"defaults to showing, visible, enabled"`
+	Action         string   `json:"action,omitempty" jsonschema:"semantic action name; when omitted the element must expose exactly one action"`
+	MaxDepth       int      `json:"max_depth,omitempty"`
+	MaxNodes       int      `json:"max_nodes,omitempty"`
+	TimeoutMS      int      `json:"timeout_ms,omitempty" jsonschema:"optional wait for not_found; max 30000"`
+	PollIntervalMS int      `json:"poll_interval_ms,omitempty" jsonschema:"default 250; min 100; max 2000"`
+}
+
+type ComputerUIInvokeOutput struct {
+	Status     string           `json:"status"`
+	Message    string           `json:"message,omitempty"`
+	Matched    int              `json:"matched"`
+	Node       *ComputerUINode  `json:"node,omitempty"`
+	Candidates []ComputerUINode `json:"candidates,omitempty"`
+	Index      int              `json:"index,omitempty"`
+	Action     string           `json:"action,omitempty"`
+}
+
+type ComputerUISetTextInput struct {
+	AppName        string   `json:"app_name,omitempty" jsonschema:"optional application name substring"`
+	Query          string   `json:"query,omitempty" jsonschema:"name, description, or role substring used to select one editable element"`
+	Role           string   `json:"role,omitempty" jsonschema:"optional exact AT-SPI role name"`
+	RequiredStates []string `json:"required_states,omitempty" jsonschema:"defaults to showing, visible, enabled"`
+	Text           string   `json:"text"`
+	MaxDepth       int      `json:"max_depth,omitempty"`
+	MaxNodes       int      `json:"max_nodes,omitempty"`
+	TimeoutMS      int      `json:"timeout_ms,omitempty" jsonschema:"optional wait for not_found; max 30000"`
+	PollIntervalMS int      `json:"poll_interval_ms,omitempty" jsonschema:"default 250; min 100; max 2000"`
+}
+
+type ComputerUISetTextOutput struct {
+	Status     string           `json:"status"`
+	Message    string           `json:"message,omitempty"`
+	Matched    int              `json:"matched"`
+	Node       *ComputerUINode  `json:"node,omitempty"`
+	Candidates []ComputerUINode `json:"candidates,omitempty"`
+	Characters int              `json:"characters,omitempty"`
+}
+
+type ComputerObserveInput struct {
+	AppName        string   `json:"app_name,omitempty"`
+	Query          string   `json:"query,omitempty"`
+	Role           string   `json:"role,omitempty"`
+	RequiredStates []string `json:"required_states,omitempty" jsonschema:"defaults to showing and visible"`
+	MaxDepth       int      `json:"max_depth,omitempty"`
+	MaxNodes       int      `json:"max_nodes,omitempty"`
+	MaxResults     int      `json:"max_results,omitempty" jsonschema:"defaults to 80; max 200"`
+	Screenshot     string   `json:"screenshot,omitempty" jsonschema:"auto, always, or never; defaults to auto"`
+	Format         string   `json:"format,omitempty" jsonschema:"png or jpeg; defaults to jpeg for observe screenshots"`
+	JPEGQuality    int      `json:"jpeg_quality,omitempty" jsonschema:"1-100; defaults to 70 for observe screenshots"`
+}
+
+type ComputerObserveOutput struct {
+	Info             ComputerInfoOutput        `json:"info"`
+	UI               ComputerUIQueryOutput     `json:"ui"`
+	Screenshot       *ComputerScreenshotOutput `json:"screenshot,omitempty"`
+	ScreenshotReason string                    `json:"screenshot_reason,omitempty"`
+}
+
+type ComputerObserveMetaOutput struct {
+	Info             ComputerInfoOutput            `json:"info"`
+	UI               ComputerUIQueryOutput         `json:"ui"`
+	Screenshot       *ComputerScreenshotMetaOutput `json:"screenshot,omitempty"`
+	ScreenshotReason string                        `json:"screenshot_reason,omitempty"`
 }

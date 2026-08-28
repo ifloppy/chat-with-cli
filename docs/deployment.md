@@ -110,7 +110,7 @@ NoNewPrivileges=yes
 WantedBy=default.target
 ```
 
-For read-only visual access, append `--allow-screen`. For keyboard and mouse access, append `--allow-computer-use` only when needed.
+For read-only screenshot/AT-SPI access, append `--allow-screen`. For keyboard, pointer, or semantic UI actions, append `--allow-computer-use` only when needed. Portal restore policy defaults to `--computer-persist=process`; use `none` for no restoration or explicitly choose `persistent` for restart-surviving consent.
 
 ```bash
 systemctl --user daemon-reload
@@ -129,7 +129,11 @@ systemctl --user import-environment \
 systemctl --user restart chat-with-cli-agent
 ```
 
-KDE screenshots use Spectacle when available. Wayland input currently prefers `wdotool`; its Portal/libei backend may display an OS consent dialog on first use and can persist a restore token according to the desktop portal policy.
+On KDE/Wayland, `chat-with-cli` first tries KWin ScreenShot2 directly and safely falls back to Spectacle when KWin denies direct capture. Wayland input prefers the native XDG RemoteDesktop Portal D-Bus API; `wdotool` remains only a fallback. UI inspection uses AT-SPI2 when available.
+
+For agent-driven GUI work, `computer_observe` is the preferred first call: it combines bounded AT-SPI observation with optional image capture, using `screenshot=auto` by default to avoid unnecessary image transfer. `computer_ui_invoke` should be preferred over a separate find/action pair when a unique semantic selector is available. For forms, `computer_ui_set_text` can write directly to AT-SPI EditableText controls without keyboard injection. Both support a bounded `timeout_ms` to wait for an asynchronously appearing selector.
+
+The Agent can recover the user runtime directory, session D-Bus, Wayland display, and a UTF-8 locale when a user service starts with an incomplete graphical environment. Native Portal input still displays the desktop consent UI when required. In the default `process` persistence mode, one-time restore tokens stay in memory and rotate after restoration; `persistent` stores only the current rotating token beneath the Agent state directory with permission `0600`.
 
 Avoid launching a Computer Use Agent through `sudo`: doing so commonly loses the user's Wayland and D-Bus session and weakens the privilege boundary at the same time.
 

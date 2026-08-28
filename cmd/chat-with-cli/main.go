@@ -81,33 +81,36 @@ func signalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
-func addEngineFlags(fs *flag.FlagSet) (*stringList, *bool, *bool, *bool, *string) {
+func addEngineFlags(fs *flag.FlagSet) (*stringList, *bool, *bool, *bool, *string, *string) {
 	roots := new(stringList)
 	fs.Var(roots, "root", "allowed filesystem root (repeatable; defaults to current directory)")
 	allowExec := fs.Bool("allow-exec", false, "allow arbitrary shell commands in PTY tasks")
-	allowScreen := fs.Bool("allow-screen", false, "allow read-only desktop screenshots")
-	allowComputer := fs.Bool("allow-computer-use", false, "allow desktop screenshots plus keyboard/mouse control")
+	allowScreen := fs.Bool("allow-screen", false, "allow read-only desktop screenshots and accessibility inspection")
+	allowComputer := fs.Bool("allow-computer-use", false, "allow screenshots, accessibility writes, and keyboard/mouse control")
+	computerPersist := fs.String("computer-persist", "process", "portal permission persistence: none, process, or persistent")
 	stateDir := fs.String("state-dir", "", "state directory for task logs and checkpoints")
-	return roots, allowExec, allowScreen, allowComputer, stateDir
+	return roots, allowExec, allowScreen, allowComputer, computerPersist, stateDir
 }
 
-func newEngine(roots []string, allowExec, allowScreen, allowComputer bool, stateDir string) (*engine.Engine, error) {
+func newEngine(roots []string, allowExec, allowScreen, allowComputer bool, computerPersist, stateDir string) (*engine.Engine, error) {
 	return engine.New(engine.Config{
 		Roots: roots, AllowExec: allowExec, AllowScreen: allowScreen || allowComputer,
-		AllowComputerControl: allowComputer, StateDir: stateDir, MaxReadBytes: 256 * 1024,
+		AllowComputerControl: allowComputer, ComputerPersistMode: computerPersist,
+		StateDir: stateDir, MaxReadBytes: 256 * 1024,
 	})
 }
 
 func runLocal(args []string) error {
 	fs := flag.NewFlagSet("local", flag.ContinueOnError)
-	roots, allowExec, allowScreen, allowComputer, stateDir := addEngineFlags(fs)
+	roots, allowExec, allowScreen, allowComputer, computerPersist, stateDir := addEngineFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	eng, err := newEngine(*roots, *allowExec, *allowScreen, *allowComputer, *stateDir)
+	eng, err := newEngine(*roots, *allowExec, *allowScreen, *allowComputer, *computerPersist, *stateDir)
 	if err != nil {
 		return err
 	}
+	defer eng.Close()
 	server := mcpserver.New(mcpserver.LocalCaller{Engine: eng})
 	ctx, cancel := signalContext()
 	defer cancel()
@@ -123,7 +126,7 @@ func envOr(value, name string) string {
 
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	roots, allowExec, allowScreen, allowComputer, stateDir := addEngineFlags(fs)
+	roots, allowExec, allowScreen, allowComputer, computerPersist, stateDir := addEngineFlags(fs)
 	listen := fs.String("listen", "127.0.0.1:8765", "HTTP listen address")
 	token := fs.String("token", "", "optional bearer token (or CHAT_WITH_CLI_CLIENT_TOKEN)")
 	if err := fs.Parse(args); err != nil {
@@ -133,10 +136,11 @@ func runServe(args []string) error {
 	if *token == "" && !loopbackListen(*listen) {
 		return fmt.Errorf("refusing unauthenticated non-loopback listen %q", *listen)
 	}
-	eng, err := newEngine(*roots, *allowExec, *allowScreen, *allowComputer, *stateDir)
+	eng, err := newEngine(*roots, *allowExec, *allowScreen, *allowComputer, *computerPersist, *stateDir)
 	if err != nil {
 		return err
 	}
+	defer eng.Close()
 	server := mcpserver.New(mcpserver.LocalCaller{Engine: eng})
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true})
@@ -198,7 +202,7 @@ func runRelay(args []string) error {
 
 func runAgent(args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	roots, allowExec, allowScreen, allowComputer, stateDir := addEngineFlags(fs)
+	roots, allowExec, allowScreen, allowComputer, computerPersist, stateDir := addEngineFlags(fs)
 	relayURL := fs.String("relay", "", "relay base URL, for example https://cli.example.com")
 	deviceDefault, _ := os.Hostname()
 	device := fs.String("device", deviceDefault, "device name exposed to MCP clients")
@@ -213,10 +217,11 @@ func runAgent(args []string) error {
 	if *token == "" {
 		return fmt.Errorf("agent token is required")
 	}
-	eng, err := newEngine(*roots, *allowExec, *allowScreen, *allowComputer, *stateDir)
+	eng, err := newEngine(*roots, *allowExec, *allowScreen, *allowComputer, *computerPersist, *stateDir)
 	if err != nil {
 		return err
 	}
+	defer eng.Close()
 	ctx, cancel := signalContext()
 	defer cancel()
 	client := &agent.Client{Engine: eng, URL: *relayURL, Device: *device, Token: *token}

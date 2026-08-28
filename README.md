@@ -69,22 +69,32 @@ See [SECURITY.md](SECURITY.md) for the threat model and residual risks.
 
 Computer Use is intentionally a backend interface rather than a privileged input hack.
 
-On Linux the current alpha detects:
+On Linux the current alpha uses:
 
-- **Screenshot:** KDE Spectacle, `grim`, GNOME Screenshot, then ImageMagick on X11.
-- **Wayland input:** [`wdotool`](https://github.com/cushycush/wdotool), which uses compositor-supported mechanisms such as XDG RemoteDesktop Portal/libei.
-- **X11 input:** `xdotool`.
+- **Semantic UI:** pure-Go AT-SPI2 tree/search with roles, names, states, bounds, focus and actions.
+- **Screenshot:** KWin ScreenShot2 D-Bus fast path when authorized, with Spectacle/`grim`/GNOME Screenshot fallbacks.
+- **Wayland input:** pure-Go XDG RemoteDesktop Portal first; `wdotool` is an optional fallback.
+- **X11 input:** `xdotool` fallback.
 
-`ydotool` is deliberately not auto-selected because `/dev/uinput` bypasses the compositor permission boundary. A future native Go Portal/libei backend can remove the optional `wdotool` runtime dependency.
+`ydotool` is deliberately not auto-selected because `/dev/uinput` bypasses the compositor permission boundary. The Portal backend keeps KDE/GNOME consent and revocation in the OS security model while keeping the Agent itself CGO-free.
 
-Screenshots are returned directly as MCP image content, not as base64 text in the model conversation. PNG and JPEG output are supported.
+Screenshots are returned directly as MCP image content, not as base64 text in the model conversation. PNG and JPEG output are supported. If an Agent is launched without GUI environment variables, Linux desktop-session variables are recovered from the logged-in user's runtime directory where possible.
 
-Typical visual loop:
+Preferred interaction loop:
 
-1. `computer_screenshot`
-2. reason about the visible UI
-3. `computer_move` + `computer_click`, or `computer_type` / `computer_key`
-4. `computer_screenshot` again to verify the result
+1. Start with `computer_observe` when GUI state is unknown. Its default `screenshot=auto` returns bounded visible AT-SPI data and only transfers an image when semantic UI is insufficient.
+2. Prefer `computer_ui_invoke` for a unique semantic action. It performs selection and action on one AT-SPI connection, refuses ambiguous selectors, and returns candidates instead of guessing. Set `timeout_ms` when the control may appear asynchronously.
+3. Prefer `computer_ui_set_text` for editable fields: it selects one visible/enabled AT-SPI `EditableText` control and replaces its UTF-8 contents directly, without pointer focus or simulated keystrokes.
+4. Use `computer_ui_find` / `computer_ui_wait` for inspection, disambiguation, and state synchronization. Treat returned refs as short-lived handles.
+5. Fall back to `computer_screenshot` + pointer coordinates only when semantic UI is unavailable. Verify consequential results with semantic state or a screenshot.
+
+### Agent-friendly call patterns
+
+Keep Computer Use calls narrow and state-driven. A recommended sequence is `computer_observe` -> `computer_ui_invoke`/`computer_ui_set_text` -> `computer_ui_wait`. Both atomic mutation tools can optionally wait for `not_found` selectors, avoiding a separate wait call. Avoid repeated screenshots when a semantic condition can be waited on. For `computer_ui_invoke`, zero matches return `not_found`, multiple matches return `ambiguous` with candidate nodes, and elements with multiple possible semantic actions return `ambiguous_action` unless an action name is supplied. If a bounded search ends before uniqueness can be proven, it returns `search_incomplete` and performs no action.
+
+For pixel-only applications, request JPEG screenshots for routine navigation and PNG only when exact pixels/text rendering matter. Low-level `move`/`click`/`type`/`key` remain deliberate escape hatches for canvas, games, remote desktops, and poorly accessible Electron/WebView interfaces.
+
+Portal consent persistence defaults to `--computer-persist=process`: the live Agent can rotate one-time restore tokens and recover a closed session without turning the machine into permanently unattended remote control. Use `none` to disable restoration, or explicitly choose `persistent` to store the rotating restore token in the Agent state directory with mode `0600`.
 
 ## Build
 
@@ -105,7 +115,7 @@ go build -o chat-with-cli ./cmd/chat-with-cli
   --allow-exec
 ```
 
-For read-only visual access, add `--allow-screen`. For full visual control, add `--allow-computer-use`.
+For read-only visual/semantic access, add `--allow-screen`. For full visual control, add `--allow-computer-use`. Portal persistence can be set with `--computer-persist=none|process|persistent`.
 
 ## Direct HTTP MCP
 
@@ -174,14 +184,18 @@ The workstation needs only outbound HTTPS/WebSocket access. See [docs/deployment
 
 ### Computer Use
 
-- `computer_info`, `computer_screenshot`
+- `computer_info`, `computer_observe`, `computer_screenshot`
+- `computer_ui_tree`, `computer_ui_find`, `computer_ui_wait`
+- `computer_ui_invoke` — unique selector + optional wait + semantic action in one call; refuses ambiguity/incomplete searches.
+- `computer_ui_set_text` — unique editable selector + direct AT-SPI text replacement, avoiding keyboard injection.
+- `computer_ui_focus`, `computer_ui_action` — lower-level short-lived-ref operations.
 - `computer_move`, `computer_click`, `computer_scroll`
 - `computer_type`, `computer_key`
 
 ## Roadmap
 
 - OAuth 2.1 / MCP authorization for hosted ChatGPT connectors.
-- Native Go XDG RemoteDesktop Portal + libei backend.
+- Optional native libei/EIS fast path for very high-frequency input; D-Bus Portal input is already implemented.
 - Paired ScreenCast/PipeWire capture for compositor-native multi-monitor coordinates.
 - Windows and macOS host backends behind the same capability interface.
 - Per-device credentials and key rotation.

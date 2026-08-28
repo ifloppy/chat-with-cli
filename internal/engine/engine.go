@@ -9,12 +9,25 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+
+	"github.com/godbus/dbus/v5"
 )
 
 type Engine struct {
 	cfg   Config
 	roots []string
 	tasks *TaskManager
+
+	computerMu           sync.Mutex
+	kwinDBusDisabled     bool
+	lastScreenshotWidth  int
+	lastScreenshotHeight int
+	portalMu             sync.Mutex
+	portalConn           *dbus.Conn
+	portal               *portalRemoteDesktopSession
+	portalRestoreToken   string
+	portalTokenLoaded    bool
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -24,6 +37,11 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.MaxTaskLogBytes <= 0 {
 		cfg.MaxTaskLogBytes = 64 << 20
 	}
+	mode, err := normalizeComputerPersistMode(cfg.ComputerPersistMode)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ComputerPersistMode = mode
 	if cfg.StateDir == "" {
 		home, _ := os.UserHomeDir()
 		cfg.StateDir = filepath.Join(home, ".local", "state", "chat-with-cli")
@@ -54,6 +72,22 @@ func New(cfg Config) (*Engine, error) {
 	e := &Engine{cfg: cfg, roots: roots}
 	e.tasks = NewTaskManager(e, filepath.Join(cfg.StateDir, "tasks"))
 	return e, nil
+}
+
+func (e *Engine) Close() error {
+	e.portalMu.Lock()
+	portal := e.portal
+	conn := e.portalConn
+	e.portal = nil
+	e.portalConn = nil
+	e.portalMu.Unlock()
+	if portal != nil {
+		portal.close()
+	}
+	if conn != nil {
+		return conn.Close()
+	}
+	return nil
 }
 
 func (e *Engine) Config() Config {
@@ -149,6 +183,30 @@ func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage)
 			return nil, err
 		}
 		return e.Screenshot(ctx, in)
+	case "computer_observe":
+		in, err := decode[ComputerObserveInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerObserve(ctx, in)
+	case "computer_ui_tree":
+		in, err := decode[ComputerUITreeInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerUITree(ctx, in)
+	case "computer_ui_find":
+		in, err := decode[ComputerUIFindInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerUIFind(ctx, in)
+	case "computer_ui_wait":
+		in, err := decode[ComputerUIWaitInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerUIWait(ctx, in)
 	case "task_start":
 		in, err := decode[StartTaskInput](raw)
 		if err != nil {
@@ -172,6 +230,30 @@ func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage)
 	}
 
 	switch method {
+	case "computer_ui_focus":
+		in, err := decode[ComputerUIRefInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerUIFocus(ctx, in)
+	case "computer_ui_action":
+		in, err := decode[ComputerUIActionInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerUIAction(ctx, in)
+	case "computer_ui_invoke":
+		in, err := decode[ComputerUIInvokeInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerUIInvoke(ctx, in)
+	case "computer_ui_set_text":
+		in, err := decode[ComputerUISetTextInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.ComputerUISetText(ctx, in)
 	case "computer_move":
 		in, err := decode[ComputerMoveInput](raw)
 		if err != nil {

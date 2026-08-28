@@ -19,24 +19,43 @@ import (
 const maxScreenshotBytes = 24 * 1024 * 1024
 
 func (e *Engine) ComputerInfo() ComputerInfoOutput {
+	backend := detectScreenshotBackend()
+	e.computerMu.Lock()
+	kwinDisabled := e.kwinDBusDisabled
+	e.computerMu.Unlock()
+	if !kwinDisabled && kwinScreenshotServiceAvailable() {
+		if backend != "" {
+			backend = "kwin-dbus+" + backend
+		} else {
+			backend = "kwin-dbus"
+		}
+	}
+	accessibility := ""
+	if atspiAvailable() {
+		accessibility = "at-spi2"
+	}
+	portalActive := false
+	if e.portalMu.TryLock() {
+		portalActive = e.portal != nil && !e.portal.isClosed()
+		e.portalMu.Unlock()
+	}
 	return ComputerInfoOutput{
-		ScreenAllowed:     e.cfg.AllowScreen,
-		ControlAllowed:    e.cfg.AllowComputerControl,
-		SessionType:       sessionType(),
-		Desktop:           os.Getenv("XDG_CURRENT_DESKTOP"),
-		ScreenshotBackend: detectScreenshotBackend(),
-		InputBackend:      detectInputBackend(),
+		ScreenAllowed: e.cfg.AllowScreen, ControlAllowed: e.cfg.AllowComputerControl,
+		SessionType: sessionType(), Desktop: desktopEnvValue("XDG_CURRENT_DESKTOP"),
+		ScreenshotBackend: backend, InputBackend: detectInputBackend(), AccessibilityBackend: accessibility,
+		ComputerPersistMode: e.cfg.ComputerPersistMode, PortalSessionActive: portalActive,
 	}
 }
 
 func sessionType() string {
-	if value := strings.TrimSpace(os.Getenv("XDG_SESSION_TYPE")); value != "" {
+	env := desktopEnvMap()
+	if value := strings.TrimSpace(env["XDG_SESSION_TYPE"]); value != "" {
 		return value
 	}
-	if os.Getenv("WAYLAND_DISPLAY") != "" {
+	if env["WAYLAND_DISPLAY"] != "" {
 		return "wayland"
 	}
-	if os.Getenv("DISPLAY") != "" {
+	if env["DISPLAY"] != "" {
 		return "x11"
 	}
 	return "unknown"
@@ -53,13 +72,16 @@ func detectScreenshotBackend() string {
 			return name
 		}
 	}
-	if os.Getenv("DISPLAY") != "" && commandExists("import") {
+	if desktopEnvValue("DISPLAY") != "" && commandExists("import") {
 		return "imagemagick"
 	}
 	return ""
 }
 
 func detectInputBackend() string {
+	if sessionType() == "wayland" && portalRemoteDesktopAvailable() {
+		return "xdg-desktop-portal"
+	}
 	if commandExists("wdotool") {
 		return "wdotool"
 	}
@@ -72,6 +94,9 @@ func detectInputBackend() string {
 func (e *Engine) Screenshot(ctx context.Context, in ComputerScreenshotInput) (ComputerScreenshotOutput, error) {
 	if !e.cfg.AllowScreen {
 		return ComputerScreenshotOutput{}, errors.New("screen capture is disabled; start with --allow-screen or --allow-computer-use")
+	}
+	if shot, ok := e.tryKWinScreenshot(ctx, in); ok {
+		return e.rememberScreenshot(shot), nil
 	}
 	backend := detectScreenshotBackend()
 	if backend == "" {
@@ -104,6 +129,7 @@ func (e *Engine) Screenshot(ctx context.Context, in ComputerScreenshotInput) (Co
 	default:
 		return ComputerScreenshotOutput{}, fmt.Errorf("unsupported screenshot backend %q", backend)
 	}
+	cmd.Env = desktopCommandEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return ComputerScreenshotOutput{}, fmt.Errorf("%s screenshot failed: %w: %s", backend, err, strings.TrimSpace(string(output)))
 	}
@@ -124,7 +150,7 @@ func (e *Engine) Screenshot(ctx context.Context, in ComputerScreenshotInput) (Co
 	}
 	format := strings.ToLower(strings.TrimSpace(in.Format))
 	if format == "" || format == "png" {
-		return ComputerScreenshotOutput{MIMEType: "image/png", Data: data, Width: cfg.Width, Height: cfg.Height}, nil
+		return e.rememberScreenshot(ComputerScreenshotOutput{MIMEType: "image/png", Data: data, Width: cfg.Width, Height: cfg.Height}), nil
 	}
 	if format != "jpeg" && format != "jpg" {
 		return ComputerScreenshotOutput{}, fmt.Errorf("unsupported screenshot format %q", in.Format)
@@ -144,7 +170,14 @@ func (e *Engine) Screenshot(ctx context.Context, in ComputerScreenshotInput) (Co
 	if err := jpeg.Encode(&out, img, &jpeg.Options{Quality: quality}); err != nil {
 		return ComputerScreenshotOutput{}, err
 	}
-	return ComputerScreenshotOutput{MIMEType: "image/jpeg", Data: out.Bytes(), Width: cfg.Width, Height: cfg.Height}, nil
+	return e.rememberScreenshot(ComputerScreenshotOutput{MIMEType: "image/jpeg", Data: out.Bytes(), Width: cfg.Width, Height: cfg.Height}), nil
+}
+
+func (e *Engine) rememberScreenshot(out ComputerScreenshotOutput) ComputerScreenshotOutput {
+	e.computerMu.Lock()
+	e.lastScreenshotWidth, e.lastScreenshotHeight = out.Width, out.Height
+	e.computerMu.Unlock()
+	return out
 }
 
 func (e *Engine) requireComputerControl() (string, error) {
@@ -153,7 +186,7 @@ func (e *Engine) requireComputerControl() (string, error) {
 	}
 	backend := detectInputBackend()
 	if backend == "" {
-		return "", errors.New("no supported input backend found; install wdotool on Wayland or xdotool on X11")
+		return "", errors.New("no supported input backend found; a RemoteDesktop portal is preferred on Wayland, with wdotool/xdotool as fallbacks")
 	}
 	return backend, nil
 }
@@ -162,6 +195,7 @@ func runInputCommand(ctx context.Context, name string, args ...string) error {
 	inputCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(inputCtx, name, args...)
+	cmd.Env = desktopCommandEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s failed: %w: %s", name, err, strings.TrimSpace(string(output)))
 	}
@@ -192,6 +226,8 @@ func (e *Engine) ComputerMove(ctx context.Context, in ComputerMoveInput) error {
 	}
 	x, y := strconv.Itoa(in.X), strconv.Itoa(in.Y)
 	switch backend {
+	case "xdg-desktop-portal":
+		return e.portalMove(ctx, in)
 	case "wdotool":
 		return runInputCommand(ctx, "wdotool", "mousemove", x, y)
 	case "xdotool":
@@ -219,6 +255,8 @@ func (e *Engine) ComputerClick(ctx context.Context, in ComputerClickInput) error
 	}
 
 	switch backend {
+	case "xdg-desktop-portal":
+		return e.portalClick(ctx, in)
 	case "wdotool":
 		for range clicks {
 			if err := runInputCommand(ctx, "wdotool", "click", button); err != nil {
@@ -242,6 +280,8 @@ func (e *Engine) ComputerScroll(ctx context.Context, in ComputerScrollInput) err
 		return nil
 	}
 	switch backend {
+	case "xdg-desktop-portal":
+		return e.portalScroll(ctx, in)
 	case "wdotool":
 		return runInputCommand(ctx, "wdotool", "scroll", strconv.Itoa(in.DX), strconv.Itoa(in.DY))
 	case "xdotool":
@@ -284,6 +324,9 @@ func (e *Engine) ComputerType(ctx context.Context, in ComputerTypeInput) error {
 	if delay < 0 || delay > 1000 {
 		return errors.New("delay_ms must be between 0 and 1000")
 	}
+	if backend == "xdg-desktop-portal" {
+		return e.portalType(ctx, in)
+	}
 
 	args := []string{"type", "--clearmodifiers"}
 	if delay > 0 {
@@ -301,6 +344,9 @@ func (e *Engine) ComputerKey(ctx context.Context, in ComputerKeyInput) error {
 	keys := strings.TrimSpace(in.Keys)
 	if keys == "" {
 		return errors.New("keys must not be empty")
+	}
+	if backend == "xdg-desktop-portal" {
+		return e.portalKey(ctx, in)
 	}
 	return runInputCommand(ctx, backend, "key", "--clearmodifiers", keys)
 }
