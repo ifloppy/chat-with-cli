@@ -213,7 +213,8 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 			Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH,
 			PID: os.Getpid(), Roots: append([]string(nil), e.roots...), AllowFileWrite: e.cfg.AllowFileWrite,
 			AllowExec: e.cfg.AllowExec, ExecSandbox: e.cfg.ExecSandbox,
-			AllowScreen: e.cfg.AllowScreen, AllowComputerControl: e.cfg.AllowComputerControl, MaxActiveTasks: e.cfg.MaxActiveTasks,
+			AllowScreen: e.cfg.AllowScreen, AllowAccessibility: e.cfg.AllowAccessibility,
+			AllowComputerControl: e.cfg.AllowComputerControl, MaxActiveTasks: e.cfg.MaxActiveTasks,
 			KillSwitchActive: e.killSwitchActive(),
 		}, nil
 	case "computer_info":

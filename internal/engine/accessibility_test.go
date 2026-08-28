@@ -44,13 +44,33 @@ func TestKWinBGRAToRGBA(t *testing.T) {
 	}
 }
 
-func TestUIInspectionRequiresScreenPermission(t *testing.T) {
+func TestUIInspectionRequiresAccessibilityPermission(t *testing.T) {
 	eng := testEngine(t, false)
 	if _, err := eng.ComputerUITree(context.Background(), ComputerUITreeInput{}); err == nil {
-		t.Fatal("UI tree should require screen permission")
+		t.Fatal("UI tree should require accessibility permission")
 	}
 	if _, err := eng.ComputerUIAction(context.Background(), ComputerUIActionInput{Ref: "bad"}); err == nil {
 		t.Fatal("semantic action should require computer control")
+	}
+}
+
+func TestAccessibilityAndScreenPermissionsAreIndependent(t *testing.T) {
+	root := t.TempDir()
+	accessOnly, err := New(Config{Roots: []string{root}, AllowAccessibility: true, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer accessOnly.Close()
+	if info := accessOnly.ComputerInfo(); !info.AccessibilityAllowed || info.ScreenAllowed {
+		t.Fatalf("unexpected accessibility-only capabilities: %+v", info)
+	}
+	screenOnly, err := New(Config{Roots: []string{root}, AllowScreen: true, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer screenOnly.Close()
+	if info := screenOnly.ComputerInfo(); info.AccessibilityAllowed || !info.ScreenAllowed {
+		t.Fatalf("unexpected screen-only capabilities: %+v", info)
 	}
 }
 
@@ -63,7 +83,7 @@ func TestKWinPermissionErrorDetection(t *testing.T) {
 func TestUIInvokeRequiresSpecificSelector(t *testing.T) {
 	root := t.TempDir()
 	eng, err := New(Config{
-		Roots: []string{root}, AllowScreen: true, AllowComputerControl: true,
+		Roots: []string{root}, AllowScreen: true, AllowAccessibility: true, AllowComputerControl: true,
 		StateDir: t.TempDir(),
 	})
 	if err != nil {
@@ -117,7 +137,7 @@ func TestUniqueSelectorValidation(t *testing.T) {
 
 func TestUISetTextRejectsNULBeforeDesktopAccess(t *testing.T) {
 	eng, err := New(Config{
-		Roots: []string{t.TempDir()}, AllowScreen: true, AllowComputerControl: true,
+		Roots: []string{t.TempDir()}, AllowScreen: true, AllowAccessibility: true, AllowComputerControl: true,
 		StateDir: t.TempDir(),
 	})
 	if err != nil {
@@ -135,7 +155,7 @@ func TestUISetTextRejectsNULBeforeDesktopAccess(t *testing.T) {
 
 func TestUIGetTextRejectsOversizedReadBeforeDesktopAccess(t *testing.T) {
 	eng, err := New(Config{
-		Roots: []string{t.TempDir()}, AllowScreen: true,
+		Roots: []string{t.TempDir()}, AllowScreen: true, AllowAccessibility: true,
 		StateDir: t.TempDir(),
 	})
 	if err != nil {

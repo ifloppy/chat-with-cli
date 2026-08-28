@@ -35,7 +35,8 @@ is not required.
 - Arbitrary PTY shell commands require `--allow-exec`.
 - `--exec-sandbox=landlock` adds a Linux filesystem-only boundary to shell
   children; it is not enabled implicitly.
-- Screenshots and AT-SPI accessibility reads require `--allow-screen`.
+- Screenshots require `--allow-screen`; AT-SPI accessibility reads require
+  `--allow-accessibility`.
 - Keyboard, pointer, semantic UI actions, and editable-text mutation require
   `--allow-computer-use`.
 - Portal restore-token persistence is process-only by default; restart-safe

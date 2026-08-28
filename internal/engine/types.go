@@ -8,6 +8,7 @@ type Config struct {
 	AllowExec            bool
 	ExecSandbox          string
 	AllowScreen          bool
+	AllowAccessibility   bool
 	AllowComputerControl bool
 	ComputerPersistMode  string
 	StateDir             string
@@ -129,6 +130,7 @@ type SystemInfoOutput struct {
 	AllowExec            bool     `json:"allow_exec"`
 	ExecSandbox          string   `json:"exec_sandbox"`
 	AllowScreen          bool     `json:"allow_screen"`
+	AllowAccessibility   bool     `json:"allow_accessibility"`
 	AllowComputerControl bool     `json:"allow_computer_control"`
 	MaxActiveTasks       int      `json:"max_active_tasks"`
 	KillSwitchActive     bool     `json:"kill_switch_active"`
@@ -186,6 +188,7 @@ type FilePatchOutput struct {
 
 type ComputerInfoOutput struct {
 	ScreenAllowed        bool   `json:"screen_allowed"`
+	AccessibilityAllowed bool   `json:"accessibility_allowed"`
 	ControlAllowed       bool   `json:"control_allowed"`
 	SessionType          string `json:"session_type,omitempty"`
 	Desktop              string `json:"desktop,omitempty"`

@@ -27,7 +27,8 @@ Capabilities can also be selected separately:
 --allow-file-write          filesystem and checkpoint writes
 --allow-exec                arbitrary PTY shell commands
 --exec-sandbox=landlock     Linux filesystem boundary for shell children
---allow-screen              screenshots and AT-SPI inspection
+--allow-screen              screenshots
+--allow-accessibility       AT-SPI semantic inspection
 --allow-computer-use        keyboard, pointer, semantic UI writes
 --kill-switch-file PATH     deny every Engine call while the file exists
 --max-active-tasks N        bounded concurrent PTY tasks (maximum 256)

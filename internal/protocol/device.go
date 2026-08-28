@@ -34,3 +34,18 @@ func ValidDeviceID(id string) bool {
 	}
 	return true
 }
+
+// AgentCapabilities is a deliberately small, privacy-preserving capability
+// report sent by an Agent after its authenticated WebSocket is established.
+// It contains policy state only; roots, hostnames, environment, and tool data
+// never cross the Relay boundary through this message.
+type AgentCapabilities struct {
+	FilesystemRead    bool   `json:"filesystem_read"`
+	FilesystemWrite   bool   `json:"filesystem_write"`
+	Exec              bool   `json:"exec"`
+	ExecSandbox       string `json:"exec_sandbox,omitempty"`
+	ScreenRead        bool   `json:"screen_read"`
+	AccessibilityRead bool   `json:"accessibility_read"`
+	ComputerInput     bool   `json:"computer_input"`
+	MaxActiveTasks    int    `json:"max_active_tasks,omitempty"`
+}

@@ -24,16 +24,17 @@ type Broker struct {
 }
 
 type peer struct {
-	device      string
-	conn        *websocket.Conn
-	writeMu     sync.Mutex
-	pendingMu   sync.Mutex
-	pending     map[string]chan protocol.Response
-	done        chan struct{}
-	doneOnce    sync.Once
-	stateMu     sync.RWMutex
-	connectedAt time.Time
-	lastSeen    time.Time
+	device       string
+	conn         *websocket.Conn
+	writeMu      sync.Mutex
+	pendingMu    sync.Mutex
+	pending      map[string]chan protocol.Response
+	done         chan struct{}
+	doneOnce     sync.Once
+	stateMu      sync.RWMutex
+	connectedAt  time.Time
+	lastSeen     time.Time
+	capabilities protocol.AgentCapabilities
 }
 
 type RemoteCaller struct {
@@ -114,6 +115,16 @@ func (p *peer) readLoop(onClose func()) {
 		p.stateMu.Lock()
 		p.lastSeen = time.Now()
 		p.stateMu.Unlock()
+		var request protocol.Request
+		if len(data) <= 64<<10 && json.Unmarshal(data, &request) == nil && request.ID != "" && request.Method == "agent_hello" {
+			var capabilities protocol.AgentCapabilities
+			if json.Unmarshal(request.Args, &capabilities) == nil {
+				p.stateMu.Lock()
+				p.capabilities = capabilities
+				p.stateMu.Unlock()
+			}
+			continue
+		}
 		var response protocol.Response
 		if json.Unmarshal(data, &response) != nil || response.ID == "" {
 			continue
@@ -232,11 +243,12 @@ func (b *Broker) Devices() []string {
 }
 
 type DeviceStatus struct {
-	Device      string
-	Online      bool
-	ConnectedAt time.Time
-	LastSeen    time.Time
-	InFlight    int
+	Device       string
+	Online       bool
+	ConnectedAt  time.Time
+	LastSeen     time.Time
+	InFlight     int
+	Capabilities protocol.AgentCapabilities
 }
 
 func (b *Broker) DeviceStatuses() map[string]DeviceStatus {
@@ -246,7 +258,7 @@ func (b *Broker) DeviceStatuses() map[string]DeviceStatus {
 	for name, peer := range b.peers {
 		peer.stateMu.RLock()
 		peer.pendingMu.Lock()
-		statuses[name] = DeviceStatus{Device: name, Online: true, ConnectedAt: peer.connectedAt, LastSeen: peer.lastSeen, InFlight: len(peer.pending)}
+		statuses[name] = DeviceStatus{Device: name, Online: true, ConnectedAt: peer.connectedAt, LastSeen: peer.lastSeen, InFlight: len(peer.pending), Capabilities: peer.capabilities}
 		peer.pendingMu.Unlock()
 		peer.stateMu.RUnlock()
 	}

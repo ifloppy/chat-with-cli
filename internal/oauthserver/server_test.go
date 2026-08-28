@@ -177,6 +177,8 @@ func TestOAuthStateSurvivesRestartAndRefreshRotates(t *testing.T) {
 	}
 	s1.mu.Lock()
 	ownerID := s1.usernames["owner"]
+	s1.clients["client-1"] = Client{ID: "client-1", Approved: true}
+	s1.devices["device-a"] = ownerID
 	access, refresh, _, err := s1.issueTokensLocked("client-1", ownerID, cfg.PublicURL+"/mcp/device-a", "mcp offline_access")
 	s1.mu.Unlock()
 	if err != nil {
@@ -385,6 +387,7 @@ func TestPublicDeviceOwnershipIsIsolated(t *testing.T) {
 		s.mu.Unlock()
 		t.Fatal("bob unexpectedly authorized alice MCP resource")
 	}
+	s.clients["client-a"] = Client{ID: "client-a", Approved: true}
 	access, _, _, err := s.issueTokensLocked("client-a", alice.ID,
 		s.absolute("/agent/alice-laptop"), "agent:connect offline_access")
 	s.mu.Unlock()
@@ -406,6 +409,8 @@ func TestRefreshTokenReplayRevokesTokenFamily(t *testing.T) {
 	}
 	s.mu.Lock()
 	ownerID := s.usernames["owner"]
+	s.clients["client"] = Client{ID: "client", Approved: true}
+	s.devices["device"] = ownerID
 	access, refresh, _, err := s.issueTokensLocked("client", ownerID, s.absolute("/mcp/device"), "mcp offline_access")
 	s.mu.Unlock()
 	if err != nil {
@@ -600,6 +605,8 @@ func TestAdminCanRevokeIndividualTokensAndSessions(t *testing.T) {
 	s.mu.Lock()
 	ownerID := s.usernames["owner"]
 	owner := s.users[ownerID]
+	s.clients["client"] = Client{ID: "client", Approved: true}
+	s.devices["admin-device"] = ownerID
 	access, refresh, _, err := s.issueTokensLocked("client", ownerID, s.absolute("/mcp/admin-device"), "mcp offline_access")
 	s.mu.Unlock()
 	if err != nil {
@@ -655,5 +662,59 @@ func TestAdminCanRevokeIndividualTokensAndSessions(t *testing.T) {
 	s.mu.Unlock()
 	if !firstPresent || secondPresent {
 		t.Fatalf("unexpected session state after individual logout: first=%v second=%v", firstPresent, secondPresent)
+	}
+}
+
+func TestDeviceRevocationRemovesImmutableRouteTokenFamilies(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18910", Password: "device-revoke-test-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const device = "id/0123456789abcdef0123456789abcdef"
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.clients["device-client"] = Client{ID: "device-client", Approved: true}
+	s.devices[device] = ownerID
+	access, refresh, _, err := s.issueTokensLocked("device-client", ownerID, s.absolute("/mcp/"+device), "mcp offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := s.users[ownerID]
+	if err := s.applyAdminAction("revoke-device", device, "", owner, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
+		t.Fatal(err)
+	}
+	if s.VerifyAccess(access, s.absolute("/mcp/"+device)) {
+		t.Fatal("immutable-route access token remained usable after device revocation")
+	}
+	s.mu.Lock()
+	_, accessPresent := s.access[tokenKey(access)]
+	_, refreshPresent := s.refresh[tokenKey(refresh)]
+	s.mu.Unlock()
+	if accessPresent || refreshPresent {
+		t.Fatalf("immutable-route tokens remained after device revocation: access=%v refresh=%v", accessPresent, refreshPresent)
+	}
+}
+
+func TestClientRevocationRemovesAuthorizationArtifacts(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18911", Password: "client-revoke-test-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerID := s.usernames["owner"]
+	s.mu.Lock()
+	s.clients["client-to-revoke"] = Client{ID: "client-to-revoke", Approved: true}
+	s.pending["pending"] = pendingAuth{ClientID: "client-to-revoke", Expires: time.Now().Add(time.Minute)}
+	s.codes[tokenKey("code-to-revoke")] = authCode{pendingAuth: pendingAuth{ClientID: "client-to-revoke", UserID: ownerID}, Expires: time.Now().Add(time.Minute)}
+	s.mu.Unlock()
+	if err := s.applyAdminAction("revoke-client", "client-to-revoke", "", s.users[ownerID], httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	_, pendingPresent := s.pending["pending"]
+	_, codePresent := s.codes[tokenKey("code-to-revoke")]
+	s.mu.Unlock()
+	if pendingPresent || codePresent {
+		t.Fatalf("client authorization artifacts remained: pending=%v code=%v", pendingPresent, codePresent)
 	}
 }

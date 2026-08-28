@@ -21,15 +21,16 @@ func (s *Server) SetDeviceStatusProvider(provider func() map[string]DeviceStatus
 }
 
 type adminDeviceView struct {
-	Route       string
-	ID          string
-	Name        string
-	Owner       string
-	Disabled    bool
-	Online      bool
-	ConnectedAt time.Time
-	LastSeen    time.Time
-	InFlight    int
+	Route        string
+	ID           string
+	Name         string
+	Owner        string
+	Disabled     bool
+	Online       bool
+	ConnectedAt  time.Time
+	LastSeen     time.Time
+	InFlight     int
+	Capabilities protocol.AgentCapabilities
 }
 
 type adminUserView struct {
@@ -107,7 +108,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"
 <form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="set-kill-switch"><input type="hidden" name="value" value="{{if .KillSwitch}}off{{else}}on{{end}}"><input name="confirm" placeholder="type KILL" size="10"><button class="danger" type="submit">{{if .KillSwitch}}Release{{else}}Emergency disable{{end}}</button></form>
 </section>
 
-<h2>Devices</h2><section><table><tr><th>Display name</th><th>Immutable ID / route</th><th>Owner</th><th>Connection</th><th>Actions</th></tr>{{range .Devices}}<tr><td><b>{{.Name}}</b></td><td><code>{{.ID}}</code><br><small>{{.Route}}</small></td><td>{{.Owner}}</td><td>{{if .Online}}<span class="ok">online</span>{{else}}<span class="muted">offline</span>{{end}}{{if .Disabled}} · <span class="bad">disabled</span>{{end}}{{if not .LastSeen.IsZero}}<br><small>last seen {{.LastSeen}}</small>{{end}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="rename-device"><input type="hidden" name="target" value="{{.Route}}"><input name="value" placeholder="new display name" size="14" required><button type="submit">Rename</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="disable-device"><input type="hidden" name="target" value="{{.Route}}"><input type="hidden" name="confirm" value="REVOKE"><button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-device"><input type="hidden" name="target" value="{{.Route}}"><input name="confirm" placeholder="REVOKE" size="8" required><button class="danger" type="submit">Revoke</button></form></td></tr>{{else}}<tr><td colspan="5" class="muted">No devices have been claimed.</td></tr>{{end}}</table></section>
+<h2>Devices</h2><section><table><tr><th>Display name</th><th>Immutable ID / route</th><th>Owner</th><th>Connection</th><th>Capabilities</th><th>Actions</th></tr>{{range .Devices}}<tr><td><b>{{.Name}}</b></td><td><code>{{.ID}}</code><br><small>{{.Route}}</small></td><td>{{.Owner}}</td><td>{{if .Online}}<span class="ok">online</span>{{else}}<span class="muted">offline</span>{{end}}{{if .Disabled}} · <span class="bad">disabled</span>{{end}}{{if not .LastSeen.IsZero}}<br><small>last seen {{.LastSeen}}</small>{{end}}{{if .InFlight}}<br><small>in flight {{.InFlight}}</small>{{end}}</td><td>{{if .Online}}<small>{{if .Capabilities.FilesystemRead}}filesystem read<br>{{end}}{{if .Capabilities.FilesystemWrite}}filesystem write<br>{{end}}{{if .Capabilities.Exec}}exec{{if .Capabilities.ExecSandbox}} ({{.Capabilities.ExecSandbox}}){{end}}<br>{{end}}{{if .Capabilities.ScreenRead}}screen read<br>{{end}}{{if .Capabilities.AccessibilityRead}}accessibility read<br>{{end}}{{if .Capabilities.ComputerInput}}computer input{{end}}</small>{{else}}<span class="muted">not reported</span>{{end}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="rename-device"><input type="hidden" name="target" value="{{.Route}}"><input name="value" placeholder="new display name" size="14" required><button type="submit">Rename</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="disable-device"><input type="hidden" name="target" value="{{.Route}}"><input type="hidden" name="confirm" value="REVOKE"><button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-device"><input type="hidden" name="target" value="{{.Route}}"><input name="confirm" placeholder="REVOKE" size="8" required><button class="danger" type="submit">Revoke</button></form></td></tr>{{else}}<tr><td colspan="6" class="muted">No devices have been claimed.</td></tr>{{end}}</table></section>
 
 <h2>Users</h2><section><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="create-user"><input name="target" autocomplete="username" placeholder="new username" minlength="3" maxlength="64" required><input name="value" type="password" autocomplete="new-password" minlength="12" placeholder="temporary password" required><button type="submit">Create user</button></form><table><tr><th>Username</th><th>Role / state</th><th>Created / last login</th><th>Actions</th></tr>{{range .UserList}}<tr><td><b>{{.Username}}</b></td><td>{{if .Admin}}admin {{end}}{{if .Disabled}}<span class="bad">disabled</span>{{else}}<span class="ok">active</span>{{end}}<br>{{.Devices}} device(s)</td><td>{{.CreatedAt}}<br>{{if not .LastLoginAt.IsZero}}{{.LastLoginAt}}{{else}}<span class="muted">never</span>{{end}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="disable-user"><input type="hidden" name="target" value="{{.ID}}"><input type="hidden" name="confirm" value="REVOKE"><button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="logout-user"><input type="hidden" name="target" value="{{.ID}}"><button type="submit">Logout all</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="rotate-password"><input type="hidden" name="target" value="{{.ID}}"><input name="value" type="password" minlength="12" placeholder="new password" required><button type="submit">Rotate password</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="delete-user"><input type="hidden" name="target" value="{{.ID}}"><input name="confirm" placeholder="DELETE" size="8" required><button class="danger" type="submit">Delete</button></form></td></tr>{{end}}</table></section>
 
@@ -243,7 +244,7 @@ func (s *Server) adminData(current User) adminPageData {
 		statuses := provider()
 		for i := range data.Devices {
 			if status, ok := statuses[data.Devices[i].Route]; ok {
-				data.Devices[i].Online, data.Devices[i].ConnectedAt, data.Devices[i].LastSeen, data.Devices[i].InFlight = status.Online, status.ConnectedAt, status.LastSeen, status.InFlight
+				data.Devices[i].Online, data.Devices[i].ConnectedAt, data.Devices[i].LastSeen, data.Devices[i].InFlight, data.Devices[i].Capabilities = status.Online, status.ConnectedAt, status.LastSeen, status.InFlight, status.Capabilities
 				if status.Online {
 					data.OnlineAgents++
 				}
@@ -523,6 +524,16 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 				delete(s.refreshUsed, key)
 			}
 		}
+		for key, pending := range s.pending {
+			if pending.ClientID == target {
+				delete(s.pending, key)
+			}
+		}
+		for key, code := range s.codes {
+			if code.ClientID == target {
+				delete(s.codes, key)
+			}
+		}
 	case "revoke-token":
 		if !validOpaqueHandle(target) {
 			return errUnknownToken
@@ -618,20 +629,25 @@ func (s *Server) revokeUserCredentialsLocked(userID string) {
 
 func (s *Server) revokeDeviceTokensLocked(device string) {
 	for key, record := range s.access {
-		if record.Resource == s.absolute("/mcp/"+device) || record.Resource == s.absolute("/agent/"+device) {
+		if s.resourceUsesDevice(record.Resource, device) {
 			delete(s.access, key)
 		}
 	}
 	for key, record := range s.refresh {
-		if record.Resource == s.absolute("/mcp/"+device) || record.Resource == s.absolute("/agent/"+device) {
+		if s.resourceUsesDevice(record.Resource, device) {
 			delete(s.refresh, key)
 		}
 	}
 	for key, record := range s.refreshUsed {
-		if record.Resource == s.absolute("/mcp/"+device) || record.Resource == s.absolute("/agent/"+device) {
+		if s.resourceUsesDevice(record.Resource, device) {
 			delete(s.refreshUsed, key)
 		}
 	}
+}
+
+func (s *Server) resourceUsesDevice(resource, device string) bool {
+	_, resourceDevice, _, ok := s.resourceParts(resource)
+	return ok && resourceDevice == device
 }
 
 func (s *Server) renameDeviceTokensLocked(old, new string) {

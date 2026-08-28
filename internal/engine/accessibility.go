@@ -287,8 +287,8 @@ func (w *atspiWalker) matchesNode(node ComputerUINode) bool {
 }
 
 func (e *Engine) requireUIRead() error {
-	if !e.cfg.AllowScreen {
-		return errors.New("UI inspection is disabled; start with --allow-screen or --allow-computer-use")
+	if !e.cfg.AllowAccessibility {
+		return errors.New("accessibility inspection is disabled; start with --allow-accessibility or --allow-computer-use")
 	}
 	return nil
 }

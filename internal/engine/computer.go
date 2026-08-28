@@ -41,7 +41,7 @@ func (e *Engine) ComputerInfo() ComputerInfoOutput {
 		e.portalMu.Unlock()
 	}
 	return ComputerInfoOutput{
-		ScreenAllowed: e.cfg.AllowScreen, ControlAllowed: e.cfg.AllowComputerControl,
+		ScreenAllowed: e.cfg.AllowScreen, AccessibilityAllowed: e.cfg.AllowAccessibility, ControlAllowed: e.cfg.AllowComputerControl,
 		SessionType: sessionType(), Desktop: desktopEnvValue("XDG_CURRENT_DESKTOP"),
 		ScreenshotBackend: backend, InputBackend: detectInputBackend(), AccessibilityBackend: accessibility,
 		ComputerPersistMode: e.cfg.ComputerPersistMode, PortalSessionActive: portalActive,

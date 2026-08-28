@@ -6,7 +6,7 @@ checking compatibility and keeping the existing configuration and state.
 
 ## Review-first procedure
 
-1. Download the release tarball and its published SHA256 checksum over HTTPS.
+1. Download the release tarball and the published `SHA256SUMS` manifest over HTTPS.
 2. Inspect the archive and verify the checksum with `sha256sum` or an
    equivalent trusted tool before replacing a binary.
 3. Run `go test ./...` when building from source and record `chat-with-cli

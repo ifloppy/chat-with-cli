@@ -31,6 +31,8 @@ const (
 	maxClients      = 2048
 	maxPendingAuth  = 1024
 	maxPendingIP    = 8
+	maxDevicesUser  = 16
+	maxRateEntries  = 8192
 )
 
 type Config struct {
@@ -165,11 +167,12 @@ type Server struct {
 }
 
 type DeviceStatus struct {
-	Device      string
-	Online      bool
-	ConnectedAt time.Time
-	LastSeen    time.Time
-	InFlight    int
+	Device       string
+	Online       bool
+	ConnectedAt  time.Time
+	LastSeen     time.Time
+	InFlight     int
+	Capabilities protocol.AgentCapabilities
 }
 
 func New(cfg Config) (*Server, error) {
@@ -1030,6 +1033,15 @@ func (s *Server) authorizeResourceLocked(userID, resource string) error {
 	}
 	if kind == "agent" {
 		if owner == "" {
+			owned := 0
+			for _, candidate := range s.devices {
+				if candidate == userID {
+					owned++
+				}
+			}
+			if owned >= maxDevicesUser {
+				return errors.New("device quota reached for this account")
+			}
 			s.devices[device] = userID
 			record = s.ensureDeviceRecordLocked(device, userID)
 			record.OwnerID = userID
@@ -1153,7 +1165,7 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(s.codes, tokenKey(codeValue))
-	if code.ClientID != clientID || code.RedirectURI != redirectURI || !pkceMatches(verifier, code.CodeChallenge) {
+	if _, clientExists := s.clients[code.ClientID]; !clientExists || code.ClientID != clientID || code.RedirectURI != redirectURI || !pkceMatches(verifier, code.CodeChallenge) {
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code binding check failed")
 		return
 	}
@@ -1185,6 +1197,19 @@ func (s *Server) exchangeRefresh(w http.ResponseWriter, r *http.Request) {
 			s.revokeFamilyLocked(used.Family)
 			_ = s.saveLocked()
 		}
+		oauthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
+		return
+	}
+	_, clientExists := s.clients[record.ClientID]
+	user, userExists := s.users[record.UserID]
+	kind, _, _, resourceOK := s.resourceParts(record.Resource)
+	requiredScope := "mcp"
+	if kind == "agent" {
+		requiredScope = "agent:connect"
+	}
+	if !clientExists || !userExists || user.Disabled || !resourceOK || !s.resourceEnabledLocked(record.Resource, requiredScope) {
+		delete(s.refresh, key)
+		_ = s.saveLocked()
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
 		return
 	}
@@ -1282,7 +1307,11 @@ func (s *Server) VerifyAccessScope(token, resource, requiredScope string) bool {
 	if !ok || !s.resourceEnabledLocked(resource, requiredScope) {
 		return false
 	}
-	return record.UserID != "" && record.Resource == resource &&
+	client, clientExists := s.clients[record.ClientID]
+	user, userExists := s.users[record.UserID]
+	_, device, _, resourceOK := s.resourceParts(resource)
+	return clientExists && client.ID != "" && userExists && !user.Disabled && s.devices[device] == record.UserID &&
+		record.UserID != "" && resourceOK && record.Resource == resource &&
 		strings.Contains(" "+record.Scope+" ", " "+requiredScope+" ")
 }
 

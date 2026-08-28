@@ -111,9 +111,9 @@ Usage:
   chat-with-cli version         Print version
 
 	Security defaults: filesystem reads are restricted to --root values and all
-filesystem writes, shell execution, screenshots, and input are disabled unless
-their capability flag is explicitly provided. Desktop screenshots and input are
-separately gated by --allow-screen / --allow-computer-use.
+		filesystem writes, shell execution, screenshots, accessibility reads, and input are disabled unless
+		their capability flag is explicitly provided. Desktop screenshots and input are
+		separately gated by --allow-screen, --allow-accessibility, and --allow-computer-use.
 `)
 }
 
@@ -141,7 +141,7 @@ func runExecSandbox(args []string) error {
 	return child.Run()
 }
 
-func addEngineFlags(fs *flag.FlagSet) (*stringList, *string, *bool, *bool, *string, *bool, *bool, *string, *string, *string, *int) {
+func addEngineFlags(fs *flag.FlagSet) (*stringList, *string, *bool, *bool, *string, *bool, *bool, *bool, *string, *string, *string, *int) {
 	roots := new(stringList)
 	fs.Var(roots, "root", "allowed filesystem root (repeatable; defaults to current directory)")
 	profile := fs.String("profile", "", "capability profile: read-only, developer, computer-use, or custom (individual flags apply when omitted)")
@@ -149,26 +149,27 @@ func addEngineFlags(fs *flag.FlagSet) (*stringList, *string, *bool, *bool, *stri
 	fs.BoolVar(allowFileWrite, "allow-fs-write", false, "alias for --allow-file-write")
 	allowExec := fs.Bool("allow-exec", false, "allow arbitrary shell commands in PTY tasks")
 	execSandbox := fs.String("exec-sandbox", "none", "exec boundary: none or landlock (Linux; only applies with --allow-exec)")
-	allowScreen := fs.Bool("allow-screen", false, "allow read-only desktop screenshots and accessibility inspection")
+	allowScreen := fs.Bool("allow-screen", false, "allow read-only desktop screenshots")
+	allowAccessibility := fs.Bool("allow-accessibility", false, "allow read-only AT-SPI accessibility inspection")
 	allowComputer := fs.Bool("allow-computer-use", false, "allow screenshots, accessibility writes, and keyboard/mouse control")
 	computerPersist := fs.String("computer-persist", "process", "portal permission persistence: none, process, or persistent")
 	stateDir := fs.String("state-dir", "", "state directory for task logs and checkpoints")
 	killSwitchPath := fs.String("kill-switch-file", "", "disable all Engine tools while this local file exists")
 	maxActiveTasks := fs.Int("max-active-tasks", 32, "maximum concurrent PTY tasks")
-	return roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks
+	return roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowAccessibility, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks
 }
 
-func applyCapabilityProfile(fs *flag.FlagSet, profile string, allowFileWrite, allowExec, allowScreen, allowComputer *bool) error {
+func applyCapabilityProfile(fs *flag.FlagSet, profile string, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer *bool) error {
 	if !flagWasSet(fs, "profile") && strings.TrimSpace(profile) == "" {
 		return nil
 	}
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "read-only":
-		*allowFileWrite, *allowExec, *allowScreen, *allowComputer = false, false, false, false
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, false, false, false
 	case "developer":
-		*allowFileWrite, *allowExec, *allowScreen, *allowComputer = true, true, false, false
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, false, false, false
 	case "computer-use":
-		*allowFileWrite, *allowExec, *allowScreen, *allowComputer = false, false, true, true
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, true, true, true
 	case "custom":
 		return nil
 	default:
@@ -177,9 +178,10 @@ func applyCapabilityProfile(fs *flag.FlagSet, profile string, allowFileWrite, al
 	return nil
 }
 
-func newEngine(roots []string, allowFileWrite, allowExec bool, execSandbox string, allowScreen, allowComputer bool, computerPersist, stateDir, killSwitchPath string, maxActiveTasks int) (*engine.Engine, error) {
+func newEngine(roots []string, allowFileWrite, allowExec bool, execSandbox string, allowScreen, allowAccessibility, allowComputer bool, computerPersist, stateDir, killSwitchPath string, maxActiveTasks int) (*engine.Engine, error) {
 	return engine.New(engine.Config{
 		Roots: roots, AllowFileWrite: allowFileWrite, AllowExec: allowExec, ExecSandbox: execSandbox, AllowScreen: allowScreen || allowComputer,
+		AllowAccessibility:   allowAccessibility || allowComputer,
 		AllowComputerControl: allowComputer, ComputerPersistMode: computerPersist,
 		StateDir: stateDir, KillSwitchPath: killSwitchPath, MaxReadBytes: 256 * 1024, MaxActiveTasks: maxActiveTasks,
 	})
@@ -187,14 +189,14 @@ func newEngine(roots []string, allowFileWrite, allowExec bool, execSandbox strin
 
 func runLocal(args []string) error {
 	fs := flag.NewFlagSet("local", flag.ContinueOnError)
-	roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks := addEngineFlags(fs)
+	roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowAccessibility, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks := addEngineFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowComputer); err != nil {
+	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
 	}
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
@@ -224,27 +226,28 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks := addEngineFlags(fs)
+	roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowAccessibility, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks := addEngineFlags(fs)
 	listen := fs.String("listen", "127.0.0.1:8765", "HTTP listen address")
 	token := fs.String("token", "", "optional bearer token (or CHAT_WITH_CLI_CLIENT_TOKEN)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowComputer); err != nil {
+	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
 	}
 	*token = envOr(*token, "CHAT_WITH_CLI_CLIENT_TOKEN")
 	if *token == "" && !loopbackListen(*listen) {
 		return fmt.Errorf("refusing unauthenticated non-loopback listen %q", *listen)
 	}
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
 	defer eng.Close()
 	server := mcpserver.New(mcpserver.LocalCaller{Engine: eng})
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
+	var handler http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true})
+	handler = maxRequestBody(8<<20, handler)
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", bearerAuth(*token, handler))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
@@ -546,6 +549,7 @@ func runRelay(args []string) error {
 		}
 		return mcpserver.New(relay.RemoteCaller{Broker: broker, Device: device})
 	}, &mcp.StreamableHTTPOptions{Stateless: true})
+	pathHandler = maxRequestBody(8<<20, pathHandler)
 	var legacyHandler http.Handler = mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		device := strings.TrimSpace(r.URL.Query().Get("device"))
 		if !protocol.ValidDeviceName(device) && !(strings.HasPrefix(device, "id/") && protocol.ValidDeviceID(strings.TrimPrefix(device, "id/"))) {
@@ -553,6 +557,7 @@ func runRelay(args []string) error {
 		}
 		return mcpserver.New(relay.RemoteCaller{Broker: broker, Device: device})
 	}, &mcp.StreamableHTTPOptions{Stateless: true})
+	legacyHandler = maxRequestBody(8<<20, legacyHandler)
 	if envBool("CHAT_WITH_CLI_MCP_DIAGNOSTICS") {
 		pathHandler = mcpDiagnosticHandler(pathHandler)
 		legacyHandler = mcpDiagnosticHandler(legacyHandler)
@@ -570,7 +575,7 @@ func runRelay(args []string) error {
 			status := broker.DeviceStatuses()
 			out := make(map[string]oauthserver.DeviceStatus, len(status))
 			for name, value := range status {
-				out[name] = oauthserver.DeviceStatus{Device: value.Device, Online: value.Online, ConnectedAt: value.ConnectedAt, LastSeen: value.LastSeen, InFlight: value.InFlight}
+				out[name] = oauthserver.DeviceStatus{Device: value.Device, Online: value.Online, ConnectedAt: value.ConnectedAt, LastSeen: value.LastSeen, InFlight: value.InFlight, Capabilities: value.Capabilities}
 			}
 			return out
 		})
@@ -604,7 +609,7 @@ func runRelay(args []string) error {
 
 func runAgent(args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks := addEngineFlags(fs)
+	roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowAccessibility, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks := addEngineFlags(fs)
 	relayURL := fs.String("relay", "", "relay base URL, for example https://cli.example.com")
 	deviceDefault, _ := os.Hostname()
 	device := fs.String("device", deviceDefault, "device name exposed to MCP clients")
@@ -637,6 +642,9 @@ func runAgent(args []string) error {
 	if !flagWasSet(fs, "allow-screen") {
 		*allowScreen = values.Bool(*allowScreen, "agent.allow_screen")
 	}
+	if !flagWasSet(fs, "allow-accessibility") {
+		*allowAccessibility = values.Bool(*allowAccessibility, "agent.allow_accessibility")
+	}
 	if !flagWasSet(fs, "allow-computer-use") {
 		*allowComputer = values.Bool(*allowComputer, "agent.allow_computer_use")
 	}
@@ -664,7 +672,7 @@ func runAgent(args []string) error {
 	if !flagWasSet(fs, "credentials") {
 		*credentials = values.String(*credentials, "agent.credentials")
 	}
-	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowComputer); err != nil {
+	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
 	}
 	*token = envOr(*token, "CHAT_WITH_CLI_AGENT_TOKEN")
@@ -697,7 +705,7 @@ func runAgent(args []string) error {
 	if strings.TrimSpace(*relayURL) == "" {
 		return fmt.Errorf("--relay is required for first login; later starts can reuse the saved OAuth profile")
 	}
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
@@ -766,6 +774,15 @@ func bearerAuth(token string, next http.Handler) http.Handler {
 		if len(provided) != len(token) || subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func maxRequestBody(limit int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})

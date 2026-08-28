@@ -90,7 +90,7 @@ func TestResolvePathRejectsSymlinkEscape(t *testing.T) {
 func TestComputerCapabilitiesAreOptIn(t *testing.T) {
 	eng := testEngine(t, false)
 	info := eng.ComputerInfo()
-	if info.ScreenAllowed || info.ControlAllowed {
+	if info.ScreenAllowed || info.AccessibilityAllowed || info.ControlAllowed {
 		t.Fatalf("computer capabilities unexpectedly enabled: %+v", info)
 	}
 	if _, err := eng.Screenshot(context.Background(), ComputerScreenshotInput{}); err == nil {

@@ -68,7 +68,8 @@ explicitly choose `--profile developer` or enable individual capabilities; see
 | Filesystem/checkpoint write | off | `--allow-file-write` |
 | Arbitrary shell / PTY | off | `--allow-exec` |
 | Exec filesystem boundary | none unless requested | `--exec-sandbox=landlock` on Linux |
-| Screen and accessibility read | off | `--allow-screen` |
+| Screen read (screenshots) | off | `--allow-screen` |
+| Accessibility read (AT-SPI) | off | `--allow-accessibility` |
 | Keyboard, pointer, semantic UI writes | off | `--allow-computer-use` |
 
 The default profile is read-only. `--root` is a filesystem-tool boundary, not

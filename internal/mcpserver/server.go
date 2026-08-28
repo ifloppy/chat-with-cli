@@ -158,11 +158,11 @@ func New(caller Caller) *mcp.Server {
 	addScreenshotTool(server, caller)
 	addObserveTool(server, caller)
 	addTool[engine.ComputerUITreeInput, engine.ComputerUIQueryOutput](server, caller, "computer_ui_tree",
-		"Inspect a bounded AT-SPI accessibility tree. Prefer this structured view over screenshots when applications expose accessibility metadata.")
+		"Inspect a bounded AT-SPI accessibility tree. Requires --allow-accessibility. Prefer this structured view over screenshots when applications expose accessibility metadata.")
 	addTool[engine.ComputerUIFindInput, engine.ComputerUIQueryOutput](server, caller, "computer_ui_find",
-		"Find accessible UI elements by application, name/description/role text, and optional exact role. Returns opaque refs, bounds, and semantic actions.")
+		"Find accessible UI elements by application, name/description/role text, and optional exact role. Requires --allow-accessibility. Returns opaque refs, bounds, and semantic actions.")
 	addTool[engine.ComputerUIWaitInput, engine.ComputerUIQueryOutput](server, caller, "computer_ui_wait",
-		"Wait up to 30 seconds for a matching accessible UI element to appear. Prefer this over repeated screenshots while an app is loading.")
+		"Wait up to 30 seconds for a matching accessible UI element to appear. Requires --allow-accessibility. Prefer this over repeated screenshots while an app is loading.")
 	addTool[engine.ComputerUIRefInput, engine.Ack](server, caller, "computer_ui_focus",
 		"Focus an accessible UI element by opaque ref. Requires --allow-computer-use.")
 	addTool[engine.ComputerUIActionInput, engine.ComputerUIActionOutput](server, caller, "computer_ui_action",
@@ -170,7 +170,7 @@ func New(caller Caller) *mcp.Server {
 	addTool[engine.ComputerUIInvokeInput, engine.ComputerUIInvokeOutput](server, caller, "computer_ui_invoke",
 		"Atomically wait for/find one visible enabled accessible element and invoke its semantic action. Refuses ambiguous or incomplete searches instead of guessing. Requires --allow-computer-use.")
 	addTool[engine.ComputerUIGetTextInput, engine.ComputerUIGetTextOutput](server, caller, "computer_ui_get_text",
-		"Read bounded UTF-8 contents from one uniquely selected visible AT-SPI Text control without screenshots or OCR.")
+		"Read bounded UTF-8 contents from one uniquely selected visible AT-SPI Text control without screenshots or OCR. Requires --allow-accessibility.")
 	addTool[engine.ComputerUISetTextInput, engine.ComputerUISetTextOutput](server, caller, "computer_ui_set_text",
 		"Atomically find one visible enabled AT-SPI EditableText control and replace its UTF-8 contents without pointer or keyboard injection. Requires --allow-computer-use.")
 	addTool[engine.ComputerMoveInput, engine.Ack](server, caller, "computer_move", "Move the pointer to absolute screen coordinates.")

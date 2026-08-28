@@ -113,6 +113,9 @@ func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 	defer cancel()
 	var writeMu sync.Mutex
 	sem := make(chan struct{}, 32)
+	if err := c.sendCapabilities(ctx, conn); err != nil {
+		return err
+	}
 
 	for {
 		_, data, err := conn.Read(ctx)
@@ -140,6 +143,28 @@ func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 			writeMu.Unlock()
 		}(request)
 	}
+}
+
+func (c *Client) sendCapabilities(ctx context.Context, conn *websocket.Conn) error {
+	cfg := c.Engine.Config()
+	capabilities, err := json.Marshal(protocol.AgentCapabilities{
+		FilesystemRead:    len(cfg.Roots) > 0,
+		FilesystemWrite:   cfg.AllowFileWrite,
+		Exec:              cfg.AllowExec,
+		ExecSandbox:       cfg.ExecSandbox,
+		ScreenRead:        cfg.AllowScreen,
+		AccessibilityRead: cfg.AllowAccessibility || cfg.AllowComputerControl,
+		ComputerInput:     cfg.AllowComputerControl,
+		MaxActiveTasks:    cfg.MaxActiveTasks,
+	})
+	if err != nil {
+		return err
+	}
+	message, err := json.Marshal(protocol.Request{ID: protocol.NewID(), Method: "agent_hello", Args: capabilities})
+	if err != nil {
+		return err
+	}
+	return conn.Write(ctx, websocket.MessageText, message)
 }
 
 func (c *Client) handle(ctx context.Context, request protocol.Request) protocol.Response {

@@ -1,8 +1,8 @@
 # Computer Use
 
 Computer Use is disabled by default and should be enabled only for a bounded,
-user-understood task. `--allow-screen` permits screenshots and semantic
-AT-SPI2 inspection. `--allow-computer-use` additionally permits keyboard,
+user-understood task. `--allow-screen` permits screenshots. `--allow-accessibility`
+permits semantic AT-SPI2 inspection. `--allow-computer-use` additionally permits keyboard,
 pointer, focus, semantic actions, and editable-text changes; it also implies
 screen access.
 

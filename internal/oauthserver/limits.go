@@ -85,6 +85,16 @@ func (s *Server) allowRate(r *http.Request, bucket string, limit int, window tim
 	now := time.Now()
 	s.rateMu.Lock()
 	defer s.rateMu.Unlock()
+	if len(s.rates) >= maxRateEntries {
+		for key, entry := range s.rates {
+			if now.Sub(entry.Started) >= time.Hour {
+				delete(s.rates, key)
+			}
+		}
+		if len(s.rates) >= maxRateEntries {
+			return false
+		}
+	}
 	entry := s.rates[key]
 	if entry.Started.IsZero() || now.Sub(entry.Started) >= window {
 		entry = rateWindow{Started: now}

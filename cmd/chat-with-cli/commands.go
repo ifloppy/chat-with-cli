@@ -38,7 +38,8 @@ func runAgentSetup(args []string) error {
 	allowFileWrite := fs.Bool("allow-file-write", false, "allow filesystem/checkpoint writes")
 	allowExec := fs.Bool("allow-exec", false, "allow PTY shell execution")
 	execSandbox := fs.String("exec-sandbox", "none", "none or landlock")
-	allowScreen := fs.Bool("allow-screen", false, "allow read-only screen inspection")
+	allowScreen := fs.Bool("allow-screen", false, "allow read-only screenshot capture")
+	allowAccessibility := fs.Bool("allow-accessibility", false, "allow read-only AT-SPI accessibility inspection")
 	allowComputer := fs.Bool("allow-computer-use", false, "allow computer input/control")
 	computerPersist := fs.String("computer-persist", "process", "none, process, or persistent")
 	killSwitchPath := fs.String("kill-switch-file", "", "local emergency kill-switch file")
@@ -63,11 +64,11 @@ func runAgentSetup(args []string) error {
 	}
 	switch strings.ToLower(strings.TrimSpace(*profile)) {
 	case "read-only":
-		*allowFileWrite, *allowExec, *allowScreen, *allowComputer = false, false, false, false
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, false, false, false
 	case "developer":
-		*allowFileWrite, *allowExec, *allowScreen, *allowComputer = true, true, false, false
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, false, false, false
 	case "computer-use":
-		*allowFileWrite, *allowExec, *allowScreen, *allowComputer = false, false, true, true
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, true, true, true
 	}
 	if !*allowExec {
 		*execSandbox = "none"
@@ -83,21 +84,22 @@ func runAgentSetup(args []string) error {
 		*roots = append(*roots, cwd)
 	}
 	values := map[string]any{
-		"agent.relay_url":          strings.TrimSpace(*relayURL),
-		"agent.device":             strings.TrimSpace(*device),
-		"agent.device_id":          strings.TrimSpace(*deviceID),
-		"agent.root":               append([]string(nil), *roots...),
-		"agent.profile":            strings.ToLower(strings.TrimSpace(*profile)),
-		"agent.state_dir":          strings.TrimSpace(*stateDir),
-		"agent.allow_file_write":   *allowFileWrite,
-		"agent.allow_exec":         *allowExec,
-		"agent.exec_sandbox":       strings.ToLower(strings.TrimSpace(*execSandbox)),
-		"agent.allow_screen":       *allowScreen,
-		"agent.allow_computer_use": *allowComputer,
-		"agent.computer_persist":   strings.TrimSpace(*computerPersist),
-		"agent.max_active_tasks":   *maxActiveTasks,
-		"agent.kill_switch_file":   strings.TrimSpace(*killSwitchPath),
-		"agent.credentials":        oauthclient.DefaultCredentialsPath(),
+		"agent.relay_url":           strings.TrimSpace(*relayURL),
+		"agent.device":              strings.TrimSpace(*device),
+		"agent.device_id":           strings.TrimSpace(*deviceID),
+		"agent.root":                append([]string(nil), *roots...),
+		"agent.profile":             strings.ToLower(strings.TrimSpace(*profile)),
+		"agent.state_dir":           strings.TrimSpace(*stateDir),
+		"agent.allow_file_write":    *allowFileWrite,
+		"agent.allow_exec":          *allowExec,
+		"agent.exec_sandbox":        strings.ToLower(strings.TrimSpace(*execSandbox)),
+		"agent.allow_screen":        *allowScreen,
+		"agent.allow_accessibility": *allowAccessibility,
+		"agent.allow_computer_use":  *allowComputer,
+		"agent.computer_persist":    strings.TrimSpace(*computerPersist),
+		"agent.max_active_tasks":    *maxActiveTasks,
+		"agent.kill_switch_file":    strings.TrimSpace(*killSwitchPath),
+		"agent.credentials":         oauthclient.DefaultCredentialsPath(),
 	}
 	if err := writeConfigFile(*configPath, values, *force); err != nil {
 		return fmt.Errorf("write agent config: %w", err)
@@ -198,7 +200,7 @@ func runRelayInstall(args []string) error {
 		return fmt.Errorf("release installer currently supports amd64 and arm64; detected %s", arch)
 	}
 	fmt.Printf("installation checklist for %s on linux/%s (no files changed):\n", *version, arch)
-	fmt.Printf("1. Download chat-with-cli_%s_linux_%s.tar.gz and its .sha256 file from the GitHub release.\n", *version, arch)
+	fmt.Printf("1. Download chat-with-cli_%s_linux_%s.tar.gz and SHA256SUMS from the GitHub release.\n", *version, arch)
 	fmt.Println("2. Inspect the archive and checksum before extraction (never pipe an unverified response to a shell).")
 	fmt.Printf("3. Install the binary as %s/bin/chat-with-cli, then run `chat-with-cli relay setup`.\n", strings.TrimRight(*prefix, "/"))
 	fmt.Println("4. Create a dedicated system user/state directory and review the hardened systemd unit before starting.")
@@ -371,7 +373,7 @@ func localDoctorChecks(values config.Values) []doctorCheck {
 		}
 	}
 
-	gui := values.Bool(false, "agent.allow_screen") || values.Bool(false, "agent.allow_computer_use")
+	gui := values.Bool(false, "agent.allow_screen") || values.Bool(false, "agent.allow_accessibility") || values.Bool(false, "agent.allow_computer_use")
 	computer := values.Bool(false, "agent.allow_computer_use")
 	if !gui {
 		for _, name := range []string{"desktop display", "session D-Bus", "AT-SPI", "screenshot backend"} {
