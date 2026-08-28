@@ -7,6 +7,10 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ifloppy/chat-with-cli/internal/engine"
@@ -226,6 +230,71 @@ func TestToolDescriptorsMeetChatGPTRequirements(t *testing.T) {
 		for _, key := range []string{"readOnlyHint", "destructiveHint", "openWorldHint"} {
 			if _, ok := annotations[key]; !ok {
 				t.Fatalf("%s missing required annotation %s: %s", tool.Name, key, raw)
+			}
+		}
+	}
+}
+
+func TestRawStreamableHTTPToolsListAdvertisesAllTools(t *testing.T) {
+	server := New(fakeCaller{})
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
+		Stateless: true, JSONResponse: true,
+	})
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	post := func(message string) map[string]any {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, httpServer.URL, strings.NewReader(message))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("MCP %s status=%d body=%s", message, resp.StatusCode, data)
+		}
+		var value map[string]any
+		if err := json.Unmarshal(data, &value); err != nil {
+			t.Fatalf("decode raw MCP response %q: %v", data, err)
+		}
+		return value
+	}
+	post(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"compatibility-test","version":"1"}}}`)
+	response := post(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+	result, ok := response["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("tools/list response has no result: %#v", response)
+	}
+	tools, ok := result["tools"].([]any)
+	if !ok || len(tools) != 31 {
+		t.Fatalf("raw tools/list advertised %#v tools, want 31", result["tools"])
+	}
+	for _, raw := range tools {
+		descriptor, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("tool descriptor type=%T", raw)
+		}
+		if descriptor["name"] == "" || descriptor["title"] == "" || descriptor["description"] == "" || descriptor["inputSchema"] == nil {
+			t.Fatalf("incomplete raw descriptor: %#v", descriptor)
+		}
+		annotations, ok := descriptor["annotations"].(map[string]any)
+		if !ok {
+			t.Fatalf("raw descriptor has no annotations: %#v", descriptor)
+		}
+		for _, key := range []string{"readOnlyHint", "destructiveHint", "openWorldHint"} {
+			if _, ok := annotations[key]; !ok {
+				t.Fatalf("raw descriptor missing annotation %s: %#v", key, descriptor)
 			}
 		}
 	}

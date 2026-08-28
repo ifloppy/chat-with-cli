@@ -16,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/ifloppy/chat-with-cli/internal/config"
+	"github.com/ifloppy/chat-with-cli/internal/mcpserver"
 	"github.com/ifloppy/chat-with-cli/internal/oauthclient"
 	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
@@ -249,6 +251,7 @@ func runDoctor(args []string) error {
 	relayURL := fs.String("relay", "", "Relay URL to inspect")
 	device := fs.String("device", "", "legacy display-name route to inspect")
 	deviceID := fs.String("device-id", "", "immutable device ID route to inspect")
+	mcpToken := fs.String("mcp-token", "", "existing MCP bearer token for initialize/tools/list checks")
 	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration path")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -266,15 +269,17 @@ func runDoctor(args []string) error {
 	if *deviceID == "" {
 		*deviceID = values.String(*deviceID, "agent.device_id")
 	}
+	*mcpToken = envOr(*mcpToken, "CHAT_WITH_CLI_CLIENT_TOKEN")
+	checks := localDoctorChecks(values)
 	if strings.TrimSpace(*relayURL) == "" {
-		return errors.New("doctor needs --relay or agent.relay_url")
+		checks = append(checks, doctorCheck{Name: "Relay checks", Skip: true, Detail: ": provide --relay or agent.relay_url for network checks"})
+		return reportDoctorChecks(checks)
 	}
 	base, err := normalizeDiagnosticURL(*relayURL)
 	if err != nil {
 		return err
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	checks := []doctorCheck{}
 	checks = append(checks, doctorHTTPCheck(context.Background(), client, "DNS/TLS and health", base+"/health", func(resp *http.Response) bool { return resp.StatusCode == http.StatusOK }))
 	checks = append(checks, doctorHTTPCheck(context.Background(), client, "OAuth metadata", base+"/.well-known/oauth-authorization-server", func(resp *http.Response) bool {
 		return resp.StatusCode == http.StatusOK && strings.Contains(resp.Header.Get("Content-Type"), "json")
@@ -294,10 +299,38 @@ func runDoctor(args []string) error {
 		checks = append(checks, doctorHTTPCheck(context.Background(), client, "MCP challenge", base+"/mcp/"+route, func(resp *http.Response) bool {
 			return resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusServiceUnavailable
 		}))
+		resource := base + "/agent/" + route
+		credentialsPath := values.String(oauthclient.DefaultCredentialsPath(), "agent.credentials")
+		credential, found, credentialErr := oauthclient.LoadCredential(credentialsPath, resource)
+		if credentialErr != nil {
+			checks = append(checks, doctorCheck{Name: "saved Agent credential", Detail: ": " + credentialErr.Error()})
+		} else if !found {
+			checks = append(checks, doctorCheck{Name: "saved Agent credential", Skip: true, Detail: ": no saved credential for this device; run login first"})
+		} else if credential.AccessToken == "" || credential.ExpiresAt <= time.Now().Unix() {
+			checks = append(checks, doctorCheck{Name: "saved Agent credential", Detail: ": access token is missing or expired"})
+		} else {
+			checks = append(checks, doctorCheck{Name: "saved Agent credential", OK: true, Detail: ": access token is unexpired (bearer value withheld)"})
+			checks = append(checks, doctorAgentConnectionCheck(context.Background(), base, route, credential.AccessToken))
+		}
+		if strings.TrimSpace(*mcpToken) != "" {
+			checks = append(checks, doctorMCPCheck(context.Background(), client, base+"/mcp/"+route, *mcpToken, "MCP initialize"))
+			checks = append(checks, doctorMCPToolsCheck(context.Background(), client, base+"/mcp/"+route, *mcpToken))
+		} else {
+			checks = append(checks, doctorCheck{Name: "MCP initialize/tools/list", Skip: true, Detail: ": provide --mcp-token; Agent tokens are scoped to /agent, not /mcp"})
+		}
+	} else {
+		checks = append(checks, doctorCheck{Name: "Agent connection", Skip: true, Detail: ": provide --device or --device-id"})
+		checks = append(checks, doctorCheck{Name: "MCP initialize/tools/list", Skip: true, Detail: ": provide a device route and --mcp-token"})
 	}
+	return reportDoctorChecks(checks)
+}
+
+func reportDoctorChecks(checks []doctorCheck) error {
 	failed := 0
 	for _, check := range checks {
-		if check.OK {
+		if check.Skip {
+			fmt.Printf("SKIP  %s%s\n", check.Name, check.Detail)
+		} else if check.OK {
 			fmt.Printf("PASS  %s%s\n", check.Name, check.Detail)
 		} else {
 			failed++
@@ -313,7 +346,223 @@ func runDoctor(args []string) error {
 type doctorCheck struct {
 	Name   string
 	OK     bool
+	Skip   bool
 	Detail string
+}
+
+func localDoctorChecks(values config.Values) []doctorCheck {
+	checks := make([]doctorCheck, 0, 9)
+	roots := values.Strings("agent.root")
+	if len(roots) == 0 {
+		if cwd, err := os.Getwd(); err == nil {
+			roots = []string{cwd}
+		}
+	}
+	if len(roots) == 0 {
+		checks = append(checks, doctorCheck{Name: "filesystem root", Detail: ": current directory is unavailable"})
+	} else {
+		for i, root := range roots {
+			info, err := os.Stat(root)
+			if err != nil || !info.IsDir() {
+				checks = append(checks, doctorCheck{Name: fmt.Sprintf("filesystem root %d", i+1), Detail: fmt.Sprintf(": %s is not a readable directory", root)})
+				continue
+			}
+			checks = append(checks, doctorCheck{Name: fmt.Sprintf("filesystem root %d", i+1), OK: true, Detail: ": " + root})
+		}
+	}
+
+	gui := values.Bool(false, "agent.allow_screen") || values.Bool(false, "agent.allow_computer_use")
+	computer := values.Bool(false, "agent.allow_computer_use")
+	if !gui {
+		for _, name := range []string{"desktop display", "session D-Bus", "AT-SPI", "screenshot backend"} {
+			checks = append(checks, doctorCheck{Name: name, Skip: true, Detail: ": GUI capabilities are disabled"})
+		}
+	} else {
+		display := strings.TrimSpace(os.Getenv("WAYLAND_DISPLAY"))
+		if display == "" {
+			display = strings.TrimSpace(os.Getenv("DISPLAY"))
+		}
+		if display == "" {
+			checks = append(checks, doctorCheck{Name: "desktop display", Detail: ": WAYLAND_DISPLAY/DISPLAY is unset"})
+		} else {
+			checks = append(checks, doctorCheck{Name: "desktop display", OK: true, Detail: ": " + display})
+		}
+		if strings.TrimSpace(os.Getenv("DBUS_SESSION_BUS_ADDRESS")) == "" && strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")) == "" {
+			checks = append(checks, doctorCheck{Name: "session D-Bus", Detail: ": DBUS_SESSION_BUS_ADDRESS and XDG_RUNTIME_DIR are unset"})
+		} else {
+			checks = append(checks, doctorCheck{Name: "session D-Bus", OK: true, Detail: ": session environment detected"})
+		}
+		checks = append(checks, desktopBusDoctorCheck("AT-SPI", "org.a11y.Bus", "/org/a11y/bus"))
+		if backend := firstCommand("spectacle", "grim", "gnome-screenshot", "import"); backend == "" {
+			checks = append(checks, doctorCheck{Name: "screenshot backend", Detail: ": spectacle, grim, gnome-screenshot, or import not found"})
+		} else {
+			checks = append(checks, doctorCheck{Name: "screenshot backend", OK: true, Detail: ": " + backend})
+		}
+	}
+	if computer {
+		checks = append(checks, desktopBusDoctorCheck("Desktop portal", "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop"))
+		if backend := firstCommand("wdotool", "xdotool"); backend == "" {
+			checks = append(checks, doctorCheck{Name: "input fallback", Skip: true, Detail: ": native portal input is preferred; no CLI fallback found"})
+		} else {
+			checks = append(checks, doctorCheck{Name: "input fallback", OK: true, Detail: ": " + backend})
+		}
+	} else {
+		checks = append(checks, doctorCheck{Name: "Desktop portal", Skip: true, Detail: ": computer input is disabled"})
+	}
+	unitPath := filepath.Join(userConfigDir(), "systemd", "user", "chat-with-cli-agent.service")
+	if info, err := os.Stat(unitPath); err == nil && info.Mode().IsRegular() {
+		active, enabled := systemdUserState("chat-with-cli-agent.service")
+		checks = append(checks, doctorCheck{Name: "systemd user unit", OK: true, Detail: fmt.Sprintf(": installed (active=%v enabled=%v)", active, enabled)})
+	} else {
+		checks = append(checks, doctorCheck{Name: "systemd user unit", Skip: true, Detail: ": not installed; setup can write one without enabling it"})
+	}
+	checks = append(checks, doctorCheck{Name: "version compatibility", Skip: true, Detail: ": remote Agent/MCP versions are checked after a live connection"})
+	return checks
+}
+
+func firstCommand(names ...string) string {
+	for _, name := range names {
+		if _, err := exec.LookPath(name); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+func desktopBusDoctorCheck(name, service, objectPath string) doctorCheck {
+	if _, err := exec.LookPath("busctl"); err != nil {
+		return doctorCheck{Name: name, Detail: ": busctl is unavailable"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "busctl", "--user", "--no-pager", "--timeout=2s", "call", service, objectPath, "org.freedesktop.DBus.Peer", "Ping")
+	if err := cmd.Run(); err != nil {
+		return doctorCheck{Name: name, Detail: ": session bus ping failed"}
+	}
+	return doctorCheck{Name: name, OK: true, Detail: ": session bus service responded"}
+}
+
+func doctorAgentConnectionCheck(ctx context.Context, base, route, token string) doctorCheck {
+	u, err := url.Parse(base)
+	if err != nil {
+		return doctorCheck{Name: "Agent connection", Detail: ": " + err.Error()}
+	}
+	if u.Scheme == "http" {
+		u.Scheme = "ws"
+	} else {
+		u.Scheme = "wss"
+	}
+	u.Path = "/agent/" + route
+	u.RawQuery = ""
+	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(connectCtx, u.String(), &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}}})
+	if err != nil {
+		return doctorCheck{Name: "Agent connection", Detail: ": " + redactDiagnosticError(err)}
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "doctor complete")
+	conn.SetReadLimit(1 << 20)
+	request := protocol.Request{ID: protocol.NewID(), Method: "system_info", Args: json.RawMessage(`{}`)}
+	data, err := json.Marshal(request)
+	if err != nil {
+		return doctorCheck{Name: "Agent connection", Detail: ": failed to encode probe"}
+	}
+	if err := conn.Write(connectCtx, websocket.MessageText, data); err != nil {
+		return doctorCheck{Name: "Agent connection", Detail: ": probe write failed"}
+	}
+	_, responseData, err := conn.Read(connectCtx)
+	if err != nil {
+		return doctorCheck{Name: "Agent connection", Detail: ": probe read failed"}
+	}
+	var response protocol.Response
+	if err := json.Unmarshal(responseData, &response); err != nil || response.ID != request.ID {
+		return doctorCheck{Name: "Agent connection", Detail: ": invalid Agent probe response"}
+	}
+	if response.Error != "" {
+		return doctorCheck{Name: "Agent connection", Detail: ": Agent probe failed: " + response.Error}
+	}
+	return doctorCheck{Name: "Agent connection", OK: true, Detail: ": system_info probe succeeded"}
+}
+
+func doctorMCPCheck(ctx context.Context, client *http.Client, target, token, name string) doctorCheck {
+	response, err := doctorMCPRequest(ctx, client, target, token, map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{
+			"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "chat-with-cli-doctor", "version": mcpserver.Version},
+		},
+	})
+	if err != nil {
+		return doctorCheck{Name: name, Detail: ": " + err.Error()}
+	}
+	if _, ok := response["result"]; !ok {
+		return doctorCheck{Name: name, Detail: ": initialize response has no result"}
+	}
+	return doctorCheck{Name: name, OK: true, Detail: ": MCP initialize succeeded"}
+}
+
+func doctorMCPToolsCheck(ctx context.Context, client *http.Client, target, token string) doctorCheck {
+	response, err := doctorMCPRequest(ctx, client, target, token, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{}})
+	if err != nil {
+		return doctorCheck{Name: "MCP tools/list", Detail: ": " + err.Error()}
+	}
+	result, ok := response["result"].(map[string]any)
+	if !ok {
+		return doctorCheck{Name: "MCP tools/list", Detail: ": tools/list response has no result"}
+	}
+	tools, ok := result["tools"].([]any)
+	if !ok {
+		return doctorCheck{Name: "MCP tools/list", Detail: ": response has no tools array"}
+	}
+	return doctorCheck{Name: "MCP tools/list", OK: true, Detail: fmt.Sprintf(": %d tools advertised", len(tools))}
+}
+
+func doctorMCPRequest(ctx context.Context, client *http.Client, target, token string, message map[string]any) (map[string]any, error) {
+	body, err := json.Marshal(message)
+	if err != nil {
+		return nil, errors.New("failed to encode MCP probe")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errors.New(redactDiagnosticError(err))
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("cf-mitigated") == "challenge" {
+		return nil, errors.New("Cloudflare Managed Challenge; review Browser Integrity Check/Bot Fight Mode/Super Bot Fight Mode")
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if contentType := resp.Header.Get("Content-Type"); strings.Contains(contentType, "text/event-stream") {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "data:") {
+				data = []byte(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+				break
+			}
+		}
+	}
+	var response map[string]any
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, errors.New("invalid MCP JSON response")
+	}
+	if rpcError, ok := response["error"].(map[string]any); ok {
+		if message, ok := rpcError["message"].(string); ok {
+			return nil, errors.New(message)
+		}
+		return nil, errors.New("MCP returned a JSON-RPC error")
+	}
+	return response, nil
 }
 
 func doctorHTTPCheck(ctx context.Context, client *http.Client, name, target string, predicate func(*http.Response) bool) doctorCheck {

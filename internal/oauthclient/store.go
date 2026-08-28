@@ -176,3 +176,18 @@ func SavedRelayForDeviceID(path, deviceID string) (string, bool, error) {
 	}
 	return match, match != "", nil
 }
+
+// LoadCredential returns the locally saved credential for one exact resource.
+// It is used by diagnostics to test an existing session without opening a
+// browser or printing bearer values.
+func LoadCredential(path, resource string) (Credential, bool, error) {
+	if path == "" {
+		path = DefaultCredentialsPath()
+	}
+	store, err := loadStore(path)
+	if err != nil {
+		return Credential{}, false, err
+	}
+	credential, ok := store.Profiles[resource]
+	return credential, ok, nil
+}

@@ -229,6 +229,11 @@ func New(cfg Config) (*Server, error) {
 	if len(s.users) > 0 {
 		s.setupTokenHash = ""
 	}
+	if s.setupTokenHash != "" && len(s.users) == 0 {
+		// The local setup token is the only first-run authority. Do not let
+		// public registration create a user before the owner completes setup.
+		s.registrationEnabled = false
+	}
 	if s.cfg.Mode == ModePrivate && len(s.users) == 0 {
 		if cfg.OwnerPassword == "" {
 			if s.setupTokenHash == "" {
@@ -484,6 +489,7 @@ func (s *Server) cleanupLocked(now time.Time) {
 }
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.handleLanding)
+	mux.HandleFunc("GET /docs", s.handleDocs)
 	mux.HandleFunc("GET /setup", s.handleSetupGET)
 	mux.HandleFunc("POST /setup", s.handleSetupPOST)
 	mux.HandleFunc("GET /admin", s.handleAdmin)

@@ -159,7 +159,7 @@ func addEngineFlags(fs *flag.FlagSet) (*stringList, *string, *bool, *bool, *stri
 }
 
 func applyCapabilityProfile(fs *flag.FlagSet, profile string, allowFileWrite, allowExec, allowScreen, allowComputer *bool) error {
-	if !flagWasSet(fs, "profile") {
+	if !flagWasSet(fs, "profile") && strings.TrimSpace(profile) == "" {
 		return nil
 	}
 	switch strings.ToLower(strings.TrimSpace(profile)) {

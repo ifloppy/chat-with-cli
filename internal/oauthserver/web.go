@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,13 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
 <div class="card"><div class="meta"><span>Version</span><span>{{.Version}}</span><span>Instance</span><span>{{.Mode}}</span><span>Relay health</span><span>available</span></div></div>
 <div class="actions"><a class="button" href="/admin">Sign in / Admin</a><a class="button" href="/setup">Setup</a><a class="button" href="/docs">Documentation</a><a class="button" href="{{.GitHubURL}}" rel="noreferrer">GitHub</a></div>
 </body></html>`))
+
+var docsTemplate = template.Must(template.New("docs").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Documentation · Chat with CLI</title><style>body{font:16px system-ui,sans-serif;max-width:760px;margin:8vh auto;padding:24px;line-height:1.5}li{margin:9px 0}a{color:#69a7ff}.note{border:1px solid #8885;border-radius:10px;padding:14px}</style></head>
+<body><h1>Chat with CLI documentation</h1><p class="note">The binary ships with a small navigation page. The full operator documentation is maintained with the open-source project.</p>
+<ul><li><a href="{{.Base}}/blob/main/docs/quick-start.md">Quick start</a></li><li><a href="{{.Base}}/blob/main/docs/private-instance.md">Private Relay</a></li><li><a href="{{.Base}}/blob/main/docs/public-instance.md">Public Relay</a></li><li><a href="{{.Base}}/blob/main/docs/agent.md">Agent configuration</a></li><li><a href="{{.Base}}/blob/main/docs/computer-use.md">Computer Use</a></li><li><a href="{{.Base}}/blob/main/docs/security.md">Security</a> · <a href="{{.Base}}/blob/main/docs/threat-model.md">Threat model</a></li><li><a href="{{.Base}}/blob/main/docs/reverse-proxy.md">Reverse proxy</a> · <a href="{{.Base}}/blob/main/docs/cloudflare.md">Cloudflare</a></li><li><a href="{{.Base}}/blob/main/docs/admin.md">Administration</a> · <a href="{{.Base}}/blob/main/docs/upgrade.md">Upgrade and rollback</a></li><li><a href="{{.Base}}/blob/main/docs/troubleshooting.md">Troubleshooting</a> · <a href="{{.Base}}/blob/main/docs/backup-restore.md">Backup and restore</a></li></ul>
+<p><a href="/">Back to home</a></p></body></html>`))
 
 var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Chat with CLI</title>
@@ -70,6 +78,23 @@ func (s *Server) handleLanding(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = landingTemplate.Execute(w, map[string]string{"Version": version, "Mode": mode, "GitHubURL": github})
+}
+
+func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	github := s.cfg.GitHubURL
+	s.mu.Unlock()
+	if github == "" {
+		github = "https://github.com/ifloppy/chat-with-cli"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = docsTemplate.Execute(w, map[string]string{"Base": strings.TrimRight(github, "/")})
 }
 
 func (s *Server) setSetupCSRFCookie(w http.ResponseWriter, token string) {

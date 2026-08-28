@@ -489,6 +489,20 @@ func TestSetupIsOneTimeAndLandingIsGeneric(t *testing.T) {
 	}
 }
 
+func TestPendingSetupClosesPublicRegistration(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18909", Mode: ModePublic, SetupToken: "pending-setup-token-123456", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	registrationEnabled := s.registrationEnabled
+	users := len(s.users)
+	s.mu.Unlock()
+	if registrationEnabled || users != 0 {
+		t.Fatalf("public registration was available before setup: enabled=%v users=%d", registrationEnabled, users)
+	}
+}
+
 func TestImmutableDeviceResourceRouteIsAccepted(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:18906", Password: "device-id-test-password-12345", StateDir: t.TempDir()})
 	if err != nil {
