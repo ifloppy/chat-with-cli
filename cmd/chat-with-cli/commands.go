@@ -197,7 +197,7 @@ func runRelayInstall(args []string) error {
 	if arch != "amd64" && arch != "arm64" {
 		return fmt.Errorf("release installer currently supports amd64 and arm64; detected %s", arch)
 	}
-	fmt.Printf("verified installation plan for %s on linux/%s:\n", *version, arch)
+	fmt.Printf("installation checklist for %s on linux/%s (no files changed):\n", *version, arch)
 	fmt.Printf("1. Download chat-with-cli_%s_linux_%s.tar.gz and its .sha256 file from the GitHub release.\n", *version, arch)
 	fmt.Println("2. Inspect the archive and checksum before extraction (never pipe an unverified response to a shell).")
 	fmt.Printf("3. Install the binary as %s/bin/chat-with-cli, then run `chat-with-cli relay setup`.\n", strings.TrimRight(*prefix, "/"))

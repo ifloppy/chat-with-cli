@@ -2,104 +2,17 @@
 
 Open-source remote development bridge for AI agents.
 
-`chat-with-cli` is a small Go service that lets an MCP client work on an authorized computer through bounded filesystem tools, persistent PTY tasks, durable checkpoints, and optional computer-use controls.
+`chat-with-cli` is a Go single-binary MCP server, outbound workstation Agent,
+and OAuth-enabled Relay. It provides bounded filesystem access, durable PTY
+tasks, checkpoints, privacy-preserving audit metadata, and optional Linux
+Computer Use controls.
 
-The project is designed for long-running application development rather than one-shot shell execution: commands survive individual MCP calls, logs are incremental, multiple tasks can run concurrently, and another chat/session can resume from a workspace checkpoint.
+> Status: early alpha (`v0.1.0-alpha.5`). Linux is the first supported host.
+> Review [SECURITY.md](SECURITY.md) before exposing a Relay publicly.
 
-> Status: early alpha. Linux is the first supported host. The protocol and security model are intentionally kept small enough to audit.
+## Five-minute quick start
 
-## Design goals
-
-- Fully open source from public MCP endpoint to local agent.
-- One small Go binary for relay, agent, local MCP, and direct HTTP MCP modes.
-- Long-running tasks that do not die when a tool call ends.
-- Efficient incremental output instead of repeatedly returning entire logs.
-- Multiple independent workstreams on one machine.
-- Explicit capability gates for shell, screenshots, and keyboard/mouse control.
-- Filesystem roots that are opt-in and symlink-aware.
-- Safe surgical file edits with exact-match validation and atomic rewrites.
-- Bounded privacy-preserving local audit metadata for every MCP tool call.
-- Simple self-hosting behind Caddy/Nginx without inbound ports on the workstation.
-
-## Architecture
-
-```text
-ChatGPT / MCP client
-        |
-        | HTTPS / MCP Streamable HTTP
-        v
-+-------------------+
-|       Relay       |  public VPS, OAuth + request routing
-+-------------------+
-        |
-        | outbound WebSocket initiated by the workstation
-        v
-+-------------------+
-|       Agent       |  capability policy + task/file/computer engine
-+-------------------+
-    |       |      |
-    |       |      +-- screenshot / keyboard / pointer (optional)
-    |       +--------- bounded filesystem + checkpoints
-    +----------------- persistent PTY tasks + capped logs
-```
-
-The Relay cannot initiate a network connection to the workstation. The Agent establishes the connection outbound and reconnects automatically. Requests carry independent IDs, so unrelated tool calls can be in flight concurrently.
-
-A direct `local` stdio mode and a direct `serve` HTTP mode are also available when a Relay is unnecessary.
-
-## Security defaults
-
-All powerful capabilities are disabled unless explicitly granted:
-
-| Capability | Default | Enable |
-| --- | --- | --- |
-| Read/write files | only inside `--root` | add one or more `--root` paths |
-| Arbitrary shell / PTY | off | `--allow-exec` |
-| Screen + read-only accessibility | off | `--allow-screen` |
-| GUI writes + keyboard/mouse | off | `--allow-computer-use` |
-
-`--allow-computer-use` also enables screenshots. Computer-control MCP tools are marked destructive/open-world hints because the focused GUI may be a browser, chat client, admin console, or another application with external side effects.
-
-The Relay has two identity modes. `private` (default) has one owner account and closed registration; `public` allows account registration and binds every device to the user who first authorizes its Agent. Both MCP clients and Agents use browser OAuth with PKCE, rotating refresh tokens, and resource-bound access tokens. Passwords are Argon2id-hashed; raw server-side OAuth tokens are never persisted. Legacy static bearer tokens remain available only for private compatibility and are rejected in public mode. Terminate public traffic with TLS in a trusted reverse proxy.
-
-Task logs are capped at 64 MiB per task by default. After the cap is reached, the PTY continues to be drained so the child process does not deadlock; the task is marked `log_truncated`. Concurrent PTY tasks are capped at 32 by default and can be tuned with `--max-active-tasks`. Every Engine tool call also writes bounded audit metadata (time, method, duration, success) without arguments or result contents; `audit_recent` exposes recent events.
-
-See [SECURITY.md](SECURITY.md) for the threat model and residual risks.
-
-## Computer Use
-
-Computer Use is intentionally a backend interface rather than a privileged input hack.
-
-On Linux the current alpha uses:
-
-- **Semantic UI:** pure-Go AT-SPI2 tree/search with roles, names, states, bounds, focus and actions.
-- **Screenshot:** KWin ScreenShot2 D-Bus fast path when authorized, with Spectacle/`grim`/GNOME Screenshot fallbacks.
-- **Wayland input:** pure-Go XDG RemoteDesktop Portal first; `wdotool` is an optional fallback.
-- **X11 input:** `xdotool` fallback.
-
-`ydotool` is deliberately not auto-selected because `/dev/uinput` bypasses the compositor permission boundary. The Portal backend keeps KDE/GNOME consent and revocation in the OS security model while keeping the Agent itself CGO-free.
-
-Screenshots are returned directly as MCP image content, not as base64 text in the model conversation. PNG and JPEG output are supported. If an Agent is launched without GUI environment variables, Linux desktop-session variables are recovered from the logged-in user's runtime directory where possible.
-
-Preferred interaction loop:
-
-1. Start with `computer_observe` when GUI state is unknown. Its default `screenshot=auto` returns bounded visible AT-SPI data and only transfers an image when semantic UI is insufficient.
-2. Prefer `computer_ui_invoke` for a unique semantic action. It performs selection and action on one AT-SPI connection, refuses ambiguous selectors, and returns candidates instead of guessing. Set `timeout_ms` when the control may appear asynchronously.
-3. Prefer `computer_ui_get_text` / `computer_ui_set_text` for text controls: they uniquely select visible AT-SPI `Text` / `EditableText` elements, enabling bounded reads and direct UTF-8 replacement without OCR, pointer focus, or simulated keystrokes.
-4. Use `computer_ui_find` / `computer_ui_wait` for inspection, disambiguation, and state synchronization. Treat returned refs as short-lived handles.
-5. Fall back to `computer_screenshot` + pointer coordinates only when semantic UI is unavailable. Verify consequential results with semantic state or a screenshot.
-
-### Agent-friendly call patterns
-
-Keep Computer Use calls narrow and state-driven. A recommended sequence is `computer_observe` -> `computer_ui_invoke`/`computer_ui_get_text`/`computer_ui_set_text` -> `computer_ui_wait`. Both atomic mutation tools can optionally wait for `not_found` selectors, avoiding a separate wait call. Avoid repeated screenshots when a semantic condition can be waited on. For `computer_ui_invoke`, zero matches return `not_found`, multiple matches return `ambiguous` with candidate nodes, and elements with multiple possible semantic actions return `ambiguous_action` unless an action name is supplied. If a bounded search ends before uniqueness can be proven, it returns `search_incomplete` and performs no action.
-
-For pixel-only applications, request JPEG screenshots for routine navigation and PNG only when exact pixels/text rendering matter. Low-level `move`/`click`/`type`/`key` remain deliberate escape hatches for canvas, games, remote desktops, and poorly accessible Electron/WebView interfaces.
-
-Portal consent persistence defaults to `--computer-persist=process`: the live Agent can rotate one-time restore tokens and recover a closed session without turning the machine into permanently unattended remote control. Use `none` to disable restoration, or explicitly choose `persistent` to store the rotating restore token in the Agent state directory with mode `0600`.
-
-## Build
-
-Requires Go 1.26 or newer for the current development branch.
+Build and test locally:
 
 ```bash
 git clone https://github.com/ifloppy/chat-with-cli.git
@@ -108,124 +21,134 @@ go test ./...
 go build -o chat-with-cli ./cmd/chat-with-cli
 ```
 
-## Local MCP
+Run a read-only local MCP server. Filesystem reads are limited to the root;
+writes, shell execution, screenshots, and input remain disabled:
 
 ```bash
-./chat-with-cli local \
-  --root "$HOME/project" \
-  --allow-exec
+./chat-with-cli local --root "$HOME/project"
 ```
 
-For read-only visual/semantic access, add `--allow-screen`. For full visual control, add `--allow-computer-use`. Portal persistence can be set with `--computer-persist=none|process|persistent`.
-
-## Direct HTTP MCP
+For a remote setup, create a Relay configuration on a TLS-terminating host:
 
 ```bash
-export CHAT_WITH_CLI_CLIENT_TOKEN="$(./chat-with-cli token)"
-./chat-with-cli serve --listen 127.0.0.1:8765 --root "$HOME/project"
+./chat-with-cli relay setup \
+  --config /etc/chat-with-cli/config.toml \
+  --state-dir /var/lib/chat-with-cli \
+  --public-url https://cli.example.com \
+  --instance-mode private
+./chat-with-cli relay --config /etc/chat-with-cli/config.toml
 ```
 
-The MCP endpoint is `/mcp`; `/health` is available for health checks.
+Read the one-time setup token from the local file path printed by `relay
+setup`, open `https://cli.example.com/setup`, and create the owner account.
+The setup page is disabled after the first administrator is created.
 
-## Relay + Agent
-
-### Private instance (default)
-
-On the Relay host:
+On the workstation, create a default read-only Agent profile, authorize it in
+the browser, and run it:
 
 ```bash
-export CHAT_WITH_CLI_PUBLIC_URL='https://cli.example.com'
-./chat-with-cli relay --listen 127.0.0.1:8765 --instance-mode private
+./chat-with-cli agent setup --relay https://cli.example.com --device workstation
+# Copy the immutable device ID printed by the command.
+./chat-with-cli login --relay https://cli.example.com \
+  --device workstation --device-id <immutable-device-id>
+./chat-with-cli agent --config "$HOME/.config/chat-with-cli/config.toml"
 ```
 
-On first start, if no owner exists and no owner password was supplied, the Relay generates one at `~/.config/chat-with-cli/private-owner-password` with mode `0600`. The default username is `owner`. After the first login, the Relay stores only the Argon2id password hash, so future Relay starts do not require the bootstrap password. You may save the login in your browser/password manager and then delete the bootstrap file.
+Use `https://cli.example.com/mcp/id/<immutable-device-id>` as the remote MCP
+endpoint. In ChatGPT or another MCP client, choose OAuth authentication and
+refresh the tool list after authorization. For a developer workstation,
+explicitly choose `--profile developer` or enable individual capabilities; see
+[Agent configuration](docs/agent.md).
 
-On the workstation, pre-authorize once:
+## Security defaults
 
-```bash
-./chat-with-cli login --relay https://cli.example.com --device workstation
-```
+| Capability | Default | Explicit opt-in |
+| --- | --- | --- |
+| Filesystem read | only inside `--root` | add a narrowly scoped root |
+| Filesystem/checkpoint write | off | `--allow-file-write` |
+| Arbitrary shell / PTY | off | `--allow-exec` |
+| Exec filesystem boundary | none unless requested | `--exec-sandbox=landlock` on Linux |
+| Screen and accessibility read | off | `--allow-screen` |
+| Keyboard, pointer, semantic UI writes | off | `--allow-computer-use` |
 
-This opens the browser OAuth flow. CLI OAuth credentials are stored at `~/.config/chat-with-cli/credentials.json` by default with mode `0600`; the file contains OAuth client/access/refresh state, **not your account password**. The password stays in your browser/password manager, which is also what ChatGPT OAuth uses.
+The default profile is read-only. `--root` is a filesystem-tool boundary, not
+a sandbox for shell commands. Landlock restricts filesystem access only; it
+does not remove the Agent user's network, process, or inherited-secret access.
+Run the Agent as a dedicated unprivileged user and use `--exec-sandbox=landlock`
+when shell work needs an additional kernel boundary.
 
-Then start the Agent:
+Private Relay mode is the default. Public mode, account registration, DCR,
+MCP, Agent access, and the local emergency kill switch are independently
+manageable from `/admin`. OAuth uses PKCE S256, exact resource/scope binding,
+rotating refresh tokens, bounded sessions, and one-way server-side token
+identifiers. Public traffic must use HTTPS behind a carefully configured
+reverse proxy.
 
-```bash
-./chat-with-cli agent --device workstation --root "$HOME/project" --allow-exec
-```
-
-After the first login, `--relay` may be omitted when exactly one saved Relay profile matches that device. The Agent refreshes OAuth automatically before reconnecting.
-
-### Public instance
-
-```bash
-export CHAT_WITH_CLI_PUBLIC_URL='https://cli.example.com'
-./chat-with-cli relay --listen 127.0.0.1:8765 --instance-mode public
-```
-
-Public mode opens account registration on the OAuth page and rejects shared static Client/Agent bearer tokens. A user's first successful Agent authorization claims that device name for that account. Only the same account can later authorize `/agent/<device>` or `/mcp/<device>` for it. Device names are globally unique within one Relay.
-
-The remote MCP URL remains:
+## Architecture
 
 ```text
-https://cli.example.com/mcp/workstation
+MCP client / ChatGPT --HTTPS + OAuth--> Relay --outbound WebSocket--> Agent
+                                             \
+                                              `-- bounded Engine tools
 ```
 
-The workstation needs only outbound HTTPS/WebSocket access. See [docs/deployment.md](docs/deployment.md) for Caddy and systemd examples.
+The Relay cannot initiate a connection to the workstation. The Agent connects
+outbound and reconnects automatically. A direct `local` stdio mode and a
+loopback `serve` HTTP mode are available when no Relay is needed.
 
-## Connect from ChatGPT Web
+## Common commands
 
-Once the Relay is available over public HTTPS and the Agent is connected, create a custom MCP app in ChatGPT developer mode and use the device-specific URL, for example `https://cli.example.com/mcp/workstation`. Select OAuth authentication; ChatGPT discovers the protected-resource and authorization-server metadata, dynamically registers itself, and opens the same account login/consent page used by the CLI Agent. A browser login session can therefore be reused across CLI and ChatGPT OAuth flows, and a password manager can store one account credential for both. No OAuth client ID or secret needs to be preconfigured.
+```text
+chat-with-cli relay setup       create config and one-time setup token
+chat-with-cli relay install     print a checksum-first install checklist
+chat-with-cli agent setup       create config and optional inactive user unit
+chat-with-cli doctor            inspect local and Relay prerequisites
+chat-with-cli status            show local config and user-unit state
+chat-with-cli update            print a review-first update procedure
+chat-with-cli rollback          print a state-preserving rollback procedure
+```
 
-OAuth access and refresh tokens are bound to the exact resource URL and signed-in user. In public mode, device ownership is also checked before authorization. Removing Relay OAuth state invalidates issued server-side credentials; deleting `~/.config/chat-with-cli/credentials.json` only removes local CLI OAuth state.
+`agent setup --install-systemd` writes a hardened user unit but never enables
+or starts it. Review the generated unit and activate it manually only when the
+security audit and first browser login are complete.
 
-ChatGPT product availability is separate from server compatibility. OpenAI currently documents full custom-MCP write/modify actions for Business and Enterprise/Edu workspaces; other plans may expose only a subset of custom-app functionality. See the current OpenAI developer-mode documentation before relying on write actions.
+## Documentation
 
-## MCP tools
+- [Quick start](docs/quick-start.md)
+- [Private Relay](docs/private-instance.md) · [Public Relay](docs/public-instance.md)
+- [Agent configuration](docs/agent.md) · [Computer Use](docs/computer-use.md)
+- [ChatGPT/MCP compatibility](docs/chatgpt.md)
+- [Security](docs/security.md) · [Threat model](docs/threat-model.md)
+- [Reverse proxy](docs/reverse-proxy.md) · [Cloudflare](docs/cloudflare.md)
+- [Administration](docs/admin.md)
+- [Upgrade](docs/upgrade.md) · [Backup/restore](docs/backup-restore.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
-### Long-running tasks
+The MCP server currently advertises 31 tools. Read-only/destructive/open-world
+annotations and human-readable titles are explicit. The raw Streamable HTTP
+`initialize` and `tools/list` path is covered by a regression test; a client's
+tool cache or policy may still hide tools after a server-side change.
 
-- `task_start` — start a PTY-backed command and immediately return a task ID.
-- `task_read` — read a bounded log slice from a byte offset.
-- `task_wait` — long-poll for new output or completion instead of rapid polling.
-- `task_send` — send text/control input to an interactive PTY.
-- `task_stop` — send TERM/INT/HUP/KILL to the process group.
-- `task_list` — recover active and historical task IDs.
+## Computer Use
 
-### Files and continuity
+Computer Use is opt-in and Linux-first. Accessibility inspection uses AT-SPI2;
+KWin ScreenShot2, Spectacle, `grim`, and GNOME Screenshot are supported where
+available; Wayland input prefers the XDG RemoteDesktop Portal. The Agent does
+not automatically use `/dev/uinput` or another consent-bypassing input path.
+Portal persistence defaults to the Agent process lifetime. See
+[Computer Use](docs/computer-use.md) and [Security](SECURITY.md).
 
-- `fs_read` — bounded byte-range reads.
-- `fs_write` — atomically rewrite or append inside an allowed root.
-- `fs_patch` — exact-match surgical replacement with expected-count validation.
-- `fs_list` — bounded-depth tree listing with dependency/cache noise skipped.
-- `fs_search` — bounded regex search with binary/large-file protection.
-- `checkpoint_write` / `checkpoint_read` — durable workspace handoff between chats or agents.
-- `audit_recent` — recent bounded tool-call audit metadata without request arguments or result contents.
+## Known limitations
 
-### Computer Use
-
-- `computer_info`, `computer_observe`, `computer_screenshot`
-- `computer_ui_tree`, `computer_ui_find`, `computer_ui_wait`
-- `computer_ui_invoke` — unique selector + optional wait + semantic action in one call; refuses ambiguity/incomplete searches.
-- `computer_ui_get_text` — bounded read from one unique visible AT-SPI Text control, avoiding OCR.
-- `computer_ui_set_text` — unique editable selector + direct AT-SPI text replacement, avoiding keyboard injection.
-- `computer_ui_focus`, `computer_ui_action` — lower-level short-lived-ref operations.
-- `computer_move`, `computer_click`, `computer_scroll`
-- `computer_type`, `computer_key`
-
-## Roadmap
-
-- Optional native libei/EIS fast path for very high-frequency input; D-Bus Portal input is already implemented.
-- Paired ScreenCast/PipeWire capture for compositor-native multi-monitor coordinates.
-- Windows and macOS host backends behind the same capability interface.
-- Device rename/transfer and administrator account-management tooling for larger public instances.
-- Configurable task-log retention and garbage collection.
-- Task groups/dependencies for larger multi-agent workstreams.
-- Signed release binaries and reproducible release metadata.
-
-## Non-goals
-
-This is not intended to silently bypass OS security boundaries, become an unattended RAT, or hide AI actions from the machine owner. Desktop-control permissions are explicit and should remain visible/revocable at the OS and Agent layers.
+- The current Relay state is a JSON file designed for one Relay process. It is
+  locked and atomically replaced with fsync; it is not a multi-writer database.
+- Headless credential fallback stores raw OAuth access/refresh tokens in a
+  0600 file. Account passwords are never stored there. Native Secret Service,
+  KWallet, Keychain, and Credential Manager integrations remain future work.
+- Landlock is Linux-only and filesystem-only. It is defense in depth, not a
+  complete container or network sandbox.
+- Legacy name routes remain for alpha compatibility. New deployments should
+  use immutable `/agent/id/<id>` and `/mcp/id/<id>` routes.
 
 ## License
 
