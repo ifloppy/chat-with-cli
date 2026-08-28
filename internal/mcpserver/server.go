@@ -9,7 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Version = "0.1.0-dev"
+const Version = "0.1.0-alpha.1"
 
 type Caller interface {
 	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)

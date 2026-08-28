@@ -37,6 +37,12 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.MaxTaskLogBytes <= 0 {
 		cfg.MaxTaskLogBytes = 64 << 20
 	}
+	if cfg.MaxActiveTasks <= 0 {
+		cfg.MaxActiveTasks = 32
+	}
+	if cfg.MaxActiveTasks > 256 {
+		return nil, fmt.Errorf("max active tasks must be <= 256, got %d", cfg.MaxActiveTasks)
+	}
 	mode, err := normalizeComputerPersistMode(cfg.ComputerPersistMode)
 	if err != nil {
 		return nil, err
@@ -173,7 +179,7 @@ func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage)
 		return SystemInfoOutput{
 			Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH,
 			PID: os.Getpid(), Roots: append([]string(nil), e.roots...), AllowExec: e.cfg.AllowExec,
-			AllowScreen: e.cfg.AllowScreen, AllowComputerControl: e.cfg.AllowComputerControl,
+			AllowScreen: e.cfg.AllowScreen, AllowComputerControl: e.cfg.AllowComputerControl, MaxActiveTasks: e.cfg.MaxActiveTasks,
 		}, nil
 	case "computer_info":
 		return e.ComputerInfo(), nil

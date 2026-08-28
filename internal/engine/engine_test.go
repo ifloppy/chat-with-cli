@@ -116,3 +116,45 @@ func TestLongTaskReturnsIDAndCanBeReadLater(t *testing.T) {
 	}
 	t.Fatal("task did not finish before deadline")
 }
+func TestActiveTaskLimit(t *testing.T) {
+	root := t.TempDir()
+	eng, err := New(Config{
+		Roots: []string{root}, AllowExec: true,
+		StateDir: t.TempDir(), MaxReadBytes: 64 * 1024, MaxActiveTasks: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := eng.tasks.Start(context.Background(), StartTaskInput{Command: "sleep 5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.tasks.Start(context.Background(), StartTaskInput{Command: "true"}); err == nil || !strings.Contains(err.Error(), "active task limit") {
+		t.Fatalf("expected active task limit error, got %v", err)
+	}
+	if err := eng.tasks.Stop(StopTaskInput{TaskID: first.ID, Signal: "KILL"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		second, err := eng.tasks.Start(context.Background(), StartTaskInput{Command: "true"})
+		if err == nil {
+			if second.ID == "" {
+				t.Fatal("replacement task has empty ID")
+			}
+			return
+		}
+		if !strings.Contains(err.Error(), "active task limit") {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("task slot was not released after process exit")
+}
+
+func TestMaxActiveTasksHasHardUpperBound(t *testing.T) {
+	_, err := New(Config{Roots: []string{t.TempDir()}, StateDir: t.TempDir(), MaxActiveTasks: 257})
+	if err == nil || !strings.Contains(err.Error(), "<= 256") {
+		t.Fatalf("expected upper-bound error, got %v", err)
+	}
+}

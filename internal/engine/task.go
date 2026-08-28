@@ -26,6 +26,7 @@ type TaskManager struct {
 	mu      sync.RWMutex
 	tasks   map[string]*Task
 	history map[string]TaskInfo
+	slots   chan struct{}
 }
 
 type Task struct {
@@ -41,6 +42,7 @@ func NewTaskManager(engine *Engine, dir string) *TaskManager {
 	m := &TaskManager{
 		engine: engine, dir: dir,
 		tasks: make(map[string]*Task), history: make(map[string]TaskInfo),
+		slots: make(chan struct{}, engine.cfg.MaxActiveTasks),
 	}
 	m.loadHistory()
 	return m
@@ -94,6 +96,19 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
 		return TaskInfo{}, fmt.Errorf("cwd is not a directory: %s", cwd)
 	}
+	select {
+	case m.slots <- struct{}{}:
+	case <-ctx.Done():
+		return TaskInfo{}, ctx.Err()
+	default:
+		return TaskInfo{}, fmt.Errorf("active task limit reached (%d)", cap(m.slots))
+	}
+	releaseSlot := true
+	defer func() {
+		if releaseSlot {
+			<-m.slots
+		}
+	}()
 	id := protocol.NewID()
 	logPath := filepath.Join(m.dir, id+".log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -131,6 +146,7 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 		task.mu.Unlock()
 		close(task.copyDone)
 	}()
+	releaseSlot = false
 	go m.waitTask(task, cmd, logFile)
 	return info, nil
 }
@@ -144,6 +160,7 @@ func compactCommand(command string, max int) string {
 }
 
 func (m *TaskManager) waitTask(task *Task, cmd *exec.Cmd, logFile *os.File) {
+	defer func() { <-m.slots }()
 	err := cmd.Wait()
 	_ = task.pty.Close()
 	<-task.copyDone

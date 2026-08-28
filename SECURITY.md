@@ -45,11 +45,11 @@ For stronger isolation, run the Agent in a container/namespace or dedicated Unix
 
 ## Authentication and transport
 
-The alpha Relay uses separate high-entropy bearer tokens for MCP clients and Agents. Token comparisons are constant-time. Never place tokens in repository files, command examples copied into issue reports, or reverse-proxy access logs.
+The Relay uses a separate high-entropy bearer token for workstation Agents. MCP clients can use the built-in OAuth authorization flow: RFC 9728 protected-resource discovery, authorization-server metadata, Dynamic Client Registration, mandatory PKCE S256, short-lived resource-bound access tokens, and rotating refresh tokens. Raw OAuth tokens are never persisted; only SHA-256 token identifiers and their metadata are stored. The OAuth consent password is a separate secret and must be at least 32 characters.
 
-Use TLS for every non-loopback deployment. The built-in HTTP server is intentionally suitable for binding behind a reverse proxy; it is not a certificate-management stack.
+An optional static MCP bearer token remains available for legacy/debug clients. It is intentionally broader than resource-bound OAuth and should normally be omitted on public deployments. Never place OAuth passwords, Agent tokens, or bearer tokens in repository files, issue reports, or reverse-proxy access logs.
 
-OAuth 2.1 / MCP authorization is planned. Until then, deployments that require per-user identity, delegated authorization, or fine-grained token revocation should place an appropriate identity-aware proxy in front of the Relay or wait for native OAuth support.
+Use TLS for every non-loopback deployment. The built-in HTTP server is intentionally suitable for binding behind a reverse proxy; it is not a certificate-management stack. OAuth access is bound to the exact `/mcp/<device>` resource. Refresh tokens rotate on use; revocation and Relay state deletion can invalidate issued credentials.
 
 ## Resource limits
 
@@ -58,6 +58,8 @@ OAuth 2.1 / MCP authorization is planned. Until then, deployments that require p
 - File reads/search results are bounded.
 - Per-task persisted PTY logs are capped; output continues to be drained after truncation.
 - Concurrent remote requests are bounded inside the Agent.
+- Concurrent PTY tasks are capped (32 by default, configurable with `--max-active-tasks`).
+- OAuth registration, authorization requests, codes, access tokens, and refresh tokens have bounded counts and/or lifetimes; repeated bad consent-password attempts lock that authorization request.
 
 These controls reduce accidental exhaustion; they are not a substitute for OS-level CPU, memory, process, and disk quotas when serving mutually untrusted clients.
 

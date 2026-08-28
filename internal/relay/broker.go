@@ -127,8 +127,8 @@ func (b *Broker) AgentHandler(agentToken string) http.HandlerFunc {
 			return
 		}
 		device := strings.TrimSpace(r.URL.Query().Get("device"))
-		if device == "" {
-			http.Error(w, "missing device", http.StatusBadRequest)
+		if !protocol.ValidDeviceName(device) {
+			http.Error(w, "invalid device", http.StatusBadRequest)
 			return
 		}
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{})

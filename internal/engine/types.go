@@ -11,6 +11,7 @@ type Config struct {
 	StateDir             string
 	MaxReadBytes         int
 	MaxTaskLogBytes      int64
+	MaxActiveTasks       int
 }
 
 type StartTaskInput struct {
@@ -124,6 +125,7 @@ type SystemInfoOutput struct {
 	AllowExec            bool     `json:"allow_exec"`
 	AllowScreen          bool     `json:"allow_screen"`
 	AllowComputerControl bool     `json:"allow_computer_control"`
+	MaxActiveTasks       int      `json:"max_active_tasks"`
 }
 
 type TaskListOutput struct {

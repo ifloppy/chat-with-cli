@@ -28,7 +28,7 @@ ChatGPT / MCP client
         | HTTPS / MCP Streamable HTTP
         v
 +-------------------+
-|       Relay       |  public VPS, stateless request routing
+|       Relay       |  public VPS, OAuth + request routing
 +-------------------+
         |
         | outbound WebSocket initiated by the workstation
@@ -54,14 +54,14 @@ All powerful capabilities are disabled unless explicitly granted:
 | --- | --- | --- |
 | Read/write files | only inside `--root` | add one or more `--root` paths |
 | Arbitrary shell / PTY | off | `--allow-exec` |
-| Desktop screenshots | off | `--allow-screen` |
-| Keyboard and mouse | off | `--allow-computer-use` |
+| Screen + read-only accessibility | off | `--allow-screen` |
+| GUI writes + keyboard/mouse | off | `--allow-computer-use` |
 
 `--allow-computer-use` also enables screenshots. Computer-control MCP tools are marked destructive/open-world hints because the focused GUI may be a browser, chat client, admin console, or another application with external side effects.
 
-Relay authentication uses separate client and Agent bearer tokens and constant-time comparisons. For internet deployment, terminate TLS in a trusted reverse proxy. Static bearer tokens are the alpha authentication mechanism; standards-based OAuth support is on the roadmap.
+The public Relay supports MCP OAuth 2.1-style authorization with RFC 9728 protected-resource discovery, Dynamic Client Registration, mandatory PKCE S256, rotating refresh tokens, and resource-bound access tokens. OAuth state survives Relay restarts without storing raw access/refresh tokens. A separate high-entropy Agent bearer token authenticates workstation WebSocket connections; an optional static MCP bearer remains available for CLI/debug compatibility. Terminate public traffic with TLS in a trusted reverse proxy.
 
-Task logs are capped at 64 MiB per task by default. After the cap is reached, the PTY continues to be drained so the child process does not deadlock; the task is marked `log_truncated`.
+Task logs are capped at 64 MiB per task by default. After the cap is reached, the PTY continues to be drained so the child process does not deadlock; the task is marked `log_truncated`. Concurrent PTY tasks are capped at 32 by default and can be tuned with `--max-active-tasks`.
 
 See [SECURITY.md](SECURITY.md) for the threat model and residual risks.
 
@@ -128,20 +128,23 @@ The MCP endpoint is `/mcp`; `/health` is available for health checks.
 
 ## Relay + Agent
 
-Generate two different secrets:
+Generate independent high-entropy secrets for the workstation and OAuth consent:
 
 ```bash
-./chat-with-cli token   # MCP client token
 ./chat-with-cli token   # Agent token
+./chat-with-cli token   # OAuth authorization password
 ```
 
-On the public relay host:
+On the public relay host behind TLS:
 
 ```bash
-export CHAT_WITH_CLI_CLIENT_TOKEN='...'
 export CHAT_WITH_CLI_AGENT_TOKEN='...'
+export CHAT_WITH_CLI_OAUTH_PASSWORD='...'
+export CHAT_WITH_CLI_PUBLIC_URL='https://cli.example.com'
 ./chat-with-cli relay --listen 127.0.0.1:8765
 ```
+
+`CHAT_WITH_CLI_CLIENT_TOKEN` is optional and only needed for legacy/static-token MCP clients and the `/devices` helper endpoint.
 
 On the workstation:
 
@@ -157,10 +160,18 @@ export CHAT_WITH_CLI_AGENT_TOKEN='...'
 The remote MCP URL for that machine is:
 
 ```text
-https://cli.example.com/mcp?device=workstation
+https://cli.example.com/mcp/workstation
 ```
 
 The workstation needs only outbound HTTPS/WebSocket access. See [docs/deployment.md](docs/deployment.md) for Caddy and systemd examples.
+
+## Connect from ChatGPT Web
+
+Once the Relay is available over public HTTPS and the Agent is connected, create a custom MCP app in ChatGPT developer mode and use the device-specific URL, for example `https://cli.example.com/mcp/workstation`. Select OAuth authentication; ChatGPT discovers the protected-resource and authorization-server metadata, dynamically registers itself, opens the Relay authorization page, and exchanges a PKCE-protected authorization code. Enter `CHAT_WITH_CLI_OAUTH_PASSWORD` only on your own Relay authorization page. No OAuth client ID or secret needs to be preconfigured.
+
+The resulting OAuth access and refresh tokens are bound to that exact MCP resource URL, so authorizing `workstation` does not authorize another device. To revoke every ChatGPT authorization immediately, stop the Relay and remove its OAuth state file before restarting it; changing `CHAT_WITH_CLI_OAUTH_PASSWORD` only affects new authorizations.
+
+ChatGPT product availability is separate from server compatibility. OpenAI currently documents full custom-MCP write/modify actions for Business and Enterprise/Edu workspaces; other plans may expose only a subset of custom-app functionality. See the current OpenAI developer-mode documentation before relying on write actions.
 
 ## MCP tools
 
@@ -195,7 +206,6 @@ The workstation needs only outbound HTTPS/WebSocket access. See [docs/deployment
 
 ## Roadmap
 
-- OAuth 2.1 / MCP authorization for hosted ChatGPT connectors.
 - Optional native libei/EIS fast path for very high-frequency input; D-Bus Portal input is already implemented.
 - Paired ScreenCast/PipeWire capture for compositor-native multi-monitor coordinates.
 - Windows and macOS host backends behind the same capability interface.
