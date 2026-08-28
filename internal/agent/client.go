@@ -53,11 +53,13 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		header := http.Header{}
 		header.Set("Authorization", "Bearer "+token)
-		conn, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: header})
+		dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
+		conn, _, err := websocket.Dial(dialCtx, endpoint, &websocket.DialOptions{HTTPHeader: header})
+		cancelDial()
 		if err == nil {
 			conn.SetReadLimit(32 << 20)
 			err = c.serve(ctx, conn)
-			_ = conn.Close(websocket.StatusNormalClosure, "reconnect")
+			_ = conn.CloseNow()
 			backoff = time.Second
 		}
 		if ctx.Err() != nil {
@@ -81,16 +83,28 @@ func agentURL(base, device string) (string, error) {
 }
 
 func agentURLForRoute(base, device, deviceID string) (string, error) {
-	u, err := url.Parse(base)
-	if err != nil {
-		return "", err
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid relay URL %q", base)
 	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return "", errors.New("relay URL must be an origin without credentials, path, query, or fragment")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	loopback := host == "localhost" || host == "127.0.0.1" || host == "::1"
 	switch u.Scheme {
 	case "http":
+		if !loopback {
+			return "", errors.New("Agent WebSocket requires wss/https except for loopback testing")
+		}
 		u.Scheme = "ws"
 	case "https":
 		u.Scheme = "wss"
 	case "ws", "wss":
+		if u.Scheme == "ws" && !loopback {
+			return "", errors.New("Agent WebSocket requires wss except for loopback testing")
+		}
 	default:
 		return "", fmt.Errorf("unsupported relay scheme %q", u.Scheme)
 	}

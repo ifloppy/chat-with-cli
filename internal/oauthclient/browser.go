@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -22,13 +23,32 @@ type callbackResult struct {
 }
 
 func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, resource string) (Credential, error) {
-	base, _ := normalizeRelay(m.RelayURL)
+	base, err := normalizeRelay(m.RelayURL)
+	if err != nil {
+		return Credential{}, err
+	}
 	var meta authMetadata
 	if err := getJSON(ctx, client, base+"/.well-known/oauth-authorization-server", &meta); err != nil {
 		return Credential{}, err
 	}
 	if meta.Issuer == "" || meta.AuthorizationEndpoint == "" || meta.TokenEndpoint == "" || meta.RegistrationEndpoint == "" {
 		return Credential{}, errors.New("relay OAuth metadata is incomplete")
+	}
+	issuer, err := normalizeRelay(meta.Issuer)
+	if err != nil || issuer != base {
+		return Credential{}, errors.New("relay OAuth issuer does not match the configured Relay")
+	}
+	authorizationEndpoint, err := sameOriginEndpoint(base, meta.AuthorizationEndpoint, "authorization endpoint")
+	if err != nil {
+		return Credential{}, err
+	}
+	tokenEndpoint, err := sameOriginEndpoint(base, meta.TokenEndpoint, "token endpoint")
+	if err != nil {
+		return Credential{}, err
+	}
+	registrationEndpoint, err := sameOriginEndpoint(base, meta.RegistrationEndpoint, "registration endpoint")
+	if err != nil {
+		return Credential{}, err
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -45,7 +65,7 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 		"scope":                      "agent:connect offline_access",
 	}
 	var reg registrationResponse
-	if err := postJSON(ctx, client, meta.RegistrationEndpoint, regBody, &reg); err != nil {
+	if err := postJSON(ctx, client, registrationEndpoint, regBody, &reg); err != nil {
 		return Credential{}, err
 	}
 	if reg.ClientID == "" {
@@ -55,7 +75,7 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 	state := randomURLToken(24)
-	u, err := url.Parse(meta.AuthorizationEndpoint)
+	u, err := url.Parse(authorizationEndpoint)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -123,7 +143,7 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 		"resource":      {resource},
 	}
 	var token tokenResponse
-	if err := postFormJSON(ctx, client, meta.TokenEndpoint, form, &token); err != nil {
+	if err := postFormJSON(ctx, client, tokenEndpoint, form, &token); err != nil {
 		return Credential{}, err
 	}
 	if token.AccessToken == "" || token.RefreshToken == "" {
@@ -133,6 +153,22 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 		AccessToken: token.AccessToken, RefreshToken: token.RefreshToken,
 		ExpiresAt: time.Now().Add(time.Duration(token.ExpiresIn) * time.Second).Unix()}, nil
 }
+
+func sameOriginEndpoint(base, raw, name string) (string, error) {
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	target, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !target.IsAbs() || target.Host == "" || target.User != nil || target.RawQuery != "" || target.Fragment != "" {
+		return "", fmt.Errorf("invalid OAuth %s", name)
+	}
+	if !strings.EqualFold(target.Scheme, baseURL.Scheme) || !strings.EqualFold(target.Host, baseURL.Host) {
+		return "", fmt.Errorf("OAuth %s must use the configured Relay origin", name)
+	}
+	return target.String(), nil
+}
+
 func randomURLToken(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)

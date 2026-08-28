@@ -46,6 +46,7 @@ func normalizeRelay(raw string) (string, error) {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "", fmt.Errorf("invalid relay URL %q", raw)
 	}
+	u.Scheme = strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
 	loopback := host == "localhost" || host == "127.0.0.1" || host == "::1"
 	if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
@@ -94,6 +95,15 @@ func (m *Manager) Token(ctx context.Context) (string, error) {
 	if path == "" {
 		path = DefaultCredentialsPath()
 	}
+	var token string
+	err = withCredentialStoreLock(path, func() error {
+		token, err = m.tokenLocked(ctx, resource, path)
+		return err
+	})
+	return token, err
+}
+
+func (m *Manager) tokenLocked(ctx context.Context, resource, path string) (string, error) {
 	store, err := loadStore(path)
 	if err != nil {
 		return "", err
@@ -106,7 +116,9 @@ func (m *Manager) Token(ctx context.Context) (string, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	if cred.RefreshToken != "" && cred.ClientID != "" {
+	issuer, issuerErr := normalizeRelay(cred.Issuer)
+	base, _ := normalizeRelay(m.RelayURL)
+	if issuerErr == nil && issuer == base && cred.RefreshToken != "" && cred.ClientID != "" {
 		if refreshed, err := refresh(ctx, client, cred); err == nil {
 			store.Profiles[resource] = refreshed
 			if err := saveStore(path, store); err != nil {

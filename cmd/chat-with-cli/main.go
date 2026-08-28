@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -163,6 +164,8 @@ func applyCapabilityProfile(fs *flag.FlagSet, profile string, allowFileWrite, al
 	if !flagWasSet(fs, "profile") && strings.TrimSpace(profile) == "" {
 		return nil
 	}
+	explicitFileWrite, explicitExec := *allowFileWrite, *allowExec
+	explicitScreen, explicitAccessibility, explicitComputer := *allowScreen, *allowAccessibility, *allowComputer
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "read-only":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, false, false, false
@@ -174,6 +177,24 @@ func applyCapabilityProfile(fs *flag.FlagSet, profile string, allowFileWrite, al
 		return nil
 	default:
 		return fmt.Errorf("unknown capability profile %q", profile)
+	}
+	// A profile from TOML is a baseline. Any capability flag explicitly given
+	// on the command line remains the final override, including an explicit
+	// --allow-exec=false or --allow-fs-write=false.
+	if flagWasSet(fs, "allow-file-write") || flagWasSet(fs, "allow-fs-write") {
+		*allowFileWrite = explicitFileWrite
+	}
+	if flagWasSet(fs, "allow-exec") {
+		*allowExec = explicitExec
+	}
+	if flagWasSet(fs, "allow-screen") {
+		*allowScreen = explicitScreen
+	}
+	if flagWasSet(fs, "allow-accessibility") {
+		*allowAccessibility = explicitAccessibility
+	}
+	if flagWasSet(fs, "allow-computer-use") {
+		*allowComputer = explicitComputer
 	}
 	return nil
 }
@@ -370,16 +391,28 @@ func defaultSetupTokenPath(stateDir string) string {
 	return filepath.Join(stateDir, "setup-token")
 }
 
-func readTrimmedFile(path string) string {
+func readPrivateCredential(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return ""
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", errors.New("credential path must be a regular file, not a symlink")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("credential file permissions must not grant group or other access")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(string(data))
+	return strings.TrimSpace(string(data)), nil
 }
 
 func writePrivateCredential(path, value string) error {
@@ -514,7 +547,10 @@ func runRelay(args []string) error {
 		*githubURL = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_GITHUB_URL"))
 	}
 	if *ownerPassword == "" {
-		*ownerPassword = readTrimmedFile(*ownerPasswordFile)
+		*ownerPassword, err = readPrivateCredential(*ownerPasswordFile)
+		if err != nil {
+			return fmt.Errorf("read owner password file: %w", err)
+		}
 	}
 	oauthEnabled := strings.TrimSpace(*publicURL) != ""
 	if !oauthEnabled && *clientToken == "" {
@@ -528,7 +564,10 @@ func runRelay(args []string) error {
 	}
 	setupToken := ""
 	if oauthEnabled && *ownerPassword == "" {
-		setupToken = readTrimmedFile(*setupTokenFile)
+		setupToken, err = readPrivateCredential(*setupTokenFile)
+		if err != nil {
+			return fmt.Errorf("read setup token file: %w", err)
+		}
 		if setupToken == "" {
 			statePath := filepath.Join(*stateDir, "oauth-state.json")
 			if _, err := os.Stat(statePath); os.IsNotExist(err) {
@@ -571,6 +610,12 @@ func runRelay(args []string) error {
 		if err != nil {
 			return err
 		}
+		broker.SetAgentConnectionAuthorizer(func(device, credentialHash string) bool {
+			if *agentToken != "" && relay.TokenFingerprint(*agentToken) == credentialHash {
+				return oauth.AgentConnectionEnabled(device)
+			}
+			return oauth.VerifyAgentConnection(credentialHash, device)
+		})
 		oauth.SetDeviceStatusProvider(func() map[string]oauthserver.DeviceStatus {
 			status := broker.DeviceStatuses()
 			out := make(map[string]oauthserver.DeviceStatus, len(status))

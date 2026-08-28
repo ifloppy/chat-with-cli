@@ -483,6 +483,7 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 			if owner == target {
 				delete(s.devices, device)
 				delete(s.disabledDevices, device)
+				delete(s.deviceRecords, device)
 			}
 		}
 		s.revokeUserCredentialsLocked(target)

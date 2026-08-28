@@ -780,13 +780,13 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	if q.Get("response_type") != "code" || q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {
+	if q.Get("response_type") != "code" || q.Get("code_challenge_method") != "S256" || !validPKCEChallenge(q.Get("code_challenge")) {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth client must use authorization code with PKCE S256")
 		return
 	}
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
-	if len(clientID) == 0 || len(clientID) > 256 || len(redirectURI) == 0 || len(redirectURI) > 2048 || len(q.Get("state")) > 512 || len(q.Get("code_challenge")) != 43 {
+	if len(clientID) == 0 || len(clientID) > 256 || len(redirectURI) == 0 || len(redirectURI) > 2048 || len(q.Get("state")) > 512 {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth authorization request is too large or has invalid PKCE parameters")
 		return
 	}
@@ -1093,12 +1093,33 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 }
 
 func pkceMatches(verifier, challenge string) bool {
-	if verifier == "" || challenge == "" {
+	if !validPKCEVerifier(verifier) || !validPKCEChallenge(challenge) {
 		return false
 	}
 	sum := sha256.Sum256([]byte(verifier))
 	got := base64.RawURLEncoding.EncodeToString(sum[:])
 	return len(got) == len(challenge) && subtle.ConstantTimeCompare([]byte(got), []byte(challenge)) == 1
+}
+
+func validPKCEChallenge(challenge string) bool {
+	if len(challenge) != 43 {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(challenge)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func validPKCEVerifier(verifier string) bool {
+	if len(verifier) < 43 || len(verifier) > 128 {
+		return false
+	}
+	for _, r := range verifier {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || strings.ContainsRune("-._~", r) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func oauthError(w http.ResponseWriter, status int, code, description string) {
@@ -1300,10 +1321,46 @@ func (s *Server) VerifyAccessScope(token, resource, requiredScope string) bool {
 	if token == "" {
 		return false
 	}
+	return s.verifyAccessKey(tokenKey(token), resource, requiredScope)
+}
+
+// VerifyAgentConnection revalidates an already-established Agent WebSocket
+// using the one-way bearer fingerprint retained by the Relay broker. It is
+// intentionally separate from VerifyAccessScope so callers do not need to
+// retain or pass raw bearer values between packages.
+func (s *Server) VerifyAgentConnection(credentialHash, device string) bool {
+	device = strings.TrimSpace(device)
+	if credentialHash == "" || !validateDeviceRoute(device) {
+		return false
+	}
+	return s.verifyAccessKey(credentialHash, s.absolute("/agent/"+device), "agent:connect")
+}
+
+// AgentConnectionEnabled applies the Relay-wide and device-level gates to a
+// legacy static-token peer. Static compatibility credentials have no OAuth
+// record to revalidate, but they must still stop working after an admin
+// disables Agent access, the device, or the Relay kill switch.
+func (s *Server) AgentConnectionEnabled(device string) bool {
+	device = strings.TrimSpace(device)
+	if !validateDeviceRoute(device) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.devices[device]; !exists {
+		return false
+	}
+	return s.resourceEnabledLocked(s.absolute("/agent/"+device), "agent:connect")
+}
+
+func (s *Server) verifyAccessKey(credentialHash, resource, requiredScope string) bool {
+	if credentialHash == "" {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupLocked(time.Now())
-	record, ok := s.access[tokenKey(token)]
+	record, ok := s.access[credentialHash]
 	if !ok || !s.resourceEnabledLocked(resource, requiredScope) {
 		return false
 	}
@@ -1345,8 +1402,14 @@ func (s *Server) ProtectScopedResource(staticToken, requiredScope string, next h
 		}
 		token := bearerValue(r.Header.Get("Authorization"))
 		if staticToken != "" && len(token) == len(staticToken) && subtle.ConstantTimeCompare([]byte(token), []byte(staticToken)) == 1 {
-			next.ServeHTTP(w, r)
-			return
+			s.mu.Lock()
+			_, device, _, registered := s.resourceParts(resource)
+			registered = registered && s.devices[device] != ""
+			s.mu.Unlock()
+			if registered {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 		if s.VerifyAccessScope(token, resource, requiredScope) {
 			next.ServeHTTP(w, r)

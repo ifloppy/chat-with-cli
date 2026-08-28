@@ -3,6 +3,7 @@ package oauthserver
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -315,6 +316,21 @@ func TestAuthorizationPasswordAttemptsAreBounded(t *testing.T) {
 	}
 }
 
+func TestPKCEParametersAreStrictlyValidated(t *testing.T) {
+	challenge := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	if !validPKCEChallenge(challenge) || !validPKCEVerifier(strings.Repeat("a", 43)) {
+		t.Fatal("valid PKCE parameters were rejected")
+	}
+	for _, value := range []string{"", strings.Repeat("a", 42), strings.Repeat("a", 129), strings.Repeat("!", 43)} {
+		if validPKCEVerifier(value) {
+			t.Fatalf("invalid verifier was accepted: %q", value)
+		}
+	}
+	if validPKCEChallenge(strings.Repeat("!", 43)) {
+		t.Fatal("non-base64 PKCE challenge was accepted")
+	}
+}
+
 func TestPrivateInstanceRestartNeedsNoBootstrapPassword(t *testing.T) {
 	stateDir := t.TempDir()
 	first, err := New(Config{
@@ -528,6 +544,38 @@ func TestImmutableDeviceResourceRouteIsAccepted(t *testing.T) {
 	s.mu.Unlock()
 	if record.ID != id || record.OwnerID != ownerID {
 		t.Fatalf("unexpected device record: %+v", record)
+	}
+}
+
+func TestAgentConnectionRevalidationFollowsRevocation(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18911", Password: "agent-revalidation-test-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.clients["agent-client"] = Client{ID: "agent-client", Approved: true}
+	s.devices["agent-device"] = ownerID
+	access, _, _, err := s.issueTokensLocked("agent-client", ownerID, s.absolute("/agent/agent-device"), "agent:connect offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.VerifyAgentConnection(tokenKey(access), "agent-device") {
+		t.Fatal("active Agent connection was rejected")
+	}
+	s.mu.Lock()
+	s.agentEnabled = false
+	s.mu.Unlock()
+	if s.VerifyAgentConnection(tokenKey(access), "agent-device") {
+		t.Fatal("disabled Agent connection remained authorized")
+	}
+	s.mu.Lock()
+	s.agentEnabled = true
+	delete(s.access, tokenKey(access))
+	s.mu.Unlock()
+	if s.VerifyAgentConnection(tokenKey(access), "agent-device") {
+		t.Fatal("revoked Agent access remained authorized")
 	}
 }
 

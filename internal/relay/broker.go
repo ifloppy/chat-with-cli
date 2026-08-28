@@ -2,7 +2,9 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,20 +23,25 @@ type Broker struct {
 	peers          map[string]*peer
 	callSlots      chan struct{}
 	maxConnections int
+	authMu         sync.RWMutex
+	authorizer     func(device, credentialHash string) bool
 }
 
+const maxRPCTime = 2 * time.Minute
+
 type peer struct {
-	device       string
-	conn         *websocket.Conn
-	writeMu      sync.Mutex
-	pendingMu    sync.Mutex
-	pending      map[string]chan protocol.Response
-	done         chan struct{}
-	doneOnce     sync.Once
-	stateMu      sync.RWMutex
-	connectedAt  time.Time
-	lastSeen     time.Time
-	capabilities protocol.AgentCapabilities
+	device         string
+	conn           *websocket.Conn
+	writeMu        sync.Mutex
+	pendingMu      sync.Mutex
+	pending        map[string]chan protocol.Response
+	done           chan struct{}
+	doneOnce       sync.Once
+	stateMu        sync.RWMutex
+	connectedAt    time.Time
+	lastSeen       time.Time
+	capabilities   protocol.AgentCapabilities
+	credentialHash string
 }
 
 type RemoteCaller struct {
@@ -46,22 +53,46 @@ func NewBroker() *Broker {
 	return &Broker{peers: make(map[string]*peer), callSlots: make(chan struct{}, 32), maxConnections: 64}
 }
 
+// SetAgentConnectionAuthorizer installs a callback used before accepting an
+// Agent connection and before every brokered RPC. The callback receives only a
+// SHA-256 fingerprint of the bearer token, never the raw token. Rechecking at
+// call time makes OAuth revoke, device disable, and the Relay kill switch take
+// effect for already-established WebSockets as well as new connections.
+func (b *Broker) SetAgentConnectionAuthorizer(authorizer func(device, credentialHash string) bool) {
+	b.authMu.Lock()
+	b.authorizer = authorizer
+	b.authMu.Unlock()
+}
+
+func (b *Broker) peerAuthorized(p *peer) bool {
+	b.authMu.RLock()
+	authorizer := b.authorizer
+	b.authMu.RUnlock()
+	return authorizer == nil || authorizer(p.device, p.credentialHash)
+}
+
 func (c RemoteCaller) Call(ctx context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
 	return c.Broker.Call(ctx, c.Device, method, raw)
 }
 
 func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMessage) (json.RawMessage, error) {
+	rpcCtx, cancel := context.WithTimeout(ctx, maxRPCTime)
+	defer cancel()
 	b.mu.RLock()
 	p := b.peers[device]
 	b.mu.RUnlock()
 	if p == nil {
 		return nil, fmt.Errorf("device %q is offline", device)
 	}
+	if !b.peerAuthorized(p) {
+		p.close("authorization revoked")
+		return nil, errors.New("agent authorization revoked")
+	}
 	select {
 	case b.callSlots <- struct{}{}:
 		defer func() { <-b.callSlots }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-rpcCtx.Done():
+		return nil, rpcCtx.Err()
 	}
 
 	id := protocol.NewID()
@@ -76,7 +107,7 @@ func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMe
 	}()
 
 	request := protocol.Request{ID: id, Method: method, Args: raw}
-	if err := p.writeJSON(ctx, request); err != nil {
+	if err := p.writeJSON(rpcCtx, request); err != nil {
 		return nil, err
 	}
 	select {
@@ -87,8 +118,8 @@ func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMe
 		return response.Result, nil
 	case <-p.done:
 		return nil, errors.New("device disconnected")
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-rpcCtx.Done():
+		return nil, rpcCtx.Err()
 	}
 }
 
@@ -141,9 +172,11 @@ func (p *peer) readLoop(onClose func()) {
 	}
 }
 
-func (p *peer) close(reason string) {
+func (p *peer) close(_ string) {
 	p.doneOnce.Do(func() { close(p.done) })
-	_ = p.conn.Close(websocket.StatusNormalClosure, reason)
+	// A revoked/replaced peer must not make the HTTP/RPC path wait for a
+	// close-handshake from an unresponsive client.
+	_ = p.conn.CloseNow()
 }
 
 func (b *Broker) AgentHandler() http.HandlerFunc {
@@ -197,7 +230,11 @@ func (b *Broker) acceptAgent(w http.ResponseWriter, r *http.Request, device stri
 	}
 	conn.SetReadLimit(32 << 20)
 	now := time.Now()
-	p := &peer{device: device, conn: conn, pending: make(map[string]chan protocol.Response), done: make(chan struct{}), connectedAt: now, lastSeen: now}
+	p := &peer{device: device, conn: conn, credentialHash: TokenFingerprint(bearerToken(r.Header.Get("Authorization"))), pending: make(map[string]chan protocol.Response), done: make(chan struct{}), connectedAt: now, lastSeen: now}
+	if !b.peerAuthorized(p) {
+		_ = conn.Close(websocket.StatusPolicyViolation, "authorization revoked")
+		return
+	}
 
 	b.mu.Lock()
 	old := b.peers[device]
@@ -219,16 +256,27 @@ func validBearer(r *http.Request, expected string) bool {
 	if expected == "" {
 		return false
 	}
-	header := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
-		return false
-	}
-	provided := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	provided := bearerToken(r.Header.Get("Authorization"))
 	if len(provided) != len(expected) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func bearerToken(header string) string {
+	const prefix = "Bearer "
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(header[len(prefix):])
+}
+
+// TokenFingerprint is used for in-memory connection authorization checks. It
+// is intentionally one-way so peer status and broker state never retain a raw
+// OAuth bearer value.
+func TokenFingerprint(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func (b *Broker) Devices() []string {
