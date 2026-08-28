@@ -9,28 +9,31 @@ go build -trimpath -ldflags='-s -w' -o chat-with-cli ./cmd/chat-with-cli
 sudo install -m 0755 chat-with-cli /usr/local/bin/chat-with-cli
 ```
 
-Generate two independent high-entropy secrets:
+Choose an instance mode before first start:
 
-```bash
-chat-with-cli token   # workstation Agent token
-chat-with-cli token   # OAuth authorization password
-```
+- **private** (default): one owner account, closed registration.
+- **public**: open account registration; every device is owned by the account that first authorizes its Agent.
 
-Keep them in root/user-readable environment files rather than command-line arguments where possible. The OAuth password must be at least 32 characters; the generated token is suitable.
+Both Agents and MCP clients use browser OAuth. Shared static bearer tokens are legacy-only and are rejected in public mode.
 
 ## 2. Relay environment
 
-`/etc/chat-with-cli/relay.env`:
+Private `/etc/chat-with-cli/relay.env`:
 
 ```text
-CHAT_WITH_CLI_AGENT_TOKEN=<agent secret>
-CHAT_WITH_CLI_OAUTH_PASSWORD=<oauth authorization password>
 CHAT_WITH_CLI_PUBLIC_URL=https://cli.example.com
-# Optional legacy/debug MCP bearer:
-# CHAT_WITH_CLI_CLIENT_TOKEN=<client secret>
+CHAT_WITH_CLI_INSTANCE_MODE=private
+CHAT_WITH_CLI_OWNER_PASSWORD_FILE=/var/lib/chat-with-cli/private-owner-password
 ```
 
-Set mode `0600` and owner `root:root`.
+Public instance:
+
+```text
+CHAT_WITH_CLI_PUBLIC_URL=https://cli.example.com
+CHAT_WITH_CLI_INSTANCE_MODE=public
+```
+
+Set the environment file to mode `0600`. A private instance creates the owner (`owner` by default) on first boot. If no owner password is supplied, a strong random bootstrap password is written to `CHAT_WITH_CLI_OWNER_PASSWORD_FILE` with mode `0600`. After you save that account in your browser/password manager, the file may be deleted: future Relay starts use the persisted Argon2id password hash.
 
 `/etc/systemd/system/chat-with-cli-relay.service`:
 
@@ -65,6 +68,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now chat-with-cli-relay
 ```
 
+For a new private instance, inspect the bootstrap credential once:
+
+```bash
+sudo cat /var/lib/chat-with-cli/private-owner-password
+```
+
 ## 3. TLS with Caddy
 
 ```caddyfile
@@ -74,30 +83,34 @@ cli.example.com {
 }
 ```
 
-The Relay intentionally listens on loopback in this example. Caddy owns the public socket and TLS lifecycle.
-
 Useful checks:
 
 ```bash
 curl -fsS https://cli.example.com/health
 curl -fsS https://cli.example.com/.well-known/oauth-authorization-server | jq
-# Device-specific resource metadata after choosing a device name:
 curl -fsS https://cli.example.com/.well-known/oauth-protected-resource/mcp/workstation | jq
+curl -fsS https://cli.example.com/.well-known/oauth-protected-resource/agent/workstation | jq
 ```
-
-If you also configured `CHAT_WITH_CLI_CLIENT_TOKEN`, `/devices` remains available for legacy/debug clients. Do not put OAuth passwords, Agent tokens, or bearer tokens directly into a Caddyfile or public configuration repository.
 
 ## 4. Workstation Agent
 
-Create `~/.config/chat-with-cli/agent.env` with mode `0600`:
+Do the first authorization interactively in the logged-in desktop session:
 
-```text
-CHAT_WITH_CLI_AGENT_TOKEN=<agent secret>
+```bash
+chat-with-cli login --relay https://cli.example.com --device workstation
 ```
 
-For Computer Use, the Agent must run inside the logged-in desktop user's session rather than as a root system service.
+Private mode: sign in as the owner account. Public mode: use **Create account** on the OAuth page if needed. The same browser login/password-manager entry is reused when ChatGPT later opens its MCP OAuth flow.
 
-Example user unit: `~/.config/systemd/user/chat-with-cli-agent.service`
+CLI OAuth state is stored by default in `~/.config/chat-with-cli/credentials.json` with mode `0600`. It contains OAuth client/access/refresh credentials, not the account password. Refresh tokens rotate automatically.
+
+After the first login, manual start can omit the Relay URL when exactly one saved profile matches the device:
+
+```bash
+chat-with-cli agent --device workstation --root "$HOME/project" --allow-exec
+```
+
+Example user unit `~/.config/systemd/user/chat-with-cli-agent.service`:
 
 ```ini
 [Unit]
@@ -107,7 +120,6 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/chat-with-cli/agent.env
 ExecStart=/usr/local/bin/chat-with-cli agent --relay https://cli.example.com --device workstation --root %h/project --allow-exec --max-active-tasks 32
 Restart=on-failure
 RestartSec=2s
@@ -117,9 +129,11 @@ NoNewPrivileges=yes
 WantedBy=default.target
 ```
 
-The Agent defaults to at most 32 concurrent PTY tasks; lower `--max-active-tasks` on small machines. For read-only screenshot/AT-SPI access, append `--allow-screen`. For keyboard, pointer, or semantic UI actions, append `--allow-computer-use` only when needed. Portal restore policy defaults to `--computer-persist=process`; use `none` for no restoration or explicitly choose `persistent` for restart-surviving consent.
+Pre-authorize with `chat-with-cli login` before enabling the user unit; a background service should not be expected to complete a first-time browser login. The Agent refreshes saved OAuth credentials automatically before reconnecting.
 
-The Agent writes privacy-preserving audit metadata under its `--state-dir` (default `~/.local/state/chat-with-cli/audit/events.jsonl`). It records method/time/duration/success only, never MCP arguments or results. Use the read-only `audit_recent` MCP tool for recent events; the file is size-bounded and rotated once.
+The Agent defaults to at most 32 concurrent PTY tasks. For read-only screenshot/AT-SPI access, append `--allow-screen`; for keyboard, pointer, or semantic UI writes, append `--allow-computer-use`. Portal restore policy defaults to `--computer-persist=process`.
+
+The Agent writes privacy-preserving audit metadata under its `--state-dir` (default `~/.local/state/chat-with-cli/audit/events.jsonl`). It records method/time/duration/success only, never MCP arguments or results.
 
 ```bash
 systemctl --user daemon-reload
@@ -148,4 +162,4 @@ Avoid launching a Computer Use Agent through `sudo`: doing so commonly loses the
 
 ## Multiple workstations
 
-Each Agent chooses a URL-safe `--device` name. Its stable MCP resource is `/mcp/<device>`, for example `https://cli.example.com/mcp/workstation`. OAuth tokens are bound to that exact resource, so authorizing one device does not authorize another. The alpha Relay still shares one Agent credential across devices; per-device Agent credentials are planned before a stable release.
+Each Agent chooses a URL-safe `--device` name. Its Agent OAuth resource is `/agent/<device>` and its MCP resource is `/mcp/<device>`. In public mode the first successful Agent authorization claims that globally unique device name for the signed-in account; other accounts cannot authorize either resource for that device. Device transfer/rename administration is not implemented yet.

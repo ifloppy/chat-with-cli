@@ -120,7 +120,18 @@ func (p *peer) close(reason string) {
 	_ = p.conn.Close(websocket.StatusNormalClosure, reason)
 }
 
-func (b *Broker) AgentHandler(agentToken string) http.HandlerFunc {
+func (b *Broker) AgentHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		device := strings.TrimSpace(r.PathValue("device"))
+		if !protocol.ValidDeviceName(device) {
+			http.Error(w, "invalid device", http.StatusBadRequest)
+			return
+		}
+		b.acceptAgent(w, r, device)
+	}
+}
+
+func (b *Broker) LegacyAgentHandler(agentToken string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !validBearer(r, agentToken) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -131,28 +142,32 @@ func (b *Broker) AgentHandler(agentToken string) http.HandlerFunc {
 			http.Error(w, "invalid device", http.StatusBadRequest)
 			return
 		}
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
-		if err != nil {
-			return
-		}
-		conn.SetReadLimit(32 << 20)
-		p := &peer{device: device, conn: conn, pending: make(map[string]chan protocol.Response), done: make(chan struct{})}
-
-		b.mu.Lock()
-		old := b.peers[device]
-		b.peers[device] = p
-		b.mu.Unlock()
-		if old != nil {
-			old.close("replaced by a new connection")
-		}
-		go p.readLoop(func() {
-			b.mu.Lock()
-			if b.peers[device] == p {
-				delete(b.peers, device)
-			}
-			b.mu.Unlock()
-		})
+		b.acceptAgent(w, r, device)
 	}
+}
+
+func (b *Broker) acceptAgent(w http.ResponseWriter, r *http.Request, device string) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
+	if err != nil {
+		return
+	}
+	conn.SetReadLimit(32 << 20)
+	p := &peer{device: device, conn: conn, pending: make(map[string]chan protocol.Response), done: make(chan struct{})}
+
+	b.mu.Lock()
+	old := b.peers[device]
+	b.peers[device] = p
+	b.mu.Unlock()
+	if old != nil {
+		old.close("replaced by a new connection")
+	}
+	go p.readLoop(func() {
+		b.mu.Lock()
+		if b.peers[device] == p {
+			delete(b.peers, device)
+		}
+		b.mu.Unlock()
+	})
 }
 
 func validBearer(r *http.Request, expected string) bool {

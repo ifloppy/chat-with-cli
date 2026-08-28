@@ -1,13 +1,15 @@
 # Security Policy and Threat Model
 
-`chat-with-cli` deliberately exposes capabilities that can become equivalent to local-user control when enabled. Treat an Agent token or an authorized MCP client as a high-value credential.
+`chat-with-cli` deliberately exposes capabilities that can become equivalent to local-user control when enabled. Treat an OAuth refresh token, browser session, authorized MCP client, or legacy static token as a high-value credential.
 
 ## Trust boundaries
 
-1. **MCP client -> Relay:** authenticated with the client credential and protected by HTTPS in production.
-2. **Agent -> Relay:** a separate Agent credential over outbound WSS.
-3. **Relay -> Engine tools:** requests are routed to one named connected device.
-4. **Engine -> host:** filesystem, PTY, screen, and input capabilities are independently policy-gated.
+1. **Browser/user -> Relay:** a Relay account authenticates the human authorization step. Private instances have one bootstrapped owner account; public instances allow open account registration.
+2. **MCP client -> Relay:** OAuth access is bound to one exact `/mcp/<device>` resource and the `mcp` scope.
+3. **Agent -> Relay:** the workstation is also an OAuth client. Its access is bound to one exact `/agent/<device>` resource and the `agent:connect` scope.
+4. **Relay identity -> device:** a device name is claimed by one Relay user; MCP authorization is allowed only to that owner.
+5. **Relay -> Engine tools:** requests are routed to one named connected device.
+6. **Engine -> host:** filesystem, PTY, screen, and input capabilities are independently policy-gated.
 
 The Relay is a transport broker. It should not need filesystem access to the workstation and cannot initiate an inbound network connection to it.
 
@@ -45,11 +47,19 @@ For stronger isolation, run the Agent in a container/namespace or dedicated Unix
 
 ## Authentication and transport
 
-The Relay uses a separate high-entropy bearer token for workstation Agents. MCP clients can use the built-in OAuth authorization flow: RFC 9728 protected-resource discovery, authorization-server metadata, Dynamic Client Registration, mandatory PKCE S256, short-lived resource-bound access tokens, and rotating refresh tokens. Raw OAuth tokens are never persisted; only SHA-256 token identifiers and their metadata are stored. The OAuth consent password is a separate secret and must be at least 32 characters.
+The Relay implements RFC 9728 protected-resource discovery, authorization-server metadata, Dynamic Client Registration, mandatory PKCE S256, short-lived resource-bound access tokens, and rotating refresh tokens. Both the workstation Agent and MCP clients use this browser OAuth flow. Agent grants require `agent:connect`; MCP grants require `mcp`. Tokens are bound to the exact resource URL and Relay user.
 
-An optional static MCP bearer token remains available for legacy/debug clients. It is intentionally broader than resource-bound OAuth and should normally be omitted on public deployments. Never place OAuth passwords, Agent tokens, or bearer tokens in repository files, issue reports, or reverse-proxy access logs.
+Relay account passwords are hashed with Argon2id using a random per-password salt. The server persists only password hashes, SHA-256 access/refresh-token identifiers, SHA-256 browser-session identifiers, and associated metadata. It never persists raw OAuth bearer tokens or raw browser-session cookies. Browser sessions are HttpOnly, SameSite=Lax, Secure on HTTPS, and expire after 30 days.
 
-Use TLS for every non-loopback deployment. The built-in HTTP server is intentionally suitable for binding behind a reverse proxy; it is not a certificate-management stack. OAuth access is bound to the exact `/mcp/<device>` resource. Refresh tokens rotate on use; revocation and Relay state deletion can invalidate issued credentials.
+The CLI is necessarily different: `~/.config/chat-with-cli/credentials.json` contains the raw OAuth access and refresh tokens needed for unattended reconnects. It is written atomically with mode `0600` beneath a `0700` directory. Treat that file as a login credential. The account password is not stored there; it can remain in the user's browser/password manager.
+
+Private instances bootstrap an owner account on first start. If no owner password is supplied, the Relay generates one and writes the raw bootstrap password to the configured owner-password file with mode `0600`. Save it in an appropriate password manager and delete the bootstrap file if operationally convenient after the account is established. Public instances start with open registration and do not create a default owner.
+
+Device names are globally unique within one Relay. The first successful Agent authorization claims an unowned device for that signed-in user. MCP authorization requires the same owner. This prevents cross-user access, but a public user can intentionally claim an unowned name before its intended owner does; this is an availability/name-squatting limitation, not a privilege escalation. Device transfer/rename and administrative account-management tooling are not yet implemented.
+
+Legacy static MCP and Agent bearer tokens remain available only for private migration/debug deployments. They intentionally bypass the finer user/resource ownership model and should be removed after browser OAuth migration. Public instance mode rejects configured static client or Agent tokens.
+
+Use TLS for every non-loopback deployment. The built-in HTTP server is intended to bind behind a reverse proxy; it is not a certificate-management stack. Do not place account passwords, OAuth tokens, browser-session cookies, legacy static tokens, or CLI credential files in repositories, issue reports, shell history, or reverse-proxy access logs. Refresh tokens rotate on use; revocation and Relay state deletion can invalidate issued credentials.
 
 ## Audit metadata
 
@@ -66,9 +76,11 @@ This is an operational audit trail, not tamper-evident forensic storage. An Agen
 - Audit metadata is bounded to the current 8 MiB JSONL file plus one rotated file.
 - Concurrent remote requests are bounded inside the Agent.
 - Concurrent PTY tasks are capped (32 by default, configurable with `--max-active-tasks`).
-- OAuth registration, authorization requests, codes, access tokens, and refresh tokens have bounded counts and/or lifetimes; repeated bad consent-password attempts lock that authorization request.
+- OAuth registration, authorization requests, codes, access tokens, refresh tokens, browser sessions, and registered users have bounded counts and/or lifetimes. Password hashing is concurrency-limited, and repeated bad account-login attempts lock that pending authorization request.
 
 These controls reduce accidental exhaustion; they are not a substitute for OS-level CPU, memory, process, and disk quotas when serving mutually untrusted clients.
+
+Public mode is intentionally an open-registration service. It does not currently provide email verification, CAPTCHA, account recovery, quotas per user, or an administrative UI. Internet-facing public operators should add appropriate reverse-proxy/WAF rate limits and OS/container CPU, memory, process, and disk quotas. Open registration plus globally unique device names also means account spam and device-name squatting are availability risks that must be handled operationally until first-class administration tools exist.
 
 ## Reporting
 

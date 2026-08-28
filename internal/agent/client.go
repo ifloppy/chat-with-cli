@@ -17,10 +17,11 @@ import (
 )
 
 type Client struct {
-	Engine *engine.Engine
-	URL    string
-	Device string
-	Token  string
+	Engine        *engine.Engine
+	URL           string
+	Device        string
+	Token         string
+	TokenProvider func(context.Context) (string, error)
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -30,8 +31,8 @@ func (c *Client) Run(ctx context.Context) error {
 	if strings.TrimSpace(c.Device) == "" {
 		return errors.New("device name is required")
 	}
-	if c.Token == "" {
-		return errors.New("agent token is required")
+	if c.Token == "" && c.TokenProvider == nil {
+		return errors.New("agent OAuth token provider or legacy token is required")
 	}
 	endpoint, err := agentURL(c.URL, c.Device)
 	if err != nil {
@@ -42,8 +43,15 @@ func (c *Client) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		token := c.Token
+		if c.TokenProvider != nil {
+			token, err = c.TokenProvider(ctx)
+			if err != nil {
+				return fmt.Errorf("agent OAuth: %w", err)
+			}
+		}
 		header := http.Header{}
-		header.Set("Authorization", "Bearer "+c.Token)
+		header.Set("Authorization", "Bearer "+token)
 		conn, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: header})
 		if err == nil {
 			conn.SetReadLimit(32 << 20)
@@ -81,10 +89,8 @@ func agentURL(base, device string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported relay scheme %q", u.Scheme)
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/agent"
-	q := u.Query()
-	q.Set("device", device)
-	u.RawQuery = q.Encode()
+	u.Path = strings.TrimRight(u.Path, "/") + "/agent/" + url.PathEscape(device)
+	u.RawQuery = ""
 	return u.String(), nil
 }
 

@@ -1,0 +1,174 @@
+package oauthclient
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
+)
+
+var requestIDPattern = regexp.MustCompile(`name="request_id" value="([^"]+)"`)
+
+func startTestOAuthServer(t *testing.T, mode string) (*oauthserver.Server, string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "http://" + ln.Addr().String()
+	cfg := oauthserver.Config{PublicURL: base, StateDir: t.TempDir(), Mode: mode}
+	if mode == oauthserver.ModePrivate {
+		cfg.OwnerUsername = "owner"
+		cfg.OwnerPassword = "owner-password-123456"
+	}
+	s, err := oauthserver.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	httpServer := &http.Server{Handler: mux}
+	go func() { _ = httpServer.Serve(ln) }()
+	cleanup := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(ctx)
+	}
+	return s, base, cleanup
+}
+
+func loginBrowser(t *testing.T, username, password, decision string, calls *int) func(string) error {
+	t.Helper()
+	return func(target string) error {
+		*calls = *calls + 1
+		client := &http.Client{}
+		resp, err := client.Get(target)
+		if err != nil {
+			return err
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		match := requestIDPattern.FindSubmatch(body)
+		if len(match) != 2 {
+			t.Fatalf("authorization page missing request_id: %s", body)
+		}
+		u, _ := url.Parse(target)
+		form := url.Values{
+			"request_id": {string(match[1])}, "username": {username},
+			"password": {password}, "decision": {decision},
+		}
+		post, err := http.NewRequest(http.MethodPost, u.Scheme+"://"+u.Host+"/oauth/authorize", strings.NewReader(form.Encode()))
+		if err != nil {
+			return err
+		}
+		post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err = client.Do(post)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode/100 != 2 {
+			data, _ := io.ReadAll(resp.Body)
+			t.Fatalf("browser authorization status=%d body=%s", resp.StatusCode, data)
+		}
+		return nil
+	}
+}
+
+func TestAgentBrowserOAuthPersistsAndRefreshes(t *testing.T) {
+	oauth, base, cleanup := startTestOAuthServer(t, oauthserver.ModePrivate)
+	defer cleanup()
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	calls := 0
+	manager := &Manager{
+		RelayURL: base, Device: "laptop-a", CredentialsPath: path,
+		OpenBrowser: loginBrowser(t, "owner", "owner-password-123456", "login", &calls),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	access, err := manager.Token(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource, _ := manager.Resource()
+	if !oauth.VerifyAccessScope(access, resource, "agent:connect") {
+		t.Fatal("browser OAuth access token did not authorize Agent resource")
+	}
+	if calls != 1 {
+		t.Fatalf("browser calls=%d want=1", calls)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("credentials mode=%o want 600", info.Mode().Perm())
+	}
+	store, err := loadStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred := store.Profiles[resource]
+	if cred.RefreshToken == "" {
+		t.Fatal("refresh token was not persisted")
+	}
+	oldRefresh := cred.RefreshToken
+	cred.ExpiresAt = 0
+	store.Profiles[resource] = cred
+	if err := saveStore(path, store); err != nil {
+		t.Fatal(err)
+	}
+	refreshedAccess, err := manager.Token(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("refresh unexpectedly reopened browser; calls=%d", calls)
+	}
+	if refreshedAccess == "" || refreshedAccess == access {
+		t.Fatal("access token was not refreshed")
+	}
+	store, err = loadStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Profiles[resource].RefreshToken == oldRefresh {
+		t.Fatal("refresh token was not rotated in credential store")
+	}
+}
+
+func TestPublicAgentOAuthCanRegisterAndClaimDevice(t *testing.T) {
+	oauth, base, cleanup := startTestOAuthServer(t, oauthserver.ModePublic)
+	defer cleanup()
+	calls := 0
+	manager := &Manager{
+		RelayURL: base, Device: "new-user-laptop", CredentialsPath: filepath.Join(t.TempDir(), "credentials.json"),
+		OpenBrowser: loginBrowser(t, "newuser", "new-user-password-123", "register", &calls),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	access, err := manager.Token(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource, _ := manager.Resource()
+	if !oauth.VerifyAccessScope(access, resource, "agent:connect") {
+		t.Fatal("registered user did not receive Agent access")
+	}
+	owner, ok := oauth.DeviceOwner("new-user-laptop")
+	if !ok || strings.ToLower(owner.Username) != "newuser" {
+		t.Fatalf("unexpected device owner: %+v ok=%v", owner, ok)
+	}
+}

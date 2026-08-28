@@ -19,6 +19,7 @@ import (
 	"github.com/ifloppy/chat-with-cli/internal/agent"
 	"github.com/ifloppy/chat-with-cli/internal/engine"
 	"github.com/ifloppy/chat-with-cli/internal/mcpserver"
+	"github.com/ifloppy/chat-with-cli/internal/oauthclient"
 	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 	"github.com/ifloppy/chat-with-cli/internal/relay"
@@ -48,6 +49,8 @@ func main() {
 		err = runRelay(os.Args[2:])
 	case "agent":
 		err = runAgent(os.Args[2:])
+	case "login":
+		err = runLogin(os.Args[2:])
 	case "token":
 		fmt.Println(protocol.NewID() + protocol.NewID())
 	case "version", "--version", "-v":
@@ -71,6 +74,7 @@ Usage:
   chat-with-cli serve [flags]   Run direct Streamable HTTP MCP on this machine
   chat-with-cli relay [flags]   Run the public relay/MCP gateway
   chat-with-cli agent [flags]   Connect this machine outbound to a relay
+  chat-with-cli login [flags]   Browser OAuth login for an Agent profile
   chat-with-cli token           Generate a strong random token
   chat-with-cli version         Print version
 
@@ -128,6 +132,16 @@ func envOr(value, name string) string {
 	return os.Getenv(name)
 }
 
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	roots, allowExec, allowScreen, allowComputer, computerPersist, stateDir, maxActiveTasks := addEngineFlags(fs)
@@ -176,13 +190,43 @@ func defaultRelayStateDir() string {
 	return filepath.Join(home, ".local", "state", "chat-with-cli", "relay")
 }
 
+func defaultOwnerPasswordPath() string {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return filepath.Join(xdg, "chat-with-cli", "private-owner-password")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "chat-with-cli", "private-owner-password")
+}
+
+func readTrimmedFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func writePrivateCredential(path, value string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(value+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
 func runRelay(args []string) error {
 	fs := flag.NewFlagSet("relay", flag.ContinueOnError)
 	listen := fs.String("listen", ":8765", "HTTP listen address")
-	clientToken := fs.String("client-token", "", "optional legacy/static MCP bearer token")
-	agentToken := fs.String("agent-token", "", "device agent bearer token")
+	mode := fs.String("instance-mode", oauthserver.ModePrivate, "instance mode: private or public")
+	clientToken := fs.String("client-token", "", "optional private legacy/static MCP bearer token")
+	agentToken := fs.String("agent-token", "", "optional private legacy Agent bearer token")
 	publicURL := fs.String("public-url", "", "public HTTPS origin used for OAuth, for example https://cli.example.com")
-	oauthPassword := fs.String("oauth-password", "", "single-user OAuth consent password")
+	ownerUsername := fs.String("owner-username", "owner", "private instance owner username")
+	ownerPassword := fs.String("owner-password", "", "private instance first-run owner password")
+	legacyOAuthPassword := fs.String("oauth-password", "", "deprecated alias for --owner-password")
+	ownerPasswordFile := fs.String("owner-password-file", defaultOwnerPasswordPath(), "private first-run owner password file")
 	stateDir := fs.String("state-dir", defaultRelayStateDir(), "relay state directory")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -190,17 +234,34 @@ func runRelay(args []string) error {
 	*clientToken = envOr(*clientToken, "CHAT_WITH_CLI_CLIENT_TOKEN")
 	*agentToken = envOr(*agentToken, "CHAT_WITH_CLI_AGENT_TOKEN")
 	*publicURL = envOr(*publicURL, "CHAT_WITH_CLI_PUBLIC_URL")
-	*oauthPassword = envOr(*oauthPassword, "CHAT_WITH_CLI_OAUTH_PASSWORD")
-	*stateDir = envOr(*stateDir, "CHAT_WITH_CLI_RELAY_STATE_DIR")
-	if *agentToken == "" {
-		return fmt.Errorf("relay requires an agent token")
+	if !flagWasSet(fs, "instance-mode") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_INSTANCE_MODE")) != "" {
+		*mode = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_INSTANCE_MODE"))
 	}
-	oauthEnabled := *publicURL != "" || *oauthPassword != ""
-	if oauthEnabled && (*publicURL == "" || *oauthPassword == "") {
-		return fmt.Errorf("OAuth requires both --public-url and --oauth-password")
+	if !flagWasSet(fs, "owner-username") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_OWNER_USERNAME")) != "" {
+		*ownerUsername = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_OWNER_USERNAME"))
 	}
+	*ownerPassword = envOr(*ownerPassword, "CHAT_WITH_CLI_OWNER_PASSWORD")
+	if *ownerPassword == "" {
+		*ownerPassword = envOr(*legacyOAuthPassword, "CHAT_WITH_CLI_OAUTH_PASSWORD")
+	}
+	if !flagWasSet(fs, "owner-password-file") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_OWNER_PASSWORD_FILE")) != "" {
+		*ownerPasswordFile = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_OWNER_PASSWORD_FILE"))
+	}
+	if !flagWasSet(fs, "state-dir") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_RELAY_STATE_DIR")) != "" {
+		*stateDir = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_RELAY_STATE_DIR"))
+	}
+	if *ownerPassword == "" {
+		*ownerPassword = readTrimmedFile(*ownerPasswordFile)
+	}
+	oauthEnabled := strings.TrimSpace(*publicURL) != ""
 	if !oauthEnabled && *clientToken == "" {
-		return fmt.Errorf("relay requires OAuth or --client-token for MCP clients")
+		return fmt.Errorf("relay requires --public-url for OAuth or a legacy --client-token")
+	}
+	if strings.EqualFold(*mode, oauthserver.ModePublic) && (*clientToken != "" || *agentToken != "") {
+		return fmt.Errorf("public mode forbids shared static client/agent tokens; use browser OAuth")
+	}
+	if !oauthEnabled && *agentToken == "" {
+		return fmt.Errorf("legacy relay mode requires --agent-token")
 	}
 
 	broker := relay.NewBroker()
@@ -221,15 +282,29 @@ func runRelay(args []string) error {
 
 	mux := http.NewServeMux()
 	if oauthEnabled {
-		oauth, err := oauthserver.New(oauthserver.Config{PublicURL: *publicURL, Password: *oauthPassword, StateDir: *stateDir})
+		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword}
+		oauth, err := oauthserver.New(cfg)
+		if err != nil && strings.EqualFold(*mode, oauthserver.ModePrivate) && *ownerPassword == "" && strings.Contains(err.Error(), "no owner") {
+			generated := protocol.NewID() + protocol.NewID()
+			if err := writePrivateCredential(*ownerPasswordFile, generated); err != nil {
+				return fmt.Errorf("write generated owner password: %w", err)
+			}
+			cfg.OwnerPassword = generated
+			oauth, err = oauthserver.New(cfg)
+			if err == nil {
+				log.Printf("private owner bootstrap password generated at %s (mode 0600)", *ownerPasswordFile)
+			}
+		}
 		if err != nil {
 			return err
 		}
 		oauth.RegisterRoutes(mux)
-		mux.Handle("/mcp/{device}", oauth.ProtectResource(*clientToken, pathHandler))
-		log.Printf("OAuth MCP endpoint: %s/mcp/<device>", strings.TrimRight(*publicURL, "/"))
+		mux.Handle("/mcp/{device}", oauth.ProtectScopedResource(*clientToken, "mcp", pathHandler))
+		mux.Handle("/agent/{device}", oauth.ProtectScopedResource(*agentToken, "agent:connect", broker.AgentHandler()))
+		log.Printf("%s OAuth instance; MCP endpoint: %s/mcp/<device>", strings.ToLower(*mode), strings.TrimRight(*publicURL, "/"))
 	} else {
 		mux.Handle("/mcp/{device}", bearerAuth(*clientToken, pathHandler))
+		mux.Handle("/agent/{device}", bearerAuth(*agentToken, broker.AgentHandler()))
 	}
 	if *clientToken != "" {
 		mux.Handle("/mcp", bearerAuth(*clientToken, legacyHandler))
@@ -238,7 +313,9 @@ func runRelay(args []string) error {
 			_ = json.NewEncoder(w).Encode(broker.Devices())
 		})))
 	}
-	mux.Handle("/agent", broker.AgentHandler(*agentToken))
+	if *agentToken != "" {
+		mux.Handle("/agent", broker.LegacyAgentHandler(*agentToken))
+	}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	ctx, cancel := signalContext()
 	defer cancel()
@@ -251,21 +328,32 @@ func runAgent(args []string) error {
 	relayURL := fs.String("relay", "", "relay base URL, for example https://cli.example.com")
 	deviceDefault, _ := os.Hostname()
 	device := fs.String("device", deviceDefault, "device name exposed to MCP clients")
-	token := fs.String("token", "", "agent token (or CHAT_WITH_CLI_AGENT_TOKEN)")
+	token := fs.String("token", "", "legacy private Agent token; omit to use browser OAuth")
+	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	*token = envOr(*token, "CHAT_WITH_CLI_AGENT_TOKEN")
-	if strings.TrimSpace(*relayURL) == "" {
-		return fmt.Errorf("--relay is required")
-	}
-	if *token == "" {
-		return fmt.Errorf("agent token is required")
+	if !flagWasSet(fs, "credentials") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS")) != "" {
+		*credentials = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS"))
 	}
 	if !protocol.ValidDeviceName(strings.TrimSpace(*device)) {
 		return fmt.Errorf("--device must be 1-128 ASCII letters, digits, dot, underscore, or hyphen")
 	}
 	*device = strings.TrimSpace(*device)
+	if strings.TrimSpace(*relayURL) == "" && *token == "" {
+		saved, ok, err := oauthclient.SavedRelayForDevice(*credentials, *device)
+		if err != nil {
+			return err
+		}
+		if ok {
+			*relayURL = saved
+			log.Printf("using saved Relay profile %s for device %q", saved, *device)
+		}
+	}
+	if strings.TrimSpace(*relayURL) == "" {
+		return fmt.Errorf("--relay is required for first login; later starts can reuse the saved OAuth profile")
+	}
 	eng, err := newEngine(*roots, *allowExec, *allowScreen, *allowComputer, *computerPersist, *stateDir, *maxActiveTasks)
 	if err != nil {
 		return err
@@ -274,9 +362,42 @@ func runAgent(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 	client := &agent.Client{Engine: eng, URL: *relayURL, Device: *device, Token: *token}
+	if *token == "" {
+		manager := &oauthclient.Manager{RelayURL: *relayURL, Device: *device, CredentialsPath: *credentials}
+		client.TokenProvider = manager.Token
+		log.Printf("Agent authentication: browser OAuth (credentials: %s)", *credentials)
+	}
 	log.Printf("agent %q connecting to %s", *device, *relayURL)
 	log.Printf("MCP endpoint for this device: %s/mcp/%s", strings.TrimRight(*relayURL, "/"), *device)
 	return client.Run(ctx)
+}
+
+func runLogin(args []string) error {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	relayURL := fs.String("relay", "", "relay base URL, for example https://cli.example.com")
+	deviceDefault, _ := os.Hostname()
+	device := fs.String("device", deviceDefault, "device to authorize")
+	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !flagWasSet(fs, "credentials") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS")) != "" {
+		*credentials = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS"))
+	}
+	if *relayURL == "" {
+		return fmt.Errorf("--relay is required")
+	}
+	if !protocol.ValidDeviceName(strings.TrimSpace(*device)) {
+		return fmt.Errorf("invalid --device")
+	}
+	manager := &oauthclient.Manager{RelayURL: *relayURL, Device: strings.TrimSpace(*device), CredentialsPath: *credentials}
+	ctx, cancel := signalContext()
+	defer cancel()
+	if _, err := manager.Token(ctx); err != nil {
+		return err
+	}
+	fmt.Printf("authorized %s via browser OAuth; credentials saved to %s\n", *device, *credentials)
+	return nil
 }
 
 func bearerAuth(token string, next http.Handler) http.Handler {

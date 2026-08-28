@@ -60,7 +60,7 @@ All powerful capabilities are disabled unless explicitly granted:
 
 `--allow-computer-use` also enables screenshots. Computer-control MCP tools are marked destructive/open-world hints because the focused GUI may be a browser, chat client, admin console, or another application with external side effects.
 
-The public Relay supports MCP OAuth 2.1-style authorization with RFC 9728 protected-resource discovery, Dynamic Client Registration, mandatory PKCE S256, rotating refresh tokens, and resource-bound access tokens. OAuth state survives Relay restarts without storing raw access/refresh tokens. A separate high-entropy Agent bearer token authenticates workstation WebSocket connections; an optional static MCP bearer remains available for CLI/debug compatibility. Terminate public traffic with TLS in a trusted reverse proxy.
+The Relay has two identity modes. `private` (default) has one owner account and closed registration; `public` allows account registration and binds every device to the user who first authorizes its Agent. Both MCP clients and Agents use browser OAuth with PKCE, rotating refresh tokens, and resource-bound access tokens. Passwords are Argon2id-hashed; raw server-side OAuth tokens are never persisted. Legacy static bearer tokens remain available only for private compatibility and are rejected in public mode. Terminate public traffic with TLS in a trusted reverse proxy.
 
 Task logs are capped at 64 MiB per task by default. After the cap is reached, the PTY continues to be drained so the child process does not deadlock; the task is marked `log_truncated`. Concurrent PTY tasks are capped at 32 by default and can be tuned with `--max-active-tasks`. Every Engine tool call also writes bounded audit metadata (time, method, duration, success) without arguments or result contents; `audit_recent` exposes recent events.
 
@@ -129,36 +129,43 @@ The MCP endpoint is `/mcp`; `/health` is available for health checks.
 
 ## Relay + Agent
 
-Generate independent high-entropy secrets for the workstation and OAuth consent:
+### Private instance (default)
+
+On the Relay host:
 
 ```bash
-./chat-with-cli token   # Agent token
-./chat-with-cli token   # OAuth authorization password
-```
-
-On the public relay host behind TLS:
-
-```bash
-export CHAT_WITH_CLI_AGENT_TOKEN='...'
-export CHAT_WITH_CLI_OAUTH_PASSWORD='...'
 export CHAT_WITH_CLI_PUBLIC_URL='https://cli.example.com'
-./chat-with-cli relay --listen 127.0.0.1:8765
+./chat-with-cli relay --listen 127.0.0.1:8765 --instance-mode private
 ```
 
-`CHAT_WITH_CLI_CLIENT_TOKEN` is optional and only needed for legacy/static-token MCP clients and the `/devices` helper endpoint.
+On first start, if no owner exists and no owner password was supplied, the Relay generates one at `~/.config/chat-with-cli/private-owner-password` with mode `0600`. The default username is `owner`. After the first login, the Relay stores only the Argon2id password hash, so future Relay starts do not require the bootstrap password. You may save the login in your browser/password manager and then delete the bootstrap file.
 
-On the workstation:
+On the workstation, pre-authorize once:
 
 ```bash
-export CHAT_WITH_CLI_AGENT_TOKEN='...'
-./chat-with-cli agent \
-  --relay https://cli.example.com \
-  --device workstation \
-  --root "$HOME/project" \
-  --allow-exec
+./chat-with-cli login --relay https://cli.example.com --device workstation
 ```
 
-The remote MCP URL for that machine is:
+This opens the browser OAuth flow. CLI OAuth credentials are stored at `~/.config/chat-with-cli/credentials.json` by default with mode `0600`; the file contains OAuth client/access/refresh state, **not your account password**. The password stays in your browser/password manager, which is also what ChatGPT OAuth uses.
+
+Then start the Agent:
+
+```bash
+./chat-with-cli agent --device workstation --root "$HOME/project" --allow-exec
+```
+
+After the first login, `--relay` may be omitted when exactly one saved Relay profile matches that device. The Agent refreshes OAuth automatically before reconnecting.
+
+### Public instance
+
+```bash
+export CHAT_WITH_CLI_PUBLIC_URL='https://cli.example.com'
+./chat-with-cli relay --listen 127.0.0.1:8765 --instance-mode public
+```
+
+Public mode opens account registration on the OAuth page and rejects shared static Client/Agent bearer tokens. A user's first successful Agent authorization claims that device name for that account. Only the same account can later authorize `/agent/<device>` or `/mcp/<device>` for it. Device names are globally unique within one Relay.
+
+The remote MCP URL remains:
 
 ```text
 https://cli.example.com/mcp/workstation
@@ -168,9 +175,9 @@ The workstation needs only outbound HTTPS/WebSocket access. See [docs/deployment
 
 ## Connect from ChatGPT Web
 
-Once the Relay is available over public HTTPS and the Agent is connected, create a custom MCP app in ChatGPT developer mode and use the device-specific URL, for example `https://cli.example.com/mcp/workstation`. Select OAuth authentication; ChatGPT discovers the protected-resource and authorization-server metadata, dynamically registers itself, opens the Relay authorization page, and exchanges a PKCE-protected authorization code. Enter `CHAT_WITH_CLI_OAUTH_PASSWORD` only on your own Relay authorization page. No OAuth client ID or secret needs to be preconfigured.
+Once the Relay is available over public HTTPS and the Agent is connected, create a custom MCP app in ChatGPT developer mode and use the device-specific URL, for example `https://cli.example.com/mcp/workstation`. Select OAuth authentication; ChatGPT discovers the protected-resource and authorization-server metadata, dynamically registers itself, and opens the same account login/consent page used by the CLI Agent. A browser login session can therefore be reused across CLI and ChatGPT OAuth flows, and a password manager can store one account credential for both. No OAuth client ID or secret needs to be preconfigured.
 
-The resulting OAuth access and refresh tokens are bound to that exact MCP resource URL, so authorizing `workstation` does not authorize another device. To revoke every ChatGPT authorization immediately, stop the Relay and remove its OAuth state file before restarting it; changing `CHAT_WITH_CLI_OAUTH_PASSWORD` only affects new authorizations.
+OAuth access and refresh tokens are bound to the exact resource URL and signed-in user. In public mode, device ownership is also checked before authorization. Removing Relay OAuth state invalidates issued server-side credentials; deleting `~/.config/chat-with-cli/credentials.json` only removes local CLI OAuth state.
 
 ChatGPT product availability is separate from server compatibility. OpenAI currently documents full custom-MCP write/modify actions for Business and Enterprise/Edu workspaces; other plans may expose only a subset of custom-app functionality. See the current OpenAI developer-mode documentation before relying on write actions.
 
@@ -211,7 +218,7 @@ ChatGPT product availability is separate from server compatibility. OpenAI curre
 - Optional native libei/EIS fast path for very high-frequency input; D-Bus Portal input is already implemented.
 - Paired ScreenCast/PipeWire capture for compositor-native multi-monitor coordinates.
 - Windows and macOS host backends behind the same capability interface.
-- Per-device credentials and key rotation.
+- Device rename/transfer and administrator account-management tooling for larger public instances.
 - Configurable task-log retention and garbage collection.
 - Task groups/dependencies for larger multi-agent workstreams.
 - Signed release binaries and reproducible release metadata.

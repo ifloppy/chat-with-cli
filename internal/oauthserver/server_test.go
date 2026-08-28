@@ -39,6 +39,15 @@ func startOAuthMCPServer(t *testing.T) (*Server, string, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oauthServer.mu.Lock()
+	ownerID := oauthServer.usernames["owner"]
+	oauthServer.devices["device-a"] = ownerID
+	oauthServer.devices["device-b"] = ownerID
+	if err := oauthServer.saveLocked(); err != nil {
+		oauthServer.mu.Unlock()
+		t.Fatal(err)
+	}
+	oauthServer.mu.Unlock()
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "oauth-test", Version: "1"}, nil)
 	mcp.AddTool(mcpServer, &mcp.Tool{Name: "ping"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
 		return nil, struct{}{}, nil
@@ -57,7 +66,7 @@ func startOAuthMCPServer(t *testing.T) (*Server, string, func()) {
 	}
 	return oauthServer, base, cleanup
 }
-func browserFetcher(t *testing.T, password string) auth.AuthorizationCodeFetcher {
+func browserFetcher(t *testing.T, username, password string) auth.AuthorizationCodeFetcher {
 	t.Helper()
 	return func(ctx context.Context, args *auth.AuthorizationArgs) (*auth.AuthorizationResult, error) {
 		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -79,7 +88,7 @@ func browserFetcher(t *testing.T, password string) auth.AuthorizationCodeFetcher
 			t.Fatalf("authorization page missing request id: status=%d body=%s", resp.StatusCode, body)
 		}
 		authURL, _ := url.Parse(args.URL)
-		form := url.Values{"request_id": {string(match[1])}, "password": {password}, "decision": {"allow"}}
+		form := url.Values{"request_id": {string(match[1])}, "username": {username}, "password": {password}, "decision": {"login"}}
 		post, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL.Scheme+"://"+authURL.Host+"/oauth/authorize", strings.NewReader(form.Encode()))
 		if err != nil {
 			return nil, err
@@ -111,7 +120,7 @@ func TestOAuthMCPAuthorizationFlow(t *testing.T) {
 			RedirectURIs: []string{redirect}, TokenEndpointAuthMethod: "none",
 			GrantTypes: []string{"authorization_code", "refresh_token"}, ResponseTypes: []string{"code"}, ClientName: "chat-with-cli test",
 		}},
-		RedirectURL: redirect, AuthorizationCodeFetcher: browserFetcher(t, "correct-horse-battery-staple-0123456789"), RequestRefreshToken: true,
+		RedirectURL: redirect, AuthorizationCodeFetcher: browserFetcher(t, "owner", "correct-horse-battery-staple-0123456789"), RequestRefreshToken: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +166,8 @@ func TestOAuthStateSurvivesRestartAndRefreshRotates(t *testing.T) {
 		t.Fatal(err)
 	}
 	s1.mu.Lock()
-	access, refresh, _, err := s1.issueTokensLocked("client-1", cfg.PublicURL+"/mcp/device-a", "mcp offline_access")
+	ownerID := s1.usernames["owner"]
+	access, refresh, _, err := s1.issueTokensLocked("client-1", ownerID, cfg.PublicURL+"/mcp/device-a", "mcp offline_access")
 	s1.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -203,13 +213,13 @@ func TestOAuthStateSurvivesRestartAndRefreshRotates(t *testing.T) {
 		t.Fatal("refresh token was not rotated")
 	}
 }
-func TestOAuthPasswordMinimumLength(t *testing.T) {
+func TestOwnerPasswordMinimumLength(t *testing.T) {
 	_, err := New(Config{
 		PublicURL: "http://127.0.0.1:18889",
 		Password:  "too-short",
 		StateDir:  t.TempDir(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "at least 32") {
+	if err == nil || !strings.Contains(err.Error(), "at least 12") {
 		t.Fatalf("expected password length error, got %v", err)
 	}
 }
@@ -226,8 +236,9 @@ func TestPersistedStateContainsNoRawTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
+	ownerID := s.usernames["owner"]
 	access, refresh, _, err := s.issueTokensLocked(
-		"client", cfg.PublicURL+"/mcp/device", "mcp offline_access",
+		"client", ownerID, cfg.PublicURL+"/mcp/device", "mcp offline_access",
 	)
 	s.mu.Unlock()
 	if err != nil {
@@ -287,5 +298,91 @@ func TestAuthorizationPasswordAttemptsAreBounded(t *testing.T) {
 	}
 	if _, ok := s.pending["request"]; ok {
 		t.Fatal("locked authorization request was not removed")
+	}
+}
+
+func TestPrivateInstanceRestartNeedsNoBootstrapPassword(t *testing.T) {
+	stateDir := t.TempDir()
+	first, err := New(Config{
+		PublicURL: "http://127.0.0.1:18901", StateDir: stateDir,
+		Mode: ModePrivate, OwnerUsername: "owner", OwnerPassword: "private-owner-password-123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.UserCount() != 1 {
+		t.Fatalf("user count=%d", first.UserCount())
+	}
+	second, err := New(Config{
+		PublicURL: "http://127.0.0.1:18901", StateDir: stateDir,
+		Mode: ModePrivate,
+	})
+	if err != nil {
+		t.Fatalf("private restart unexpectedly needs bootstrap password: %v", err)
+	}
+	if second.UserCount() != 1 {
+		t.Fatalf("restarted user count=%d", second.UserCount())
+	}
+}
+
+func TestPublicModeStartsWithoutOwnerAndShowsRegistration(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18902", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.UserCount() != 0 {
+		t.Fatalf("public instance unexpectedly bootstrapped %d users", s.UserCount())
+	}
+	rr := httptest.NewRecorder()
+	s.renderAuthorization(rr, "request", Client{ID: "client", Name: "test"},
+		"http://127.0.0.1:18902/agent/device-a", "agent:connect offline_access", User{}, false)
+	if !strings.Contains(rr.Body.String(), "Create account") {
+		t.Fatalf("public authorization page has no registration form: %s", rr.Body.String())
+	}
+}
+
+func TestPublicDeviceOwnershipIsIsolated(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18903", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	alice, err := s.createUserLocked("alice", "alice-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	bob, err := s.createUserLocked("bob", "bob-password-1234567")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	if err := s.authorizeResourceLocked(alice.ID, s.absolute("/agent/alice-laptop")); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	if err := s.authorizeResourceLocked(alice.ID, s.absolute("/mcp/alice-laptop")); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	if err := s.authorizeResourceLocked(bob.ID, s.absolute("/agent/alice-laptop")); err == nil {
+		s.mu.Unlock()
+		t.Fatal("bob unexpectedly claimed alice device")
+	}
+	if err := s.authorizeResourceLocked(bob.ID, s.absolute("/mcp/alice-laptop")); err == nil {
+		s.mu.Unlock()
+		t.Fatal("bob unexpectedly authorized alice MCP resource")
+	}
+	access, _, _, err := s.issueTokensLocked("client-a", alice.ID,
+		s.absolute("/agent/alice-laptop"), "agent:connect offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.VerifyAccessScope(access, s.absolute("/agent/alice-laptop"), "agent:connect") {
+		t.Fatal("alice agent token did not authorize its resource")
+	}
+	if s.VerifyAccessScope(access, s.absolute("/agent/alice-laptop"), "mcp") {
+		t.Fatal("agent token unexpectedly has MCP scope")
 	}
 }
