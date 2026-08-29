@@ -1146,10 +1146,21 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cleanupLocked(time.Now())
+	now := time.Now().UTC()
+	s.cleanupLocked(now)
+	if deviceKeyVerified {
+		if s.retiredDevices["id/"+deviceID] {
+			writeJSON(w, http.StatusGone, map[string]string{"error": "invalid_client_metadata", "error_description": "this cryptographic device identity has been permanently retired"})
+			return
+		}
+		if !s.registrationChallengeAvailableLocked(deviceID, registrationChallengeHash, now) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent registration challenge was already used"})
+			return
+		}
+	}
+	oldestID := ""
 	if len(s.clients) >= maxClients {
-		oldestID := ""
-		oldestAt := time.Now().Unix() + 1
+		oldestAt := now.Unix() + 1
 		for id, client := range s.clients {
 			if !client.Approved && client.IssuedAt < oldestAt {
 				oldestID, oldestAt = id, client.IssuedAt
@@ -1159,17 +1170,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "temporarily_unavailable", "error_description": "client registration limit reached"})
 			return
 		}
-		delete(s.clients, oldestID)
 	}
-	if deviceKeyVerified {
-		if s.retiredDevices["id/"+deviceID] {
-			writeJSON(w, http.StatusGone, map[string]string{"error": "invalid_client_metadata", "error_description": "this cryptographic device identity has been permanently retired"})
-			return
-		}
-		if !s.consumeRegistrationChallengeLocked(deviceID, registrationChallengeHash, registrationChallengeExpires, time.Now().UTC()) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent registration challenge was already used"})
-			return
-		}
+	if deviceKeyVerified && !s.consumeRegistrationChallengeLocked(deviceID, registrationChallengeHash, registrationChallengeExpires, now) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent registration challenge was already used"})
+		return
+	}
+	if oldestID != "" {
+		s.revokeClientLocked(oldestID)
 	}
 	clientID := randomToken(24)
 	client := Client{ID: clientID, Name: strings.TrimSpace(req.ClientName), RedirectURIs: append([]string(nil), req.RedirectURIs...), DeviceID: deviceID, DevicePublicKey: devicePublicKey, DeviceKeyVerified: deviceKeyVerified, IssuedAt: time.Now().Unix()}
@@ -1612,12 +1619,16 @@ func (s *Server) authorizeResourceLocked(userID, clientID, resource string) erro
 	if !ok {
 		return errors.New("invalid authorization resource")
 	}
+	user, exists := s.users[userID]
+	if !exists || user.ID == "" {
+		return errors.New("unknown authorization user")
+	}
+	if user.Disabled {
+		return errors.New("authorization user is disabled")
+	}
 	devicePublicKey, err := s.validateAgentDeviceKeyLocked(clientID, resource)
 	if err != nil {
 		return err
-	}
-	if s.users[userID].ID == "" {
-		return errors.New("unknown authorization user")
 	}
 	if s.persistenceFault {
 		return errors.New("authorization state persistence failed; Relay access is frozen until restart after storage repair")
@@ -2094,11 +2105,10 @@ func (s *Server) validateRegistrationChallenge(deviceID, devicePublicKey, client
 	return hex.EncodeToString(sum[:]), expires, true
 }
 
-func (s *Server) consumeRegistrationChallengeLocked(deviceID, challengeHash string, expires int64, now time.Time) bool {
+func (s *Server) registrationChallengeAvailableLocked(deviceID, challengeHash string, now time.Time) bool {
 	bucket := s.consumedRegistrationChallenges[deviceID]
 	if bucket == nil {
-		bucket = make(map[string]int64)
-		s.consumedRegistrationChallenges[deviceID] = bucket
+		return true
 	}
 	nowUnix := now.Unix()
 	for candidate, expiry := range bucket {
@@ -2106,8 +2116,18 @@ func (s *Server) consumeRegistrationChallengeLocked(deviceID, challengeHash stri
 			delete(bucket, candidate)
 		}
 	}
-	if _, replay := bucket[challengeHash]; replay || len(bucket) >= maxRegistrationChallengesConsumedDevice {
+	_, replay := bucket[challengeHash]
+	return !replay && len(bucket) < maxRegistrationChallengesConsumedDevice
+}
+
+func (s *Server) consumeRegistrationChallengeLocked(deviceID, challengeHash string, expires int64, now time.Time) bool {
+	if !s.registrationChallengeAvailableLocked(deviceID, challengeHash, now) {
 		return false
+	}
+	bucket := s.consumedRegistrationChallenges[deviceID]
+	if bucket == nil {
+		bucket = make(map[string]int64)
+		s.consumedRegistrationChallenges[deviceID] = bucket
 	}
 	bucket[challengeHash] = expires
 	return true

@@ -3408,3 +3408,110 @@ func TestDirtyRecoveryGuardCannotBeConsumedByOrdinaryPersistence(t *testing.T) {
 		t.Fatalf("post-recovery in-memory safety state wrong: fault=%v kill=%v agent=%v", s.persistenceFault, s.killSwitch, s.agentEnabled)
 	}
 }
+
+func TestDisabledUserCannotCompleteStaleAgentClaim(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19169", Password: "disabled-claim-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientID = "disabled-claim-client"
+	const redirect = "http://127.0.0.1:45569/callback"
+	route := "id/" + identity.ID()
+	resource := s.absolute("/agent/" + route)
+
+	s.mu.Lock()
+	admin := s.users[s.usernames["owner"]]
+	victim, err := s.createUserLocked("disabled-claim-victim", "disabled-claim-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.clients[clientID] = Client{
+		ID: clientID, Name: "chat-with-cli agent disabled-claim", RedirectURIs: []string{redirect}, IssuedAt: time.Now().Unix(),
+		DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true,
+	}
+	s.pending["disabled-claim-pending"] = pendingAuth{
+		ClientID: clientID, RedirectURI: redirect, Resource: resource,
+		Scope: "agent:connect offline_access", Expires: time.Now().Add(time.Minute),
+	}
+	s.mu.Unlock()
+
+	if err := s.applyAdminAction("disable-user", victim.ID, "on", admin, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	if err := s.grantAuthorization(rr, httptest.NewRequest(http.MethodPost, s.absolute("/oauth/authorize"), nil), "disabled-claim-pending", victim.ID); err == nil {
+		t.Fatal("disabled user completed a stale Agent authorization and device claim")
+	}
+
+	s.mu.Lock()
+	owner, claimed := s.devices[route]
+	codes := len(s.codes)
+	approved := s.clients[clientID].Approved
+	s.mu.Unlock()
+	if claimed || owner != "" || codes != 0 || approved {
+		t.Fatalf("disabled-user race mutated authority: claimed=%v owner=%q codes=%d approved=%v", claimed, owner, codes, approved)
+	}
+}
+
+func TestReplayedRegistrationChallengeCannotEvictOtherClient(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19170", Password: "replay-eviction-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientName = "chat-with-cli agent replay-eviction"
+	const redirect = "http://127.0.0.1:45570/callback"
+	publicKey := deviceidentity.EncodePublicKey(identity.PublicKey())
+	challenge, err := s.issueRegistrationChallenge(identity.ID(), publicKey, clientName, redirect, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := identity.SignRegistrationProof(clientName, redirect, challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none",
+		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
+		"client_name": clientName, "scope": "agent:connect offline_access",
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": publicKey,
+		"chat_with_cli_device_challenge": challenge, "chat_with_cli_device_proof": proof,
+	})
+	register := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.handleRegister(rr, req)
+		return rr
+	}
+	if rr := register(); rr.Code != http.StatusCreated {
+		t.Fatalf("initial registration status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	s.mu.Lock()
+	s.clients["other-pending-client"] = Client{ID: "other-pending-client", IssuedAt: time.Now().Add(-30 * time.Second).Unix()}
+	for i := 0; len(s.clients) < maxClients; i++ {
+		id := fmt.Sprintf("capacity-approved-%d", i)
+		s.clients[id] = Client{ID: id, Approved: true, IssuedAt: time.Now().Unix()}
+	}
+	s.mu.Unlock()
+
+	if rr := register(); rr.Code != http.StatusBadRequest {
+		t.Fatalf("replayed registration status=%d want 400 body=%s", rr.Code, rr.Body.String())
+	}
+	s.mu.Lock()
+	_, otherStillPresent := s.clients["other-pending-client"]
+	clientCount := len(s.clients)
+	s.mu.Unlock()
+	if !otherStillPresent || clientCount != maxClients {
+		t.Fatalf("replayed challenge changed other client state: other_present=%v clients=%d want=%d", otherStillPresent, clientCount, maxClients)
+	}
+}
