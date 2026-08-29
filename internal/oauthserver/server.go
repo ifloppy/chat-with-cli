@@ -983,6 +983,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.handleLanding)
 	mux.HandleFunc("GET /docs", s.handleDocs)
 	mux.HandleFunc("GET /connect", s.handleConnect)
+	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
 	mux.HandleFunc("GET /setup", s.handleSetupGET)
 	mux.HandleFunc("POST /setup", s.handleSetupPOST)
 	mux.HandleFunc("GET /account", s.handleAccount)

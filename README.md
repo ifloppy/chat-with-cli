@@ -43,19 +43,21 @@ Read the one-time setup token from the local file path printed by `relay
 setup`, open `https://cli.example.com/setup`, and create the owner account.
 The setup page is disabled after the first administrator is created.
 
-On the workstation, create a default read-only Agent profile and connect it.
-`connect` automatically opens browser OAuth when needed. In a foreground terminal
-it then asks whether to use interactive local approvals, allow all capabilities
-for this process only, or stay with the configured profile:
+On the workstation, install the checksum-verified release, create a default
+read-only Agent profile, and connect it. `connect` automatically opens browser
+OAuth when needed. In a foreground terminal it then asks whether to use
+interactive local approvals, allow all capabilities for this process only, or
+stay with the configured profile:
 
 ```bash
-./chat-with-cli agent setup \
+curl -fsSL https://raw.githubusercontent.com/ifloppy/chat-with-cli/main/install.sh | sh
+chat-with-cli agent setup \
   --relay https://cli.example.com \
   --root "$HOME/project" \
   --device workstation \
   --profile read-only \
   --install-systemd
-./chat-with-cli connect
+chat-with-cli connect
 # Review config/unit before starting anything.
 systemctl --user daemon-reload
 systemctl --user enable --now chat-with-cli-agent.service

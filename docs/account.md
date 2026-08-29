@@ -7,9 +7,12 @@ A signed-in user can see only devices owned by that account, the account's
 browser sessions, and the account's OAuth token families. Users can rename or
 disable their devices, permanently retire a device identity, revoke one of
 their own OAuth grants, sign out other browser sessions, and change their
-password. Enabling or permanently revoking a device requires the current
-account password; password changes revoke all existing OAuth credentials and
-browser sessions for that account.
+password. Re-enabling a disabled device requires the current account password
+because it expands authority. Disabling, revoking a grant, signing out a
+session, or permanently retiring a device only contracts authority and does
+not require password re-entry; permanent device retirement still requires an
+explicit `REVOKE` confirmation. Password changes revoke all existing OAuth
+credentials and browser sessions for that account.
 
 OAuth client registrations can be shared by multiple users. `/account`
 therefore revokes the current user's token family rather than deleting the

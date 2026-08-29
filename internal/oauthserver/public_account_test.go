@@ -3,6 +3,7 @@ package oauthserver
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -292,5 +293,98 @@ func TestPublicWebSurfacesDiscloseOperatorTrustAndSelfHostingPath(t *testing.T) 
 	s.handleAccount(account, httptest.NewRequest(http.MethodGet, s.absolute("/account"), nil))
 	if !strings.Contains(account.Body.String(), "Do not trust a public Relay with sensitive access") {
 		t.Fatalf("public account login is missing operator trust warning: %s", account.Body.String())
+	}
+}
+
+func TestAccountDeviceRevokeContractsAuthorityWithoutPassword(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19209", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.mu.Lock()
+	user, err := s.createUserLocked("revoke-user", "revoke-user-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.devices["revoke-device"] = user.ID
+	s.deviceRecords["revoke-device"] = DeviceRecord{ID: "revoke-device", DisplayName: "Revoke me", OwnerID: user.ID}
+	s.devices["disabled-device"] = user.ID
+	s.disabledDevices["disabled-device"] = true
+	s.deviceRecords["disabled-device"] = DeviceRecord{ID: "disabled-device", DisplayName: "Disabled", OwnerID: user.ID, Disabled: true}
+	s.mu.Unlock()
+
+	session, err := s.createSession(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	get := httptest.NewRequest(http.MethodGet, s.absolute("/account"), nil)
+	get.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	getResponse := httptest.NewRecorder()
+	mux.ServeHTTP(getResponse, get)
+	csrf := csrfTokenPattern.FindSubmatch(getResponse.Body.Bytes())
+	if len(csrf) != 2 {
+		t.Fatal("account page did not contain CSRF token")
+	}
+	var csrfCookie *http.Cookie
+	for _, cookie := range getResponse.Result().Cookies() {
+		if cookie.Name == accountCSRFCookie {
+			csrfCookie = cookie
+		}
+	}
+	if csrfCookie == nil {
+		t.Fatal("account page did not set CSRF cookie")
+	}
+
+	form := url.Values{"csrf_token": {string(csrf[1])}, "action": {"revoke-device"}, "target": {"revoke-device"}, "confirm": {"REVOKE"}}
+	post := httptest.NewRequest(http.MethodPost, s.absolute("/account/action"), strings.NewReader(form.Encode()))
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	post.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	post.AddCookie(csrfCookie)
+	postResponse := httptest.NewRecorder()
+	mux.ServeHTTP(postResponse, post)
+	if postResponse.Code != http.StatusSeeOther {
+		t.Fatalf("passwordless revoke status=%d body=%s", postResponse.Code, postResponse.Body.String())
+	}
+	s.mu.Lock()
+	_, stillOwned := s.devices["revoke-device"]
+	retired := s.retiredDevices["revoke-device"]
+	s.mu.Unlock()
+	if stillOwned || !retired {
+		t.Fatalf("revoke did not retire device: owned=%v retired=%v", stillOwned, retired)
+	}
+
+	form = url.Values{"csrf_token": {string(csrf[1])}, "action": {"disable-device"}, "target": {"disabled-device"}, "value": {"off"}}
+	post = httptest.NewRequest(http.MethodPost, s.absolute("/account/action"), strings.NewReader(form.Encode()))
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	post.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	post.AddCookie(csrfCookie)
+	postResponse = httptest.NewRecorder()
+	mux.ServeHTTP(postResponse, post)
+	if postResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("passwordless re-enable status=%d, want 401", postResponse.Code)
+	}
+}
+
+func TestInstallScriptRoutePointsToCanonicalReviewedScript(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19210", StateDir: t.TempDir(), Mode: ModePublic, GitHubURL: "https://github.com/ifloppy/chat-with-cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, s.absolute("/install.sh"), nil))
+	if rr.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("install route status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	want := "https://github.com/ifloppy/chat-with-cli/raw/refs/heads/main/install.sh"
+	if got := rr.Header().Get("Location"); got != want {
+		t.Fatalf("install route location=%q want=%q", got, want)
 	}
 }

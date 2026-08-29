@@ -1,5 +1,22 @@
 # Install and lifecycle
 
+## One-command workstation install
+
+For a normal unprivileged Linux workstation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ifloppy/chat-with-cli/main/install.sh | sh
+```
+
+The bootstrap script detects Linux amd64/arm64, resolves the newest GitHub
+release (including prereleases), downloads the matching binary and
+`SHA256SUMS`, verifies SHA-256, and atomically installs to
+`~/.local/bin/chat-with-cli`. It does **not** use sudo, start an Agent, or
+enable a service. Review `install.sh` first if you do not want to execute a
+network-delivered script directly. Pin a release with
+`CHAT_WITH_CLI_VERSION=vX.Y.Z` or choose another destination with
+`CHAT_WITH_CLI_INSTALL_DIR=/path`.
+
 The installer is deliberately review-first. Without `--apply`, it performs no
 network request and changes no files.
 
