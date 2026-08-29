@@ -339,17 +339,8 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create OAuth state directory: %w", err)
-	}
-	if info, err := os.Lstat(cfg.StateDir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		if err != nil {
-			return nil, fmt.Errorf("inspect OAuth state directory: %w", err)
-		}
-		return nil, errors.New("OAuth state directory must be a real directory")
-	}
-	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
-		return nil, fmt.Errorf("secure OAuth state directory: %w", err)
+	if err := secureOAuthStateDirectory(cfg.StateDir); err != nil {
+		return nil, err
 	}
 	var lease *stateLease
 	if cfg.EnforceSingleWriter {
