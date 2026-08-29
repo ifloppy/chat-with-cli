@@ -91,28 +91,42 @@ func TestBearerAuthRequiresExactToken(t *testing.T) {
 	}
 }
 
-func TestAgentPathMuxAvoidsServeMuxPatternConflicts(t *testing.T) {
-	challenge := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Route", "challenge")
-		w.WriteHeader(http.StatusNoContent)
-	})
-	connection := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Route", "connection")
-		w.WriteHeader(http.StatusNoContent)
-	})
+func TestAgentPathMuxAvoidsServeMuxPatternConflictsAndBindsRoute(t *testing.T) {
+	check := func(route string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Route", route)
+			w.Header().Set("X-Device", r.PathValue("device"))
+			w.Header().Set("X-ID", r.PathValue("id"))
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}
 	mux := http.NewServeMux()
-	mux.Handle("/agent/", agentPathMux(challenge, connection))
-
-	for path, want := range map[string]string{
-		"/agent/legacy-device":                                 "connection",
-		"/agent/id/0123456789abcdef0123456789abcdef":           "connection",
-		"/agent/legacy-device/challenge":                       "challenge",
-		"/agent/id/0123456789abcdef0123456789abcdef/challenge": "challenge",
+	mux.Handle("/agent/", agentPathMux(check("challenge"), check("connection")))
+	id := "0123456789abcdef0123456789abcdef"
+	cases := []struct {
+		path, route, device, immutableID string
+	}{
+		{"/agent/legacy-device", "connection", "legacy-device", ""},
+		{"/agent/id/" + id, "connection", "", id},
+		{"/agent/legacy-device/challenge", "challenge", "legacy-device", ""},
+		{"/agent/id/" + id + "/challenge", "challenge", "", id},
+	}
+	for _, tc := range cases {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+tc.path, nil))
+		if rr.Code != http.StatusNoContent || rr.Header().Get("X-Route") != tc.route || rr.Header().Get("X-Device") != tc.device || rr.Header().Get("X-ID") != tc.immutableID {
+			t.Fatalf("path %s status=%d route=%q device=%q id=%q", tc.path, rr.Code, rr.Header().Get("X-Route"), rr.Header().Get("X-Device"), rr.Header().Get("X-ID"))
+		}
+	}
+	for _, path := range []string{
+		"/agent/id/not-a-device-id",
+		"/agent/id/" + id + "/extra",
+		"/agent/legacy/extra",
 	} {
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+path, nil))
-		if rr.Code != http.StatusNoContent || rr.Header().Get("X-Route") != want {
-			t.Fatalf("path %s routed to %q status=%d, want %q", path, rr.Header().Get("X-Route"), rr.Code, want)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("invalid path %s status=%d, want 404", path, rr.Code)
 		}
 	}
 }

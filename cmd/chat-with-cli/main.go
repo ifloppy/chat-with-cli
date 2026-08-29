@@ -1159,8 +1159,33 @@ func runLogin(args []string) error {
 
 func agentPathMux(challenge, connection http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimSuffix(r.URL.EscapedPath(), "/")
-		if strings.HasSuffix(path, "/challenge") {
+		path := strings.TrimSuffix(r.URL.Path, "/")
+		isChallenge := strings.HasSuffix(path, "/challenge")
+		basePath := path
+		if isChallenge {
+			basePath = strings.TrimSuffix(basePath, "/challenge")
+		}
+		relative, ok := strings.CutPrefix(basePath, "/agent/")
+		if !ok || relative == "" {
+			http.NotFound(w, r)
+			return
+		}
+		parts := strings.Split(relative, "/")
+		switch {
+		case len(parts) == 1 && protocol.ValidDeviceName(parts[0]):
+			r.SetPathValue("device", parts[0])
+		case len(parts) == 2 && parts[0] == "id":
+			id, valid := protocol.NormalizeDeviceID(parts[1])
+			if !valid {
+				http.NotFound(w, r)
+				return
+			}
+			r.SetPathValue("id", id)
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if isChallenge {
 			challenge.ServeHTTP(w, r)
 			return
 		}
