@@ -40,6 +40,8 @@ import (
 
 type stringList []string
 
+const defaultPublicRelayURL = "https://chat-with-cli.iruanp.com"
+
 func (s *stringList) String() string { return strings.Join(*s, ",") }
 func (s *stringList) Set(value string) error {
 	*s = append(*s, value)
@@ -48,6 +50,13 @@ func (s *stringList) Set(value string) error {
 
 func main() {
 	if len(os.Args) < 2 {
+		if _, err := os.Stat("/dev/tty"); err == nil {
+			if err := runInteractiveUI(nil); err != nil {
+				log.Printf("error: %v", err)
+				os.Exit(1)
+			}
+			return
+		}
 		usage()
 		os.Exit(2)
 	}
@@ -73,6 +82,8 @@ func main() {
 		}
 	case "connect":
 		err = runConnect(os.Args[2:])
+	case "ui":
+		err = runInteractiveUI(os.Args[2:])
 	case "doctor":
 		err = runDoctor(os.Args[2:])
 	case "status":
@@ -110,6 +121,7 @@ Usage:
   chat-with-cli relay setup     Create relay config and one-time setup token
   chat-with-cli relay install   Review or apply a checksum-verified binary install
   chat-with-cli connect         Recommended interactive connect; OAuth is automatic
+  chat-with-cli ui              Interactive terminal hub (also opens with no arguments)
   chat-with-cli agent [flags]   Connect this machine outbound to a relay
   chat-with-cli agent setup     Create agent config and optional user unit
   chat-with-cli login [flags]   Explicit browser OAuth login (normally unnecessary)
@@ -279,6 +291,21 @@ func envOr(value, name string) string {
 		return value
 	}
 	return os.Getenv(name)
+}
+
+func normalizeUsageUnlockEndpoint(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return "", errors.New("endpoint must be an HTTPS URL")
+	}
+	if u.User != nil || u.Fragment != "" {
+		return "", errors.New("endpoint must not contain credentials or a fragment")
+	}
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {
@@ -580,6 +607,12 @@ func runRelay(args []string) error {
 	disableRegistration := fs.Bool("disable-registration", false, "disable public account registration")
 	allowLegacyUnboundAgents := fs.Bool("allow-legacy-unbound-agents", false, "MIGRATION ONLY: allow bearer-only legacy Agent connections without Ed25519 proof")
 	githubURL := fs.String("github-url", "https://github.com/ifloppy/chat-with-cli", "GitHub project URL shown on the landing page")
+	adsenseClientID := fs.String("adsense-client-id", "", "optional Google AdSense publisher client ID for the public landing page")
+	adsenseSlot := fs.String("adsense-slot", "", "optional Google AdSense responsive slot ID")
+	admobAppID := fs.String("admob-app-id", "", "optional companion-app AdMob application ID (metadata only on the web Relay)")
+	admobRewardUnitID := fs.String("admob-reward-unit-id", "", "optional companion-app AdMob rewarded-ad unit ID")
+	usageUnlockEnabled := fs.Bool("usage-unlock-enabled", false, "enable the signed, provider-verified rewarded usage entitlement link")
+	usageUnlockEndpoint := fs.String("usage-unlock-endpoint", "", "HTTPS companion-app/backend URL for provider-verified usage entitlements")
 	configPath := fs.String("config", defaultRelayConfigPath(), "relay TOML configuration file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -625,6 +658,24 @@ func runRelay(args []string) error {
 	if !flagWasSet(fs, "github-url") {
 		*githubURL = values.String(*githubURL, "relay.github_url")
 	}
+	if !flagWasSet(fs, "adsense-client-id") {
+		*adsenseClientID = values.String(*adsenseClientID, "relay.adsense_client_id")
+	}
+	if !flagWasSet(fs, "adsense-slot") {
+		*adsenseSlot = values.String(*adsenseSlot, "relay.adsense_slot")
+	}
+	if !flagWasSet(fs, "admob-app-id") {
+		*admobAppID = values.String(*admobAppID, "relay.admob_app_id")
+	}
+	if !flagWasSet(fs, "admob-reward-unit-id") {
+		*admobRewardUnitID = values.String(*admobRewardUnitID, "relay.admob_reward_unit_id")
+	}
+	if !flagWasSet(fs, "usage-unlock-enabled") {
+		*usageUnlockEnabled = values.Bool(*usageUnlockEnabled, "relay.usage_unlock_enabled")
+	}
+	if !flagWasSet(fs, "usage-unlock-endpoint") {
+		*usageUnlockEndpoint = values.String(*usageUnlockEndpoint, "relay.usage_unlock_endpoint")
+	}
 	*clientToken = envOr(*clientToken, "CHAT_WITH_CLI_CLIENT_TOKEN")
 	*agentToken = envOr(*agentToken, "CHAT_WITH_CLI_AGENT_TOKEN")
 	*publicURL = envOr(*publicURL, "CHAT_WITH_CLI_PUBLIC_URL")
@@ -662,6 +713,21 @@ func runRelay(args []string) error {
 	}
 	if !flagWasSet(fs, "github-url") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_GITHUB_URL")) != "" {
 		*githubURL = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_GITHUB_URL"))
+	}
+	*adsenseClientID = envOr(*adsenseClientID, "CHAT_WITH_CLI_ADSENSE_CLIENT_ID")
+	*adsenseSlot = envOr(*adsenseSlot, "CHAT_WITH_CLI_ADSENSE_SLOT")
+	*admobAppID = envOr(*admobAppID, "CHAT_WITH_CLI_ADMOB_APP_ID")
+	*admobRewardUnitID = envOr(*admobRewardUnitID, "CHAT_WITH_CLI_ADMOB_REWARD_UNIT_ID")
+	if !flagWasSet(fs, "usage-unlock-enabled") && envBool("CHAT_WITH_CLI_USAGE_UNLOCK_ENABLED") {
+		*usageUnlockEnabled = true
+	}
+	*usageUnlockEndpoint = envOr(*usageUnlockEndpoint, "CHAT_WITH_CLI_USAGE_UNLOCK_ENDPOINT")
+	*usageUnlockEndpoint, err = normalizeUsageUnlockEndpoint(*usageUnlockEndpoint)
+	if err != nil {
+		return fmt.Errorf("invalid usage unlock endpoint: %w", err)
+	}
+	if *usageUnlockEnabled && *usageUnlockEndpoint == "" {
+		return errors.New("--usage-unlock-enabled requires --usage-unlock-endpoint")
 	}
 	if *ownerPassword == "" {
 		*ownerPassword, err = readPrivateCredential(*ownerPasswordFile)
@@ -723,7 +789,7 @@ func runRelay(args []string) error {
 	mux := http.NewServeMux()
 	var oauthHealth *oauthserver.Server
 	if oauthEnabled {
-		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, ModeConfigured: modeConfigured, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), EnforceSingleWriter: true, AllowLegacyUnboundAgents: *allowLegacyUnboundAgents, SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL}
+		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, ModeConfigured: modeConfigured, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), EnforceSingleWriter: true, AllowLegacyUnboundAgents: *allowLegacyUnboundAgents, SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL, AdSenseClientID: *adsenseClientID, AdSenseSlot: *adsenseSlot, AdMobAppID: *admobAppID, AdMobRewardUnitID: *admobRewardUnitID, UsageUnlockEnabled: *usageUnlockEnabled, UsageUnlockEndpoint: *usageUnlockEndpoint}
 		oauth, err := oauthserver.New(cfg)
 		if err != nil {
 			return err
@@ -904,7 +970,7 @@ func runAgent(args []string) error {
 func runAgentCommand(command string, args []string) error {
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowAccessibility, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks := addEngineFlags(fs)
-	relayURL := fs.String("relay", "", "relay base URL, for example https://cli.example.com")
+	relayURL := fs.String("relay", defaultPublicRelayURL, "relay base URL (defaults to the community public Relay)")
 	deviceDefault, _ := os.Hostname()
 	device := fs.String("device", deviceDefault, "device name exposed to MCP clients")
 	deviceID := fs.String("device-id", "", "immutable 128-bit device ID; use with /agent/id/<id> to avoid name squatting")
@@ -958,7 +1024,13 @@ func runAgentCommand(command string, args []string) error {
 		*maxActiveTasks = values.Int(*maxActiveTasks, "agent.max_active_tasks")
 	}
 	if !flagWasSet(fs, "relay") {
-		*relayURL = values.String(*relayURL, "agent.relay_url")
+		if _, configured := values.Raw("agent.relay_url"); configured {
+			*relayURL = values.String(*relayURL, "agent.relay_url")
+		} else {
+			// Prefer an existing custom OAuth profile when there is no
+			// explicit config; a new install will use the public default.
+			*relayURL = ""
+		}
 	}
 	if !flagWasSet(fs, "device") {
 		*device = values.String(*device, "agent.device")
@@ -1034,7 +1106,8 @@ func runAgentCommand(command string, args []string) error {
 		}
 	}
 	if strings.TrimSpace(*relayURL) == "" {
-		return fmt.Errorf("--relay is required for first login; later starts can reuse the saved OAuth profile")
+		*relayURL = defaultPublicRelayURL
+		log.Printf("no Relay was configured; using the default public Relay %s", defaultPublicRelayURL)
 	}
 	if _, configuredInFile := values.Raw("agent.exec_sandbox"); !configuredInFile {
 		applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
@@ -1081,7 +1154,7 @@ func runAgentCommand(command string, args []string) error {
 
 func runLogin(args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	relayURL := fs.String("relay", "", "relay base URL, for example https://cli.example.com")
+	relayURL := fs.String("relay", defaultPublicRelayURL, "relay base URL (defaults to the community public Relay)")
 	deviceDefault, _ := os.Hostname()
 	device := fs.String("device", deviceDefault, "device to authorize")
 	deviceID := fs.String("device-id", "", "immutable 128-bit device ID to authorize")
@@ -1096,7 +1169,11 @@ func runLogin(args []string) error {
 		return fmt.Errorf("load agent config: %w", err)
 	}
 	if !flagWasSet(fs, "relay") {
-		*relayURL = values.String(*relayURL, "agent.relay_url")
+		if _, configured := values.Raw("agent.relay_url"); configured {
+			*relayURL = values.String(*relayURL, "agent.relay_url")
+		} else {
+			*relayURL = ""
+		}
 	}
 	if !flagWasSet(fs, "device") {
 		*device = values.String(*device, "agent.device")
@@ -1112,9 +1189,6 @@ func runLogin(args []string) error {
 	}
 	if !flagWasSet(fs, "identity") {
 		*identityPath = values.String(*identityPath, "agent.identity")
-	}
-	if strings.TrimSpace(*relayURL) == "" {
-		return fmt.Errorf("Relay URL is missing; run `chat-with-cli agent setup --relay https://...` or provide --relay")
 	}
 	if !protocol.ValidDeviceName(strings.TrimSpace(*device)) {
 		return fmt.Errorf("invalid --device")
@@ -1142,6 +1216,24 @@ func runLogin(args []string) error {
 		} else if *deviceID != derivedID {
 			return fmt.Errorf("configured device ID %s does not match Ed25519 identity %s", *deviceID, derivedID)
 		}
+	}
+	if strings.TrimSpace(*relayURL) == "" && !flagWasSet(fs, "relay") {
+		saved, ok, lookupErr := "", false, error(nil)
+		if *deviceID != "" {
+			saved, ok, lookupErr = oauthclient.SavedRelayForDeviceID(*credentials, *deviceID)
+		} else {
+			saved, ok, lookupErr = oauthclient.SavedRelayForDevice(*credentials, *device)
+		}
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if ok {
+			*relayURL = saved
+		}
+	}
+	if strings.TrimSpace(*relayURL) == "" {
+		*relayURL = defaultPublicRelayURL
+		log.Printf("no Relay was configured; using the default public Relay %s", defaultPublicRelayURL)
 	}
 	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, DeviceIdentity: deviceIdentity, CredentialsPath: *credentials}
 	resource, err := manager.Resource()

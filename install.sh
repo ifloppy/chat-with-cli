@@ -52,4 +52,6 @@ install -m 0755 "$TMP/$ASSET" "$NEW"
 mv -f "$NEW" "$DEST"
 printf 'Installed %s\nSHA256: %s\n' "$DEST" "$ACTUAL"
 case ":${PATH:-}:" in *":$INSTALL_DIR:"*) ;; *) printf 'Add %s to PATH if needed.\n' "$INSTALL_DIR" ;; esac
-printf 'Nothing was started automatically. Next: chat-with-cli agent setup --help\n'
+printf '\nInteractive terminal hub: chat-with-cli ui\n'
+printf 'It defaults to the community Relay: https://chat-with-cli.iruanp.com\n'
+printf 'Nothing was started automatically. You can also run: chat-with-cli agent setup\n'

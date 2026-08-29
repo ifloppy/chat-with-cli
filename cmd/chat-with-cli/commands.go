@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,10 +26,111 @@ import (
 	"github.com/ifloppy/chat-with-cli/internal/releaseinstall"
 )
 
+func runInteractiveUI(args []string) error {
+	if len(args) != 0 {
+		return errors.New("the interactive UI does not accept arguments; choose an action from the menu")
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return errors.New("interactive UI requires a local terminal; use `chat-with-cli ui` from a TTY or run a subcommand directly")
+	}
+	defer tty.Close()
+	reader := bufio.NewReader(tty)
+	for {
+		fmt.Fprintln(tty, "\n┌─ Chat with CLI ─────────────────────────────────────┐")
+		fmt.Fprintln(tty, "│  A small, safe control centre for your workstation.  │")
+		fmt.Fprintln(tty, "└─────────────────────────────────────────────────────┘")
+		fmt.Fprintln(tty, "  1  Set up a workstation")
+		fmt.Fprintln(tty, "  2  Connect this workstation")
+		fmt.Fprintln(tty, "  3  Run diagnostics")
+		fmt.Fprintln(tty, "  4  Show current status")
+		fmt.Fprintln(tty, "  q  Quit")
+		choice, err := uiPrompt(reader, tty, "Choose an action", "1")
+		if err != nil {
+			return err
+		}
+		switch strings.ToLower(strings.TrimSpace(choice)) {
+		case "1", "setup", "s":
+			if err := interactiveAgentSetup(reader, tty); err != nil {
+				fmt.Fprintf(tty, "\nSetup failed: %v\n", err)
+			} else {
+				fmt.Fprintln(tty, "\nSetup complete. Choose connect when you are ready to start the foreground Agent.")
+			}
+		case "2", "connect", "c":
+			return runConnect(nil)
+		case "3", "doctor", "d":
+			if err := runDoctor(nil); err != nil {
+				fmt.Fprintf(tty, "\nDiagnostics failed: %v\n", err)
+			}
+			_, _ = uiPrompt(reader, tty, "Press Enter to return to the menu", "")
+		case "4", "status":
+			if err := runStatus(nil); err != nil {
+				fmt.Fprintf(tty, "\nStatus failed: %v\n", err)
+			}
+			_, _ = uiPrompt(reader, tty, "Press Enter to return to the menu", "")
+		case "q", "quit", "exit", "0":
+			fmt.Fprintln(tty, "Goodbye.")
+			return nil
+		default:
+			fmt.Fprintln(tty, "Please choose 1, 2, 3, 4, or q.")
+		}
+	}
+}
+
+func uiPrompt(reader *bufio.Reader, writer io.Writer, label, defaultValue string) (string, error) {
+	if defaultValue != "" {
+		fmt.Fprintf(writer, "  %s [%s]: ", label, defaultValue)
+	} else {
+		fmt.Fprintf(writer, "  %s: ", label)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return defaultValue, nil
+	}
+	return line, nil
+}
+
+func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
+	hostname, _ := os.Hostname()
+	root, err := os.Getwd()
+	if err != nil {
+		root = "."
+	}
+	relay, err := uiPrompt(reader, writer, "Relay URL", defaultPublicRelayURL)
+	if err != nil {
+		return err
+	}
+	root, err = uiPrompt(reader, writer, "Workspace root", root)
+	if err != nil {
+		return err
+	}
+	device, err := uiPrompt(reader, writer, "Device name", hostname)
+	if err != nil {
+		return err
+	}
+	profile, err := uiPrompt(reader, writer, "Capability profile (read-only/developer/computer-use/custom)", "read-only")
+	if err != nil {
+		return err
+	}
+	installSystemd, err := uiPrompt(reader, writer, "Write an inactive systemd user unit? (y/N)", "n")
+	if err != nil {
+		return err
+	}
+	setupArgs := []string{"--relay", relay, "--root", root, "--device", device, "--profile", profile}
+	if strings.EqualFold(installSystemd, "y") || strings.EqualFold(installSystemd, "yes") {
+		setupArgs = append(setupArgs, "--install-systemd")
+	}
+	return runAgentSetup(setupArgs)
+}
+
 func runAgentSetup(args []string) error {
 	fs := flag.NewFlagSet("agent setup", flag.ContinueOnError)
 	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration path")
-	relayURL := fs.String("relay", "", "relay base URL")
+	relayURL := fs.String("relay", defaultPublicRelayURL, "relay base URL (defaults to the community public Relay)")
 	deviceDefault, _ := os.Hostname()
 	device := fs.String("device", deviceDefault, "human-readable device name")
 	deviceID := fs.String("device-id", "", "immutable device ID; generated when omitted")
@@ -346,9 +448,23 @@ func runRelaySetup(args []string) error {
 	mode := fs.String("instance-mode", "private", "private or public")
 	stateDir := fs.String("state-dir", defaultRelayStateDir(), "relay state directory")
 	setupTokenFile := fs.String("setup-token-file", "", "one-time setup token path")
+	adsenseClientID := fs.String("adsense-client-id", "", "optional Google AdSense publisher client ID")
+	adsenseSlot := fs.String("adsense-slot", "", "optional Google AdSense responsive slot ID")
+	admobAppID := fs.String("admob-app-id", "", "optional companion-app AdMob application ID")
+	admobRewardUnitID := fs.String("admob-reward-unit-id", "", "optional companion-app AdMob rewarded-ad unit ID")
+	usageUnlockEnabled := fs.Bool("usage-unlock-enabled", false, "enable the signed rewarded usage entitlement link")
+	usageUnlockEndpoint := fs.String("usage-unlock-endpoint", "", "HTTPS companion-app/backend URL for verified usage entitlements")
 	force := fs.Bool("force", false, "replace existing config/token after symlink checks")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	var endpointErr error
+	*usageUnlockEndpoint, endpointErr = normalizeUsageUnlockEndpoint(*usageUnlockEndpoint)
+	if endpointErr != nil {
+		return fmt.Errorf("invalid usage unlock endpoint: %w", endpointErr)
+	}
+	if *usageUnlockEnabled && *usageUnlockEndpoint == "" {
+		return errors.New("--usage-unlock-enabled requires --usage-unlock-endpoint")
 	}
 	if strings.TrimSpace(*publicURL) == "" {
 		return errors.New("--public-url is required, for example https://relay.example.com")
@@ -397,6 +513,12 @@ func runRelaySetup(args []string) error {
 		"relay.setup_token_file":            *setupTokenFile,
 		"relay.disable_registration":        false,
 		"relay.allow_legacy_unbound_agents": false,
+		"relay.adsense_client_id":           strings.TrimSpace(*adsenseClientID),
+		"relay.adsense_slot":                strings.TrimSpace(*adsenseSlot),
+		"relay.admob_app_id":                strings.TrimSpace(*admobAppID),
+		"relay.admob_reward_unit_id":        strings.TrimSpace(*admobRewardUnitID),
+		"relay.usage_unlock_enabled":        *usageUnlockEnabled,
+		"relay.usage_unlock_endpoint":       strings.TrimSpace(*usageUnlockEndpoint),
 	}
 	if err := writeConfigFile(*configPath, values, *force); err != nil {
 		return fmt.Errorf("write relay config: %w", err)
@@ -649,7 +771,7 @@ func runStatus(args []string) error {
 			}
 		}
 	}
-	status := map[string]any{"config": *configPath, "relay": values.String("", "agent.relay_url"), "device": values.String("", "agent.device"), "device_id": values.String("", "agent.device_id"), "device_identity": identityPath, "device_proof": identityState, "profile": values.String("read-only", "agent.profile"), "systemd_active": active, "systemd_enabled": enabled}
+	status := map[string]any{"config": *configPath, "relay": values.String(defaultPublicRelayURL, "agent.relay_url"), "device": values.String("", "agent.device"), "device_id": values.String("", "agent.device_id"), "device_identity": identityPath, "device_proof": identityState, "profile": values.String("read-only", "agent.profile"), "systemd_active": active, "systemd_enabled": enabled}
 	data, _ := json.MarshalIndent(status, "", "  ")
 	fmt.Println(string(data))
 	return nil
@@ -663,7 +785,7 @@ func systemdUserState(unit string) (bool, bool) {
 
 func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	relayURL := fs.String("relay", "", "Relay URL to inspect")
+	relayURL := fs.String("relay", defaultPublicRelayURL, "Relay URL to inspect (defaults to the community public Relay)")
 	device := fs.String("device", "", "legacy display-name route to inspect")
 	deviceID := fs.String("device-id", "", "immutable device ID route to inspect")
 	mcpToken := fs.String("mcp-token", "", "existing MCP bearer token for initialize/tools/list checks")
@@ -675,7 +797,7 @@ func runDoctor(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *relayURL == "" {
+	if !flagWasSet(fs, "relay") {
 		*relayURL = values.String(*relayURL, "agent.relay_url")
 	}
 	if *device == "" {
