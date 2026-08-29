@@ -964,6 +964,18 @@ func validRedirectURI(raw string) bool {
 	return strings.EqualFold(u.Scheme, "http") && (host == "localhost" || host == "127.0.0.1" || host == "::1")
 }
 
+func validAgentRedirectURI(raw string) bool {
+	if !validRedirectURI(raw) {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !strings.EqualFold(u.Scheme, "http") {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && ip.IsLoopback()
+}
+
 type registrationRequest struct {
 	RedirectURIs            []string `json:"redirect_uris"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
@@ -1015,8 +1027,8 @@ func (s *Server) handleRegistrationChallenge(w http.ResponseWriter, r *http.Requ
 	clientName := strings.TrimSpace(req.ClientName)
 	redirectURI := strings.TrimSpace(req.RedirectURI)
 	deviceID, ok := protocol.NormalizeDeviceID(strings.TrimSpace(req.DeviceID))
-	if !ok || clientName == "" || len(clientName) > 256 || !validRedirectURI(redirectURI) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "invalid Agent registration challenge metadata"})
+	if !ok || clientName == "" || len(clientName) > 256 || !validAgentRedirectURI(redirectURI) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent registration challenge redirect must use loopback HTTP"})
 		return
 	}
 	pub, err := deviceidentity.DecodePublicKey(strings.TrimSpace(req.DevicePublicKey))
@@ -1093,6 +1105,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if hasDeviceProofFields {
 		if deviceID == "" || devicePublicKey == "" || deviceChallenge == "" || deviceProof == "" || len(req.RedirectURIs) != 1 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "incomplete Agent device proof metadata"})
+			return
+		}
+		if !validAgentRedirectURI(req.RedirectURIs[0]) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_redirect_uri", "error_description": "device-bound Agent clients must use a loopback HTTP redirect"})
 			return
 		}
 		canonicalID, ok := protocol.NormalizeDeviceID(deviceID)

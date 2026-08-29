@@ -58,7 +58,9 @@ the config. The immutable device ID is derived from that public key rather than
 chosen independently. A normal first login is simply `chat-with-cli login`.
 Before DCR, the CLI obtains a short-lived one-time registration challenge from
 the Relay, signs it with the device private key, and submits that proof with
-the DCR request. Every later WebSocket connection uses a separate one-time
+the DCR request. Device-bound Agent DCR accepts only loopback HTTP callbacks;
+external HTTPS callbacks remain available to ordinary MCP clients, not Agents.
+Every later WebSocket connection uses a separate one-time
 Relay challenge bound to the Agent resource and current bearer fingerprint.
 The Relay binds the verified public key to the device. A stolen Agent OAuth
 bearer or captured old proof alone is insufficient to impersonate a PoP-bound

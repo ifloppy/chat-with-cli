@@ -2742,6 +2742,71 @@ func TestRegistrationChallengeEndpointRejectsRetiredIdentity(t *testing.T) {
 	}
 }
 
+func TestAgentDCRRequiresLoopbackRedirectButGenericMCPAllowsHTTPS(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19145", Password: "agent-loopback-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientName = "chat-with-cli agent redirect-bound"
+	const externalRedirect = "https://attacker.example/callback"
+	publicKey := deviceidentity.EncodePublicKey(identity.PublicKey())
+
+	challengeBody, _ := json.Marshal(map[string]any{
+		"client_name": clientName, "redirect_uri": externalRedirect,
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": publicKey,
+	})
+	challengeReq := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register/challenge"), bytes.NewReader(challengeBody))
+	challengeReq.Header.Set("Content-Type", "application/json")
+	challengeRR := httptest.NewRecorder()
+	s.handleRegistrationChallenge(challengeRR, challengeReq)
+	if challengeRR.Code != http.StatusBadRequest {
+		t.Fatalf("Agent DCR challenge accepted external HTTPS redirect: status=%d body=%s", challengeRR.Code, challengeRR.Body.String())
+	}
+
+	// Defense in depth: even a challenge produced internally for an external
+	// redirect must not let a device-bound Agent client bypass the DCR endpoint
+	// redirect policy.
+	challenge, err := s.issueRegistrationChallenge(identity.ID(), publicKey, clientName, externalRedirect, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := identity.SignRegistrationProof(clientName, externalRedirect, challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentBody, _ := json.Marshal(map[string]any{
+		"redirect_uris": []string{externalRedirect}, "token_endpoint_auth_method": "none",
+		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
+		"client_name": clientName, "scope": "agent:connect offline_access",
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": publicKey,
+		"chat_with_cli_device_challenge": challenge, "chat_with_cli_device_proof": proof,
+	})
+	agentReq := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(agentBody))
+	agentReq.Header.Set("Content-Type", "application/json")
+	agentRR := httptest.NewRecorder()
+	s.handleRegister(agentRR, agentReq)
+	if agentRR.Code != http.StatusBadRequest || !strings.Contains(agentRR.Body.String(), "invalid_redirect_uri") {
+		t.Fatalf("device-bound Agent DCR accepted external HTTPS redirect: status=%d body=%s", agentRR.Code, agentRR.Body.String())
+	}
+
+	genericBody, _ := json.Marshal(map[string]any{
+		"redirect_uris":              []string{"https://chatgpt.example/oauth/callback"},
+		"token_endpoint_auth_method": "none", "grant_types": []string{"authorization_code", "refresh_token"},
+		"response_types": []string{"code"}, "client_name": "generic MCP client", "scope": "mcp offline_access",
+	})
+	genericReq := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(genericBody))
+	genericReq.Header.Set("Content-Type", "application/json")
+	genericRR := httptest.NewRecorder()
+	s.handleRegister(genericRR, genericReq)
+	if genericRR.Code != http.StatusCreated {
+		t.Fatalf("generic MCP DCR lost HTTPS callback support: status=%d body=%s", genericRR.Code, genericRR.Body.String())
+	}
+}
+
 func TestDeviceBoundOAuthClientCannotRequestMCPOrAnotherAgent(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:19142", Password: "client-bound-password-12345", StateDir: t.TempDir()})
 	if err != nil {

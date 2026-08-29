@@ -32,7 +32,9 @@ bounded operational audit trail.
 New Agent identities use Ed25519. `agent setup` generates a local private key
 and derives the immutable 128-bit route ID from its public key. Initial Agent
 DCR first requires a short-lived, one-time Relay challenge bound to the device
-ID, public key, client name, and redirect URI; the private-key signature is
+ID, public key, client name, and loopback HTTP redirect URI. Device-bound Agent
+clients cannot redirect authorization codes to external HTTPS origins; generic
+MCP clients retain HTTPS callback support. The private-key signature is
 consumed after one successful registration. Every authenticated Agent
 WebSocket then requires a separate one-time Relay challenge signed by the same
 key and bound to the exact resource and bearer fingerprint. Both challenge MAC

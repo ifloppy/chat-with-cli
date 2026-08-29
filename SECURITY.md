@@ -93,8 +93,10 @@ immutable 128-bit route ID is derived from the public key; the human-readable
 name remains only a label. Public instances require this cryptographic identity
 for new device claims. Before Agent DCR, the client requests a short-lived
 one-time registration challenge from the Relay. That challenge is bound to the
-canonical device ID, Ed25519 public key, client name, and loopback/HTTPS
-redirect URI; the Agent signs it with the matching private key and the Relay
+canonical device ID, Ed25519 public key, client name, and loopback HTTP
+redirect URI; device-bound Agent DCR rejects external callbacks even though
+generic MCP clients may use HTTPS callbacks. The Agent signs the challenge
+with the matching private key and the Relay
 consumes it after one successful registration. The registration challenge MAC
 key is process-ephemeral, so captured proofs cannot be replayed across Relay
 restarts. Before every later Agent WebSocket, the authenticated Agent obtains a
