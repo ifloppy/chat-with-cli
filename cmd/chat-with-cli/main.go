@@ -714,10 +714,10 @@ func runRelay(args []string) error {
 		oauth.RegisterRoutes(mux)
 		mux.Handle("/mcp/{device}", oauth.ProtectScopedResource("mcp", pathHandler))
 		mux.Handle("/mcp/id/{id}", oauth.ProtectScopedResource("mcp", pathHandler))
-		mux.Handle("/agent/{device}/challenge", oauth.AgentChallengeHandler())
-		mux.Handle("/agent/id/{id}/challenge", oauth.AgentChallengeHandler())
-		mux.Handle("/agent/{device}", oauth.ProtectScopedResource("agent:connect", broker.AgentHandler()))
-		mux.Handle("/agent/id/{id}", oauth.ProtectScopedResource("agent:connect", broker.AgentHandler()))
+		mux.Handle("/agent/", agentPathMux(
+			oauth.AgentChallengeHandler(),
+			oauth.ProtectScopedResource("agent:connect", broker.AgentHandler()),
+		))
 		log.Printf("%s OAuth instance; MCP endpoint: %s/mcp/<device>", strings.ToLower(*mode), strings.TrimRight(*publicURL, "/"))
 	} else {
 		mux.Handle("/mcp/{device}", bearerAuth(*clientToken, pathHandler))
@@ -979,6 +979,17 @@ func runLogin(args []string) error {
 	}
 	fmt.Printf("Authorized %s via browser OAuth.\nAgent resource: %s\nCredentials saved to %s\n", *device, resource, *credentials)
 	return nil
+}
+
+func agentPathMux(challenge, connection http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimSuffix(r.URL.EscapedPath(), "/")
+		if strings.HasSuffix(path, "/challenge") {
+			challenge.ServeHTTP(w, r)
+			return
+		}
+		connection.ServeHTTP(w, r)
+	})
 }
 
 func bearerAuth(token string, next http.Handler) http.Handler {

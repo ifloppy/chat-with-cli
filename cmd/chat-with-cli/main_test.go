@@ -84,3 +84,29 @@ func TestBearerAuthRequiresExactToken(t *testing.T) {
 		t.Fatalf("exact bearer secret rejected: status=%d called=%v", rr.Code, called)
 	}
 }
+
+func TestAgentPathMuxAvoidsServeMuxPatternConflicts(t *testing.T) {
+	challenge := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Route", "challenge")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	connection := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Route", "connection")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux := http.NewServeMux()
+	mux.Handle("/agent/", agentPathMux(challenge, connection))
+
+	for path, want := range map[string]string{
+		"/agent/legacy-device":                                 "connection",
+		"/agent/id/0123456789abcdef0123456789abcdef":           "connection",
+		"/agent/legacy-device/challenge":                       "challenge",
+		"/agent/id/0123456789abcdef0123456789abcdef/challenge": "challenge",
+	} {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+path, nil))
+		if rr.Code != http.StatusNoContent || rr.Header().Get("X-Route") != want {
+			t.Fatalf("path %s routed to %q status=%d, want %q", path, rr.Header().Get("X-Route"), rr.Code, want)
+		}
+	}
+}
