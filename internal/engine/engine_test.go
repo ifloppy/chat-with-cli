@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -222,6 +223,58 @@ func TestAuditRecordsMethodWithoutPayload(t *testing.T) {
 	}
 	if len(out.Events) != 1 || out.Events[0].Method != "fs_write" || !out.Events[0].OK {
 		t.Fatalf("unexpected audit events: %#v", out.Events)
+	}
+}
+
+func TestInvokeCanceledContextCannotMutateFilesystem(t *testing.T) {
+	root, stateDir := t.TempDir(), t.TempDir()
+	eng, err := New(Config{Roots: []string{root}, AllowFileWrite: true, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = eng.Invoke(ctx, "fs_write", json.RawMessage(`{"path":"canceled.txt","content":"must-not-write"}`))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled filesystem request returned %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "canceled.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled filesystem request mutated workspace: %v", err)
+	}
+}
+
+func TestTaskOperationsRejectUnsafeIDs(t *testing.T) {
+	eng := testEngine(t, false)
+	if _, err := eng.tasks.Read(ReadTaskInput{TaskID: "../../outside"}); err == nil {
+		t.Fatal("task read accepted a path-traversal task ID")
+	}
+	if err := eng.tasks.Send(SendTaskInput{TaskID: "../../outside", Input: "x"}); err == nil {
+		t.Fatal("task send accepted a path-traversal task ID")
+	}
+	if err := eng.tasks.Stop(StopTaskInput{TaskID: "../../outside"}); err == nil {
+		t.Fatal("task stop accepted a path-traversal task ID")
+	}
+}
+
+func TestKillSwitchBlocksTaskStartBeforePTY(t *testing.T) {
+	root := t.TempDir()
+	killSwitch := filepath.Join(t.TempDir(), "PANIC")
+	eng, err := New(Config{
+		Roots: []string{root}, AllowExec: true,
+		StateDir: t.TempDir(), KillSwitchPath: killSwitch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	if err := os.WriteFile(killSwitch, []byte("stop\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.tasks.Start(context.Background(), StartTaskInput{Command: "touch should-not-run"}); err == nil || !strings.Contains(err.Error(), "kill switch") {
+		t.Fatalf("kill switch did not block task start: %v", err)
+	}
+	if tasks := eng.tasks.List().Tasks; len(tasks) != 0 {
+		t.Fatalf("kill-switched task start left active/history entries: %+v", tasks)
 	}
 }
 

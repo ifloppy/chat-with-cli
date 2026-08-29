@@ -2486,6 +2486,12 @@ func TestPersistedIdentityCrossReferencesFailClosed(t *testing.T) {
 			t.Fatal("duplicate normalized persisted usernames were accepted")
 		}
 	})
+	t.Run("client-map-id-mismatch", func(t *testing.T) {
+		state := diskState{Clients: map[string]Client{"map-id": {ID: "different-id"}}}
+		if err := s.canonicalizeDiskState(&state); err == nil {
+			t.Fatal("persisted OAuth client map key and immutable client ID mismatch was accepted")
+		}
+	})
 	t.Run("device-unknown-owner", func(t *testing.T) {
 		state := diskState{Devices: map[string]string{"device-a": "missing-user"}}
 		if err := s.canonicalizeDiskState(&state); err == nil {
@@ -3290,7 +3296,7 @@ func TestStateGuardRejectsSymlink(t *testing.T) {
 }
 
 func TestPersistenceFaultRecoveryRejectsAuthorityExpansion(t *testing.T) {
-	s, err := New(Config{PublicURL: "http://127.0.0.1:19165", Password: "recovery-boundary-password-12345", StateDir: t.TempDir(), Mode: ModePublic})
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19165", Password: "recovery-boundary-password-12345", StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3597,5 +3603,185 @@ func TestSessionCreationRejectsRevokedAuthenticationSnapshot(t *testing.T) {
 	s.mu.Unlock()
 	if token, err := s.createSession(current); err == nil || token != "" {
 		t.Fatalf("deleted user received a session: token=%q err=%v", token, err)
+	}
+}
+
+func TestDeleteUserRetiresOrphanedDeviceRecord(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19172", Password: "orphan-device-delete-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientID = "orphan-device-client"
+	const redirect = "http://127.0.0.1:45572/callback"
+	const codeValue = "orphan-device-code"
+	route := "id/" + identity.ID()
+	resource := s.absolute("/agent/" + route)
+
+	s.mu.Lock()
+	admin := s.users[s.usernames["owner"]]
+	victim, err := s.createUserLocked("orphan-device-victim", "orphan-device-victim-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.clients[clientID] = Client{
+		ID: clientID, RedirectURIs: []string{redirect}, Approved: true, IssuedAt: time.Now().Unix(),
+		DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true,
+	}
+	// Simulate a legacy/interrupted deletion that removed the ownership index
+	// but left the immutable device record and its credentials behind.
+	s.deviceRecords[route] = DeviceRecord{
+		ID: route[len("id/"):], OwnerID: victim.ID, DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), CreatedAt: time.Now().Unix(),
+	}
+	access, refresh, _, err := s.issueTokensLocked(clientID, victim.ID, resource, "agent:connect offline_access")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.pending["orphan-device-pending"] = pendingAuth{ClientID: clientID, UserID: victim.ID, RedirectURI: redirect, Resource: resource, Expires: time.Now().Add(time.Minute)}
+	s.codes[tokenKey(codeValue)] = authCode{pendingAuth: pendingAuth{ClientID: clientID, UserID: victim.ID, RedirectURI: redirect, Resource: resource}, Expires: time.Now().Add(time.Minute)}
+	s.mu.Unlock()
+
+	if err := s.applyAdminAction("delete-user", victim.ID, "", admin, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	_, recordPresent := s.deviceRecords[route]
+	_, active := s.devices[route]
+	retired := s.retiredDevices[route]
+	_, clientPresent := s.clients[clientID]
+	_, accessPresent := s.access[tokenKey(access)]
+	_, refreshPresent := s.refresh[tokenKey(refresh)]
+	_, pendingPresent := s.pending["orphan-device-pending"]
+	_, codePresent := s.codes[tokenKey(codeValue)]
+	s.clients["reclaim-client"] = Client{ID: "reclaim-client", DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	reclaimErr := s.authorizeResourceLocked(admin.ID, "reclaim-client", resource)
+	s.mu.Unlock()
+	if recordPresent || active || clientPresent || accessPresent || refreshPresent || pendingPresent || codePresent || !retired {
+		t.Fatalf("orphaned device authority survived deletion: record=%v active=%v client=%v access=%v refresh=%v pending=%v code=%v retired=%v", recordPresent, active, clientPresent, accessPresent, refreshPresent, pendingPresent, codePresent, retired)
+	}
+	if reclaimErr == nil {
+		t.Fatal("deleted user's orphaned immutable device identity was reclaimable")
+	}
+}
+
+func TestCleanupRemovesCredentialsForDisabledUsers(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19173", Password: "cleanup-disabled-user-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	victim, err := s.createUserLocked("cleanup-disabled-user", "cleanup-disabled-user-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	victim.Disabled = true
+	s.users[victim.ID] = victim
+	const clientID = "cleanup-disabled-client"
+	const device = "cleanup-disabled-device"
+	resource := s.absolute("/mcp/" + device)
+	s.clients[clientID] = Client{ID: clientID, Approved: true}
+	s.devices[device] = victim.ID
+	future := time.Now().Add(time.Hour).Unix()
+	s.access["cleanup-access"] = tokenRecord{ClientID: clientID, UserID: victim.ID, Resource: resource, Scope: "mcp offline_access", Expires: future}
+	s.refresh["cleanup-refresh"] = tokenRecord{ClientID: clientID, UserID: victim.ID, Resource: resource, Scope: "mcp offline_access", Expires: future}
+	s.refreshUsed["cleanup-refresh-used"] = tokenRecord{ClientID: clientID, UserID: victim.ID, Resource: resource, Scope: "mcp offline_access", Expires: future}
+	s.sessions["cleanup-session"] = sessionRecord{UserID: victim.ID, CreatedAt: time.Now().Unix(), LastSeenAt: time.Now().Unix(), Expires: future}
+	s.pending["cleanup-pending"] = pendingAuth{ClientID: clientID, UserID: victim.ID, Resource: resource, Expires: time.Now().Add(time.Minute)}
+	s.codes["cleanup-code"] = authCode{pendingAuth: pendingAuth{ClientID: clientID, UserID: victim.ID, Resource: resource, Scope: "mcp offline_access"}, Expires: time.Now().Add(time.Minute)}
+	s.cleanupLocked(time.Now())
+	remaining := len(s.access) + len(s.refresh) + len(s.refreshUsed) + len(s.sessions) + len(s.pending) + len(s.codes)
+	victim.Disabled = false
+	s.users[victim.ID] = victim
+	s.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("disabled-user credentials survived cleanup: %d records", remaining)
+	}
+	if s.VerifyAccess("cleanup-access-secret", resource) {
+		t.Fatal("disabled-user access credential was usable after re-enable")
+	}
+}
+
+func TestStaleAdministratorSnapshotCannotMutateState(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19174", Password: "stale-admin-snapshot-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	stale := s.users[ownerID]
+	live := stale
+	live.Disabled = true
+	s.users[ownerID] = live
+	s.mu.Unlock()
+	request := httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)
+	if err := s.applyAdminAction("create-user", "stale-admin-created", "stale-admin-created-password-12345", stale, request); err == nil {
+		t.Fatal("disabled administrator snapshot performed an action")
+	}
+	s.mu.Lock()
+	_, created := s.usernames["stale-admin-created"]
+	live = s.users[ownerID]
+	live.Disabled = false
+	live.Admin = false
+	s.users[ownerID] = live
+	s.mu.Unlock()
+	if err := s.applyAdminAction("set-agent", "", "off", stale, request); err == nil {
+		t.Fatal("demoted administrator snapshot performed an action")
+	}
+	if created {
+		t.Fatal("stale administrator action created a user")
+	}
+}
+
+func TestAgentProofRechecksLiveAccessBeforeConsumingChallenge(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19175", Password: "proof-revalidation-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := s.absolute("/agent/id/" + identity.ID())
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.clients["proof-revalidation-client"] = Client{ID: "proof-revalidation-client", Approved: true, DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	if err := s.authorizeResourceLocked(ownerID, "proof-revalidation-client", resource); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	access, _, _, err := s.issueTokensLocked("proof-revalidation-client", ownerID, resource, "agent:connect offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := s.issueAgentChallenge(resource, tokenKey(access), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := identity.SignProof(resource, access, challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	delete(s.access, tokenKey(access))
+	s.mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, resource, nil)
+	req.Header.Set(deviceidentity.HeaderChallenge, challenge)
+	req.Header.Set(deviceidentity.HeaderProof, proof)
+	if s.verifyAgentDeviceProof(req, resource, tokenKey(access)) {
+		t.Fatal("revoked access token completed Agent proof")
+	}
+	s.mu.Lock()
+	consumed := len(s.consumedAgentChallenges["id/"+identity.ID()])
+	s.mu.Unlock()
+	if consumed != 0 {
+		t.Fatal("revoked proof consumed a challenge")
 	}
 }

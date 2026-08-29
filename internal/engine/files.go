@@ -17,6 +17,13 @@ import (
 )
 
 func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
+	return e.readFileContext(context.Background(), in)
+}
+
+func (e *Engine) readFileContext(ctx context.Context, in FileReadInput) (FileReadOutput, error) {
+	if err := e.checkContext(ctx); err != nil {
+		return FileReadOutput{}, err
+	}
 	if in.Offset < 0 {
 		return FileReadOutput{}, errors.New("offset must be >= 0")
 	}
@@ -45,10 +52,16 @@ func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
 	if _, err := file.Seek(in.Offset, io.SeekStart); err != nil {
 		return FileReadOutput{}, err
 	}
+	if err := e.checkContext(ctx); err != nil {
+		return FileReadOutput{}, err
+	}
 	buf := make([]byte, limit)
 	n, readErr := file.Read(buf)
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
 		return FileReadOutput{}, readErr
+	}
+	if err := e.checkContext(ctx); err != nil {
+		return FileReadOutput{}, err
 	}
 	next := in.Offset + int64(n)
 	return FileReadOutput{
@@ -57,19 +70,35 @@ func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
 }
 
 func (e *Engine) WriteFile(in FileWriteInput) error {
+	return e.writeFileContext(context.Background(), in)
+}
+
+func (e *Engine) writeFileContext(ctx context.Context, in FileWriteInput) error {
+	if err := e.checkContext(ctx); err != nil {
+		return err
+	}
 	if !e.cfg.AllowFileWrite {
 		return errors.New("filesystem write is disabled; start the agent with --allow-file-write")
 	}
 	switch strings.ToLower(strings.TrimSpace(in.Mode)) {
 	case "", "rewrite":
+		if err := e.checkContext(ctx); err != nil {
+			return err
+		}
 		_, err := e.secureAtomicWrite(in.Path, []byte(in.Content), 0o644)
 		return err
 	case "append":
+		if err := e.checkContext(ctx); err != nil {
+			return err
+		}
 		file, _, err := e.secureOpenAppend(in.Path)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
+		if err := e.checkContext(ctx); err != nil {
+			return err
+		}
 		_, err = io.WriteString(file, in.Content)
 		return err
 	default:
@@ -78,6 +107,13 @@ func (e *Engine) WriteFile(in FileWriteInput) error {
 }
 
 func (e *Engine) ListFiles(in FileListInput) (FileListOutput, error) {
+	return e.listFilesContext(context.Background(), in)
+}
+
+func (e *Engine) listFilesContext(ctx context.Context, in FileListInput) (FileListOutput, error) {
+	if err := e.checkContext(ctx); err != nil {
+		return FileListOutput{}, err
+	}
 	root, err := e.ResolvePath(in.Path)
 	if err != nil {
 		return FileListOutput{}, err
@@ -91,6 +127,9 @@ func (e *Engine) ListFiles(in FileListInput) (FileListOutput, error) {
 	}
 	entries := make([]FileEntry, 0, 128)
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if err := e.checkContext(ctx); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -133,6 +172,9 @@ func (e *Engine) ListFiles(in FileListInput) (FileListOutput, error) {
 }
 
 func (e *Engine) SearchFiles(ctx context.Context, in FileSearchInput) (FileSearchOutput, error) {
+	if err := e.checkContext(ctx); err != nil {
+		return FileSearchOutput{}, err
+	}
 	root, err := e.ResolvePath(in.Path)
 	if err != nil {
 		return FileSearchOutput{}, err
@@ -169,10 +211,8 @@ func (e *Engine) SearchFiles(ctx context.Context, in FileSearchInput) (FileSearc
 			}
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := e.checkContext(ctx); err != nil {
+			return err
 		}
 		if d.IsDir() {
 			if path != root && shouldSkipDir(d.Name()) {
@@ -279,6 +319,13 @@ func (e *Engine) checkpointPath(workspace string) (string, string, error) {
 }
 
 func (e *Engine) WriteCheckpoint(in CheckpointWriteInput) error {
+	return e.writeCheckpointContext(context.Background(), in)
+}
+
+func (e *Engine) writeCheckpointContext(ctx context.Context, in CheckpointWriteInput) error {
+	if err := e.checkContext(ctx); err != nil {
+		return err
+	}
 	if !e.cfg.AllowFileWrite {
 		return errors.New("checkpoint writes are disabled; start the agent with --allow-file-write")
 	}
@@ -286,11 +333,21 @@ func (e *Engine) WriteCheckpoint(in CheckpointWriteInput) error {
 	if err != nil {
 		return err
 	}
+	if err := e.checkContext(ctx); err != nil {
+		return err
+	}
 	content := "# chat-with-cli checkpoint\n\nWorkspace: `" + workspace + "`\n\n" + in.Content + "\n"
 	return atomicWriteFileMode(path, []byte(content), 0o600)
 }
 
 func (e *Engine) ReadCheckpoint(in CheckpointReadInput) (CheckpointOutput, error) {
+	return e.readCheckpointContext(context.Background(), in)
+}
+
+func (e *Engine) readCheckpointContext(ctx context.Context, in CheckpointReadInput) (CheckpointOutput, error) {
+	if err := e.checkContext(ctx); err != nil {
+		return CheckpointOutput{}, err
+	}
 	workspace, path, err := e.checkpointPath(in.Workspace)
 	if err != nil {
 		return CheckpointOutput{}, err
@@ -302,10 +359,20 @@ func (e *Engine) ReadCheckpoint(in CheckpointReadInput) (CheckpointOutput, error
 	if err != nil {
 		return CheckpointOutput{}, err
 	}
+	if err := e.checkContext(ctx); err != nil {
+		return CheckpointOutput{}, err
+	}
 	return CheckpointOutput{Workspace: workspace, Content: string(data)}, nil
 }
 
 func (e *Engine) PatchFile(in FilePatchInput) (FilePatchOutput, error) {
+	return e.patchFileContext(context.Background(), in)
+}
+
+func (e *Engine) patchFileContext(ctx context.Context, in FilePatchInput) (FilePatchOutput, error) {
+	if err := e.checkContext(ctx); err != nil {
+		return FilePatchOutput{}, err
+	}
 	if !e.cfg.AllowFileWrite {
 		return FilePatchOutput{}, errors.New("filesystem write is disabled; start the agent with --allow-file-write")
 	}
@@ -328,11 +395,17 @@ func (e *Engine) PatchFile(in FilePatchInput) (FilePatchOutput, error) {
 	if len(data) > e.cfg.MaxReadBytes {
 		return FilePatchOutput{}, errors.New("file exceeds maximum patch size")
 	}
+	if err := e.checkContext(ctx); err != nil {
+		return FilePatchOutput{}, err
+	}
 	count := bytes.Count(data, []byte(in.OldText))
 	if count != expected {
 		return FilePatchOutput{}, fmt.Errorf("expected %d exact matches, found %d", expected, count)
 	}
 	patched := bytes.Replace(data, []byte(in.OldText), []byte(in.NewText), expected)
+	if err := e.checkContext(ctx); err != nil {
+		return FilePatchOutput{}, err
+	}
 	writtenPath, err := e.secureAtomicWrite(in.Path, patched, 0o644)
 	if err != nil {
 		return FilePatchOutput{}, err

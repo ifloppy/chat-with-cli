@@ -217,6 +217,22 @@ func (e *Engine) callContext(parent context.Context) (context.Context, context.C
 	}, false
 }
 
+func (e *Engine) checkContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if e.killSwitchActive() {
+		e.updateKillSwitchState(true)
+		return errors.New("local emergency kill switch is active")
+	}
+	return nil
+}
+
 func (e *Engine) watchKillSwitch() {
 	defer close(e.killSwitchDone)
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -414,6 +430,9 @@ func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage)
 }
 
 func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage) (any, error) {
+	if err := e.checkContext(ctx); err != nil {
+		return nil, err
+	}
 	switch method {
 	case "system_info":
 		host, _ := os.Hostname()
@@ -468,7 +487,7 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		return e.tasks.Read(in)
+		return e.tasks.readContext(ctx, in)
 	case "task_wait":
 		in, err := decode[WaitTaskInput](raw)
 		if err != nil {
@@ -566,7 +585,7 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		if err := e.tasks.Send(in); err != nil {
+		if err := e.tasks.sendContext(ctx, in); err != nil {
 			return nil, err
 		}
 		return Ack{OK: true}, nil
@@ -575,7 +594,7 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		if err := e.tasks.Stop(in); err != nil {
+		if err := e.tasks.stopContext(ctx, in); err != nil {
 			return nil, err
 		}
 		return Ack{OK: true}, nil
@@ -584,13 +603,13 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		return e.ReadFile(in)
+		return e.readFileContext(ctx, in)
 	case "fs_write":
 		in, err := decode[FileWriteInput](raw)
 		if err != nil {
 			return nil, err
 		}
-		if err := e.WriteFile(in); err != nil {
+		if err := e.writeFileContext(ctx, in); err != nil {
 			return nil, err
 		}
 		return Ack{OK: true}, nil
@@ -599,13 +618,13 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		return e.PatchFile(in)
+		return e.patchFileContext(ctx, in)
 	case "fs_list":
 		in, err := decode[FileListInput](raw)
 		if err != nil {
 			return nil, err
 		}
-		return e.ListFiles(in)
+		return e.listFilesContext(ctx, in)
 	}
 
 	switch method {
@@ -620,7 +639,7 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		if err := e.WriteCheckpoint(in); err != nil {
+		if err := e.writeCheckpointContext(ctx, in); err != nil {
 			return nil, err
 		}
 		return Ack{OK: true}, nil
@@ -629,7 +648,7 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		return e.ReadCheckpoint(in)
+		return e.readCheckpointContext(ctx, in)
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
 	}

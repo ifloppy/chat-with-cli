@@ -529,6 +529,9 @@ func (s *Server) canonicalizeDiskState(state *diskState) error {
 		normalizedUsers[normalized] = mapID
 	}
 	for clientID, client := range state.Clients {
+		if !clientIDMatches(clientID, client) {
+			return fmt.Errorf("persisted OAuth client %s has an inconsistent immutable client ID", shortHandle(clientID))
+		}
 		hasDeviceIdentity := client.DeviceID != "" || client.DevicePublicKey != "" || client.DeviceKeyVerified
 		if !hasDeviceIdentity {
 			continue
@@ -615,11 +618,23 @@ func (s *Server) canonicalizeDiskState(state *diskState) error {
 	}
 	canonicalizeTokens := func(records map[string]tokenRecord) error {
 		for key, record := range records {
+			client, clientExists := state.Clients[record.ClientID]
+			user, userExists := state.Users[record.UserID]
+			if !clientExists || !clientIDMatches(record.ClientID, client) || !client.Approved ||
+				!userExists || user.ID != record.UserID || user.Disabled {
+				return fmt.Errorf("persisted OAuth token %s has invalid client or user references", shortHandle(key))
+			}
 			canonical, ok := s.validateResource(record.Resource)
 			if !ok {
 				return fmt.Errorf("invalid persisted OAuth resource for token %s", shortHandle(key))
 			}
+			kind, _, _, _ := s.resourceParts(canonical)
+			scope, ok := normalizeScope(record.Scope, kind)
+			if !ok {
+				return fmt.Errorf("invalid persisted OAuth scope for token %s", shortHandle(key))
+			}
 			record.Resource = canonical
+			record.Scope = scope
 			records[key] = record
 		}
 		return nil
@@ -816,37 +831,47 @@ func (s *Server) saveLockedUnlocked() error {
 func (s *Server) cleanupLocked(now time.Time) {
 	unix := now.Unix()
 	for key, rec := range s.access {
-		if rec.Expires <= unix {
+		client, clientExists := s.clients[rec.ClientID]
+		if rec.Expires <= unix || !s.activeUserLocked(rec.UserID) || !clientExists || !clientIDMatches(rec.ClientID, client) || !client.Approved || !s.resourceOwnershipIntactLocked(rec.UserID, rec.Resource, s.requiredScopeForResource(rec.Resource)) {
 			delete(s.access, key)
 		}
 	}
 	for key, rec := range s.refresh {
-		if rec.Expires <= unix || rec.UserID == "" || s.users[rec.UserID].ID == "" {
+		client, clientExists := s.clients[rec.ClientID]
+		if rec.Expires <= unix || !s.activeUserLocked(rec.UserID) || !clientExists || !clientIDMatches(rec.ClientID, client) || !client.Approved || !s.resourceOwnershipIntactLocked(rec.UserID, rec.Resource, s.requiredScopeForResource(rec.Resource)) {
 			delete(s.refresh, key)
 		}
 	}
 	for key, rec := range s.refreshUsed {
-		if rec.Expires <= unix || rec.UserID == "" || s.users[rec.UserID].ID == "" {
+		client, clientExists := s.clients[rec.ClientID]
+		if rec.Expires <= unix || !s.activeUserLocked(rec.UserID) || !clientExists || !clientIDMatches(rec.ClientID, client) || !client.Approved || !s.resourceOwnershipIntactLocked(rec.UserID, rec.Resource, s.requiredScopeForResource(rec.Resource)) {
 			delete(s.refreshUsed, key)
 		}
 	}
-	for key, rec := range s.access {
-		if rec.UserID == "" || s.users[rec.UserID].ID == "" {
-			delete(s.access, key)
-		}
-	}
 	for key, rec := range s.sessions {
-		if rec.Expires <= unix || s.users[rec.UserID].ID == "" {
+		if rec.Expires <= unix || !s.activeUserLocked(rec.UserID) {
 			delete(s.sessions, key)
 		}
 	}
 	for key, p := range s.pending {
-		if now.After(p.Expires) {
+		client, clientExists := s.clients[p.ClientID]
+		_, device, _, resourceOK := s.resourceParts(p.Resource)
+		deviceDisabled := !resourceOK || s.disabledDevices[device] || s.retiredDevices[device]
+		if record, exists := s.deviceRecords[device]; exists && record.Disabled {
+			deviceDisabled = true
+		}
+		if now.After(p.Expires) || !clientExists || !clientIDMatches(p.ClientID, client) || (p.UserID != "" && !s.activeUserLocked(p.UserID)) || deviceDisabled {
 			delete(s.pending, key)
 		}
 	}
 	for key, code := range s.codes {
-		if now.After(code.Expires) {
+		client, clientExists := s.clients[code.ClientID]
+		kind, _, _, resourceOK := s.resourceParts(code.Resource)
+		requiredScope := "mcp"
+		if kind == "agent" {
+			requiredScope = "agent:connect"
+		}
+		if now.After(code.Expires) || !clientExists || !clientIDMatches(code.ClientID, client) || !client.Approved || !s.activeUserLocked(code.UserID) || !resourceOK || !s.resourceOwnershipIntactLocked(code.UserID, code.Resource, requiredScope) {
 			delete(s.codes, key)
 		}
 	}
@@ -866,6 +891,45 @@ func (s *Server) cleanupLocked(now time.Time) {
 		}
 	}
 }
+
+func clientIDMatches(clientID string, client Client) bool {
+	return clientID != "" && client.ID == clientID
+}
+
+func (s *Server) activeUserLocked(userID string) bool {
+	user, exists := s.users[userID]
+	return exists && user.ID == userID && !user.Disabled
+}
+
+func (s *Server) requiredScopeForResource(resource string) string {
+	kind, _, _, ok := s.resourceParts(resource)
+	if ok && kind == "agent" {
+		return "agent:connect"
+	}
+	return "mcp"
+}
+
+func (s *Server) resourceOwnershipIntactLocked(userID, resource, requiredScope string) bool {
+	if !s.activeUserLocked(userID) {
+		return false
+	}
+	kind, device, canonical, ok := s.resourceParts(resource)
+	if !ok || canonical != resource ||
+		(requiredScope == "mcp" && kind != "mcp") ||
+		(requiredScope == "agent:connect" && kind != "agent") {
+		return false
+	}
+	if s.disabledDevices[device] || s.retiredDevices[device] {
+		return false
+	}
+	if record, exists := s.deviceRecords[device]; exists {
+		if record.Disabled || (record.OwnerID != "" && record.OwnerID != userID) {
+			return false
+		}
+	}
+	return s.devices[device] == userID
+}
+
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.handleLanding)
 	mux.HandleFunc("GET /docs", s.handleDocs)
@@ -1366,7 +1430,7 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.cleanupLocked(time.Now())
 	client, exists := s.clients[clientID]
-	if !exists || !exactRedirect(client, redirectURI) {
+	if !exists || !clientIDMatches(clientID, client) || !exactRedirect(client, redirectURI) {
 		s.mu.Unlock()
 		s.oauthPageError(w, http.StatusBadRequest, "unknown client or redirect URI")
 		return
@@ -1509,8 +1573,11 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 	}
 	requestID := r.Form.Get("request_id")
 	s.mu.Lock()
-	s.cleanupLocked(time.Now())
 	pending, ok := s.pending[requestID]
+	if ok && time.Now().After(pending.Expires) {
+		delete(s.pending, requestID)
+		ok = false
+	}
 	s.mu.Unlock()
 	if !ok {
 		s.oauthPageError(w, http.StatusBadRequest, "authorization request expired")
@@ -1674,7 +1741,13 @@ func (s *Server) authorizeResourceLocked(userID, clientID, resource string) erro
 		return errors.New("this device is disabled")
 	}
 	owner := s.devices[device]
-	record := s.ensureDeviceRecordLocked(device, owner)
+	record := s.deviceRecords[device]
+	if record.OwnerID != "" && owner != "" && record.OwnerID != owner {
+		return errors.New("device ownership state is inconsistent")
+	}
+	if owner == "" && record.OwnerID != "" {
+		return errors.New("this device has an orphaned ownership record; it must be retired by an administrator")
+	}
 	if record.Disabled {
 		return errors.New("this device is disabled")
 	}
@@ -1737,12 +1810,13 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 		return errors.New("authorization request expired")
 	}
 	client, exists := s.clients[pending.ClientID]
-	if !exists || !exactRedirect(client, pending.RedirectURI) {
+	if !exists || !clientIDMatches(pending.ClientID, client) || !exactRedirect(client, pending.RedirectURI) {
 		delete(s.pending, requestID)
 		return errors.New("OAuth client was revoked, expired, or no longer matches the authorization redirect")
 	}
 	snapshot := s.snapshotMutableStateLocked()
 	if err := s.authorizeResourceLocked(userID, pending.ClientID, pending.Resource); err != nil {
+		s.restoreMutableStateLocked(snapshot)
 		return err
 	}
 	if kind, device, _, ok := s.resourceParts(pending.Resource); ok && kind == "agent" {
@@ -1871,7 +1945,8 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(s.codes, tokenKey(codeValue))
-	if _, clientExists := s.clients[code.ClientID]; !clientExists || code.ClientID != clientID || code.RedirectURI != redirectURI || !pkceMatches(verifier, code.CodeChallenge) {
+	client, clientExists := s.clients[code.ClientID]
+	if !clientExists || !clientIDMatches(code.ClientID, client) || !client.Approved || code.ClientID != clientID || code.RedirectURI != redirectURI || !pkceMatches(verifier, code.CodeChallenge) {
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code binding check failed")
 		return
 	}
@@ -1917,13 +1992,13 @@ func (s *Server) exchangeRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
 		return
 	}
-	_, clientExists := s.clients[record.ClientID]
+	client, clientExists := s.clients[record.ClientID]
 	kind, _, _, resourceOK := s.resourceParts(record.Resource)
 	requiredScope := "mcp"
 	if kind == "agent" {
 		requiredScope = "agent:connect"
 	}
-	if !clientExists || !resourceOK || !s.resourceOwnedByUserLocked(record.UserID, record.Resource, requiredScope) {
+	if !clientExists || !clientIDMatches(record.ClientID, client) || !client.Approved || !resourceOK || !s.resourceOwnedByUserLocked(record.UserID, record.Resource, requiredScope) {
 		delete(s.refresh, key)
 		_ = s.saveLocked()
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
@@ -2058,12 +2133,16 @@ func (s *Server) verifyAccessKey(credentialHash, resource, requiredScope string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupLocked(time.Now())
+	return s.verifyAccessKeyLocked(credentialHash, resource, requiredScope)
+}
+
+func (s *Server) verifyAccessKeyLocked(credentialHash, resource, requiredScope string) bool {
 	record, ok := s.access[credentialHash]
 	if !ok || !s.resourceOwnedByUserLocked(record.UserID, resource, requiredScope) {
 		return false
 	}
 	client, clientExists := s.clients[record.ClientID]
-	return clientExists && client.ID != "" && record.UserID != "" && record.Resource == resource &&
+	return clientExists && clientIDMatches(record.ClientID, client) && client.Approved && record.UserID != "" && record.Resource == resource &&
 		strings.Contains(" "+record.Scope+" ", " "+requiredScope+" ")
 }
 
@@ -2244,7 +2323,9 @@ func (s *Server) verifyAgentDeviceProof(r *http.Request, resource, credentialHas
 		// Bearer-only Agent connections are unsafe against token theft and are
 		// therefore disabled by default. This flag exists only to migrate old
 		// alpha devices onto a newly generated cryptographic identity.
-		return s.cfg.AllowLegacyUnboundAgents
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.cfg.AllowLegacyUnboundAgents && s.verifyAccessKeyLocked(credentialHash, resource, "agent:connect")
 	}
 	pub, err := deviceidentity.DecodePublicKey(encodedPublicKey)
 	if err != nil {
@@ -2261,6 +2342,11 @@ func (s *Server) verifyAgentDeviceProof(r *http.Request, resource, credentialHas
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	currentRecord := s.deviceRecords[device]
+	if currentRecord.DevicePublicKey == "" || currentRecord.DevicePublicKey != encodedPublicKey ||
+		!s.verifyAccessKeyLocked(credentialHash, resource, "agent:connect") {
+		return false
+	}
 	return s.consumeAgentChallengeLocked(device, challengeHash, expires, time.Now().UTC())
 }
 
@@ -2338,6 +2424,11 @@ func (s *Server) ProtectScopedResource(requiredScope string, next http.Handler) 
 				return
 			}
 			checker := func() bool { return s.verifyAccessKey(credentialHash, resource, requiredScope) }
+			if !checker() {
+				w.Header().Set("Cache-Control", "no-store")
+				http.Error(w, "authorization revoked", http.StatusUnauthorized)
+				return
+			}
 			ctx, cancel := context.WithCancel(authzctx.WithChecker(r.Context(), checker))
 			defer cancel()
 			go func() {

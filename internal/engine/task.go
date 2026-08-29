@@ -57,7 +57,7 @@ func (m *TaskManager) loadHistory() {
 			continue
 		}
 		var info TaskInfo
-		if json.Unmarshal(data, &info) != nil || info.ID == "" {
+		if json.Unmarshal(data, &info) != nil || !validTaskID(info.ID) {
 			continue
 		}
 		if info.State == "running" {
@@ -79,6 +79,12 @@ func processExists(pid int) bool {
 }
 
 func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := m.engine.checkContext(ctx); err != nil {
+		return TaskInfo{}, err
+	}
 	if !m.engine.cfg.AllowExec {
 		return TaskInfo{}, errors.New("shell execution is disabled; start the agent with --allow-exec")
 	}
@@ -90,11 +96,6 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	}
 	if len(in.Name) > 256 {
 		return TaskInfo{}, errors.New("task name is too large (maximum 256 bytes)")
-	}
-	select {
-	case <-ctx.Done():
-		return TaskInfo{}, ctx.Err()
-	default:
 	}
 	cwd, err := m.engine.ResolvePath(in.Cwd)
 	if err != nil {
@@ -116,6 +117,9 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 			<-m.slots
 		}
 	}()
+	if err := m.engine.checkContext(ctx); err != nil {
+		return TaskInfo{}, err
+	}
 	id := protocol.NewID()
 	logPath := filepath.Join(m.dir, id+".log")
 	tempDir := ""
@@ -151,13 +155,11 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 		cmd.Env = setEnv(cmd.Env, "TMP", tempDir)
 		cmd.Env = setEnv(cmd.Env, "TEMP", tempDir)
 	}
-	select {
-	case <-ctx.Done():
+	if err := m.engine.checkContext(ctx); err != nil {
 		_ = logFile.Close()
 		_ = os.Remove(logPath)
 		cleanupTemp()
-		return TaskInfo{}, ctx.Err()
-	default:
+		return TaskInfo{}, err
 	}
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -166,11 +168,14 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 		cleanupTemp()
 		return TaskInfo{}, fmt.Errorf("start PTY: %w", err)
 	}
-	if err := ctx.Err(); err != nil {
+	killStartedProcess := func() {
 		pid := cmd.Process.Pid
 		if killErr := syscall.Kill(-pid, syscall.SIGKILL); killErr != nil {
 			_ = cmd.Process.Kill()
 		}
+	}
+	if err := m.engine.checkContext(ctx); err != nil {
+		killStartedProcess()
 		_ = ptmx.Close()
 		_ = logFile.Close()
 		_ = os.Remove(logPath)
@@ -203,6 +208,10 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	}()
 	releaseSlot = false
 	go m.waitTask(task, cmd, logFile)
+	if err := m.engine.checkContext(ctx); err != nil {
+		killStartedProcess()
+		return TaskInfo{}, err
+	}
 	return info, nil
 }
 
@@ -262,6 +271,16 @@ func (m *TaskManager) getInfo(id string) (TaskInfo, bool) {
 }
 
 func (m *TaskManager) Read(in ReadTaskInput) (ReadTaskOutput, error) {
+	return m.readContext(context.Background(), in)
+}
+
+func (m *TaskManager) readContext(ctx context.Context, in ReadTaskInput) (ReadTaskOutput, error) {
+	if err := m.engine.checkContext(ctx); err != nil {
+		return ReadTaskOutput{}, err
+	}
+	if !validTaskID(in.TaskID) {
+		return ReadTaskOutput{}, errors.New("invalid task ID")
+	}
 	info, ok := m.getInfo(in.TaskID)
 	if !ok {
 		return ReadTaskOutput{}, fmt.Errorf("unknown task %q", in.TaskID)
@@ -281,6 +300,9 @@ func (m *TaskManager) Read(in ReadTaskInput) (ReadTaskOutput, error) {
 		return ReadTaskOutput{}, err
 	}
 	defer file.Close()
+	if err := m.engine.checkContext(ctx); err != nil {
+		return ReadTaskOutput{}, err
+	}
 	stat, err := file.Stat()
 	if err != nil {
 		return ReadTaskOutput{}, err
@@ -296,6 +318,9 @@ func (m *TaskManager) Read(in ReadTaskInput) (ReadTaskOutput, error) {
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
 		return ReadTaskOutput{}, readErr
 	}
+	if err := m.engine.checkContext(ctx); err != nil {
+		return ReadTaskOutput{}, err
+	}
 	next := in.Offset + int64(n)
 	stat, _ = file.Stat()
 	finished := info.State != "running" && info.State != "orphaned_running"
@@ -306,6 +331,16 @@ func (m *TaskManager) Read(in ReadTaskInput) (ReadTaskOutput, error) {
 }
 
 func (m *TaskManager) Send(in SendTaskInput) error {
+	return m.sendContext(context.Background(), in)
+}
+
+func (m *TaskManager) sendContext(ctx context.Context, in SendTaskInput) error {
+	if err := m.engine.checkContext(ctx); err != nil {
+		return err
+	}
+	if !validTaskID(in.TaskID) {
+		return errors.New("invalid task ID")
+	}
 	if len(in.Input) > 1024*1024 {
 		return errors.New("task input is too large (maximum 1 MiB)")
 	}
@@ -318,6 +353,9 @@ func (m *TaskManager) Send(in SendTaskInput) error {
 	task.mu.RLock()
 	ptmx := task.pty
 	task.mu.RUnlock()
+	if err := m.engine.checkContext(ctx); err != nil {
+		return err
+	}
 	_, err := ptmx.Write([]byte(in.Input))
 	return err
 }
@@ -346,6 +384,16 @@ func (m *TaskManager) StopAll(sig syscall.Signal) {
 }
 
 func (m *TaskManager) Stop(in StopTaskInput) error {
+	return m.stopContext(context.Background(), in)
+}
+
+func (m *TaskManager) stopContext(ctx context.Context, in StopTaskInput) error {
+	if err := m.engine.checkContext(ctx); err != nil {
+		return err
+	}
+	if !validTaskID(in.TaskID) {
+		return errors.New("invalid task ID")
+	}
 	m.mu.RLock()
 	task := m.tasks[in.TaskID]
 	m.mu.RUnlock()
@@ -368,6 +416,9 @@ func (m *TaskManager) Stop(in StopTaskInput) error {
 		sig = syscall.SIGKILL
 	default:
 		return fmt.Errorf("unsupported signal %q", in.Signal)
+	}
+	if err := m.engine.checkContext(ctx); err != nil {
+		return err
 	}
 	if err := syscall.Kill(-pid, sig); err == nil {
 		return nil
@@ -511,6 +562,9 @@ func (w *cappedLogWriter) Write(p []byte) (int, error) {
 }
 
 func (m *TaskManager) Wait(ctx context.Context, in WaitTaskInput) (ReadTaskOutput, error) {
+	if err := m.engine.checkContext(ctx); err != nil {
+		return ReadTaskOutput{}, err
+	}
 	timeout := in.TimeoutMS
 	if timeout <= 0 {
 		timeout = 15000
@@ -524,7 +578,7 @@ func (m *TaskManager) Wait(ctx context.Context, in WaitTaskInput) (ReadTaskOutpu
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		out, err := m.Read(readIn)
+		out, err := m.readContext(ctx, readIn)
 		if err != nil {
 			return ReadTaskOutput{}, err
 		}
@@ -539,4 +593,9 @@ func (m *TaskManager) Wait(ctx context.Context, in WaitTaskInput) (ReadTaskOutpu
 		case <-ticker.C:
 		}
 	}
+}
+
+func validTaskID(id string) bool {
+	canonical, ok := protocol.NormalizeDeviceID(id)
+	return ok && canonical == id
 }

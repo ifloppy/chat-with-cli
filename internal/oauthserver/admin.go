@@ -205,7 +205,7 @@ func (s *Server) handleAdminReauthPOST(w http.ResponseWriter, r *http.Request) {
 	snapshot := s.snapshotMutableStateLocked()
 	handle := tokenKey(cookie.Value)
 	record, exists := s.sessions[handle]
-	if !exists || record.UserID != current.ID {
+	if !exists || record.UserID != current.ID || !s.liveAdminLocked(current) || verified.PasswordHash != current.PasswordHash {
 		s.mu.Unlock()
 		http.Error(w, "administrator session expired", http.StatusUnauthorized)
 		return
@@ -450,8 +450,9 @@ func adminSessionFresh(s *Server, r *http.Request) bool {
 	}
 	s.mu.Lock()
 	record := s.sessions[tokenKey(cookie.Value)]
+	user, userExists := s.users[record.UserID]
 	s.mu.Unlock()
-	if record.LastReauthAt <= 0 {
+	if !userExists || user.ID != record.UserID || user.Disabled || !user.Admin || record.Expires <= time.Now().Unix() || record.LastReauthAt <= 0 {
 		return false
 	}
 	age := time.Since(time.Unix(record.LastReauthAt, 0))
@@ -491,6 +492,12 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 	if action == "create-user" {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if !s.liveAdminLocked(current) {
+			if s.persistenceFault {
+				return errPersistenceRecoveryOnly
+			}
+			return errInvalidAdminAction
+		}
 		if s.persistenceFault {
 			return errPersistenceRecoveryOnly
 		}
@@ -512,6 +519,12 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if !s.liveAdminLocked(current) {
+			if s.persistenceFault {
+				return errPersistenceRecoveryOnly
+			}
+			return errInvalidAdminAction
+		}
 		recovering := s.persistenceFault
 		if recovering && !persistenceRecoveryActionAllowed(action, value) {
 			return errPersistenceRecoveryOnly
@@ -537,6 +550,12 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.liveAdminLocked(current) {
+		if s.persistenceFault {
+			return errPersistenceRecoveryOnly
+		}
+		return errInvalidAdminAction
+	}
 	recovering := s.persistenceFault
 	if recovering && !persistenceRecoveryActionAllowed(action, value) {
 		return errPersistenceRecoveryOnly
@@ -646,23 +665,34 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		if _, exists := s.users[target]; !exists {
 			return errUnknownUser
 		}
-		s.resetOwnedAgentSessionsLocked(target)
 		delete(s.users, target)
 		for normalized, id := range s.usernames {
 			if id == target {
 				delete(s.usernames, normalized)
 			}
 		}
+		ownedDevices := make(map[string]struct{})
 		for device, owner := range s.devices {
 			if owner == target {
-				// Deleting an account must not make its old device identities
-				// claimable by whoever still holds a device private key.
-				s.retiredDevices[device] = true
-				s.revokeDeviceClientsLocked(device)
-				delete(s.devices, device)
-				delete(s.disabledDevices, device)
-				delete(s.deviceRecords, device)
+				ownedDevices[device] = struct{}{}
 			}
+		}
+		for device, record := range s.deviceRecords {
+			if record.OwnerID == target {
+				ownedDevices[device] = struct{}{}
+			}
+		}
+		for device := range ownedDevices {
+			// Deleting an account must not make its old device identities
+			// claimable by whoever still holds a device private key. Include
+			// orphaned device records left by an older or interrupted mutation.
+			s.agentSessionResetterSafe(device)
+			s.retiredDevices[device] = true
+			s.revokeDeviceTokensLocked(device)
+			s.revokeDeviceClientsLocked(device)
+			delete(s.devices, device)
+			delete(s.disabledDevices, device)
+			delete(s.deviceRecords, device)
 		}
 		s.revokeUserCredentialsLocked(target)
 	case "logout-user":
@@ -779,6 +809,11 @@ func (s *Server) deleteUserSessionsLocked(userID string) {
 			delete(s.sessions, key)
 		}
 	}
+}
+
+func (s *Server) liveAdminLocked(current User) bool {
+	live, exists := s.users[current.ID]
+	return exists && live.ID == current.ID && live.Admin && !live.Disabled && current.PasswordHash != "" && live.PasswordHash == current.PasswordHash
 }
 
 func (s *Server) revokeClientLocked(clientID string) {
