@@ -199,6 +199,7 @@ func (s *Server) handleAdminReauthPOST(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "administrator session expired", http.StatusUnauthorized)
 		return
 	}
+	newSession := randomToken(32)
 	s.mu.Lock()
 	recovering := s.persistenceFault
 	snapshot := s.snapshotMutableStateLocked()
@@ -209,8 +210,11 @@ func (s *Server) handleAdminReauthPOST(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "administrator session expired", http.StatusUnauthorized)
 		return
 	}
-	record.LastReauthAt = time.Now().Unix()
-	s.sessions[handle] = record
+	now := time.Now().Unix()
+	delete(s.sessions, handle)
+	record.LastSeenAt = now
+	record.LastReauthAt = now
+	s.sessions[tokenKey(newSession)] = record
 	s.recordSecurityLocked(SecurityEvent{Event: "admin_reauth", User: current.Username, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
 	if recovering {
 		// Fresh authentication is kept process-local during recovery. It may
@@ -225,6 +229,7 @@ func (s *Server) handleAdminReauthPOST(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to persist re-authentication", http.StatusServiceUnavailable)
 		return
 	}
+	s.setSessionCookie(w, newSession)
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 

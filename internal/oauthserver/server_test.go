@@ -753,7 +753,7 @@ func TestDisableActionsAreIdempotentAndFailSafe(t *testing.T) {
 	}
 }
 
-func TestAdminReauthenticationRefreshesOnlyCurrentSession(t *testing.T) {
+func TestAdminReauthenticationRotatesAndRefreshesOnlyCurrentSession(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:19030", Password: "admin-reauth-password-12345", StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -834,10 +834,74 @@ func TestAdminReauthenticationRefreshesOnlyCurrentSession(t *testing.T) {
 	if reauthRR.Code != http.StatusSeeOther || reauthRR.Header().Get("Location") != "/admin" {
 		t.Fatalf("reauth failed: status=%d location=%q body=%s", reauthRR.Code, reauthRR.Header().Get("Location"), reauthRR.Body.String())
 	}
+	rotatedSession := ""
+	for _, cookie := range reauthRR.Result().Cookies() {
+		if cookie.Name == sessionCookie && cookie.Value != "" {
+			rotatedSession = cookie.Value
+		}
+	}
+	if rotatedSession == "" || rotatedSession == session {
+		t.Fatalf("successful re-authentication did not rotate the administrator session: old=%q new=%q", shortHandle(tokenKey(session)), shortHandle(tokenKey(rotatedSession)))
+	}
+	stolenReq := httptest.NewRequest(http.MethodGet, s.absolute("/admin"), nil)
+	stolenReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	if adminSessionFresh(s, stolenReq) {
+		t.Fatal("pre-reauth session clone inherited fresh administrator authority")
+	}
+	if _, ok := s.sessionUser(stolenReq); ok {
+		t.Fatal("pre-reauth session remained authenticated after session rotation")
+	}
 	freshReq := httptest.NewRequest(http.MethodGet, s.absolute("/admin"), nil)
-	freshReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	freshReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: rotatedSession})
 	if !adminSessionFresh(s, freshReq) {
-		t.Fatal("successful re-authentication did not refresh the current session")
+		t.Fatal("rotated administrator session was not marked freshly authenticated")
+	}
+}
+
+func TestAdminReauthRotationRollsBackOnPersistenceFailure(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19031", Password: "reauth-rollback-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerID := s.usernames["owner"]
+	session, err := s.createSession(ownerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := tokenKey(session)
+	s.mu.Lock()
+	record := s.sessions[handle]
+	record.LastReauthAt = time.Now().Add(-time.Hour).Unix()
+	s.sessions[handle] = record
+	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+
+	forceOAuthPersistenceFailure(t, s)
+	csrf := "reauth-rollback-csrf"
+	form := url.Values{"csrf_token": {csrf}, "password": {"reauth-rollback-password-12345"}}
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/admin/reauth"), strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	req.AddCookie(&http.Cookie{Name: adminCSRFCookie, Value: csrf})
+	rr := httptest.NewRecorder()
+	s.handleAdminReauthPOST(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("reauth persistence failure status=%d want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == sessionCookie && cookie.Value != "" && cookie.Value != session {
+			t.Fatal("failed re-authentication emitted a rotated administrator session")
+		}
+	}
+	s.mu.Lock()
+	rolledBack, oldExists := s.sessions[handle]
+	sessionCount := len(s.sessions)
+	s.mu.Unlock()
+	if !oldExists || sessionCount != 1 || rolledBack.LastReauthAt != record.LastReauthAt {
+		t.Fatalf("failed re-authentication did not roll back session atomically: old=%v sessions=%d last_reauth=%d want=%d", oldExists, sessionCount, rolledBack.LastReauthAt, record.LastReauthAt)
 	}
 }
 
