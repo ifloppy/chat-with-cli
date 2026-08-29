@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -355,6 +356,31 @@ func envBool(name string) bool {
 	}
 }
 
+func relayStreamableHTTPOptions(listen, publicURL string) *mcp.StreamableHTTPOptions {
+	opts := &mcp.StreamableHTTPOptions{Stateless: true}
+	listenHost, _, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return opts
+	}
+	listenIP := net.ParseIP(strings.Trim(listenHost, "[]"))
+	listenLoopback := strings.EqualFold(listenHost, "localhost") || (listenIP != nil && listenIP.IsLoopback())
+	public, err := url.Parse(strings.TrimSpace(publicURL))
+	if err != nil || public.Hostname() == "" {
+		return opts
+	}
+	publicHost := public.Hostname()
+	publicIP := net.ParseIP(publicHost)
+	publicLoopback := strings.EqualFold(publicHost, "localhost") || (publicIP != nil && publicIP.IsLoopback())
+	// A loopback listener paired with a non-loopback public URL is the explicit
+	// reverse-proxy topology supported by Relay. The SDK's automatic localhost
+	// DNS-rebinding check otherwise rejects the proxy-preserved public Host.
+	// Direct/local MCP serving paths keep the SDK default protection.
+	if listenLoopback && !publicLoopback {
+		opts.DisableLocalhostProtection = true
+	}
+	return opts
+}
+
 func mcpDiagnosticHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.Body == nil {
@@ -678,7 +704,7 @@ func runRelay(args []string) error {
 			return nil
 		}
 		return mcpserver.New(relay.RemoteCaller{Broker: broker, Device: device})
-	}, &mcp.StreamableHTTPOptions{Stateless: true})
+	}, relayStreamableHTTPOptions(*listen, *publicURL))
 	pathHandler = maxRequestBody(8<<20, pathHandler)
 	var legacyHandler http.Handler = mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		device := strings.TrimSpace(r.URL.Query().Get("device"))
@@ -686,7 +712,7 @@ func runRelay(args []string) error {
 			return nil
 		}
 		return mcpserver.New(relay.RemoteCaller{Broker: broker, Device: device})
-	}, &mcp.StreamableHTTPOptions{Stateless: true})
+	}, relayStreamableHTTPOptions(*listen, *publicURL))
 	legacyHandler = maxRequestBody(8<<20, legacyHandler)
 	if envBool("CHAT_WITH_CLI_MCP_DIAGNOSTICS") {
 		pathHandler = mcpDiagnosticHandler(pathHandler)

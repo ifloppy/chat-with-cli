@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestDiagnosticErrorRedactionDoesNotEchoSecrets(t *testing.T) {
@@ -173,6 +175,60 @@ func TestApprovalCategoryCoversSensitiveMethods(t *testing.T) {
 	for method, want := range cases {
 		if got := approvalCategory(method); got != want {
 			t.Fatalf("%s category=%q want %q", method, got, want)
+		}
+	}
+}
+
+func TestRelayStreamableHandlerAllowsReverseProxyHostOnLoopback(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "relay-test", Version: "test"}, nil)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, relayStreamableHTTPOptions("127.0.0.1:18776", "https://chat-with-cli.example"))
+	body := `{"jsonrpc":"2.0","id":"discover","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"chatgpt-test","version":"test"},"io.modelcontextprotocol/clientCapabilities":{}}}}`
+	req := httptest.NewRequest(http.MethodPost, "https://chat-with-cli.example/mcp/id/0123456789abcdef0123456789abcdef", strings.NewReader(body))
+	req.Host = "chat-with-cli.example"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "server/discover")
+	req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 18776}))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("reverse-proxied Relay request was rejected by localhost protection: %s", rr.Body.String())
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("server/discover status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDefaultStreamableHandlerStillRejectsPublicHostOnLoopback(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "local-test", Version: "test"}, nil)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true})
+	body := `{"jsonrpc":"2.0","id":"discover","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"chatgpt-test","version":"test"},"io.modelcontextprotocol/clientCapabilities":{}}}}`
+	req := httptest.NewRequest(http.MethodPost, "https://attacker.example/mcp", strings.NewReader(body))
+	req.Host = "attacker.example"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "server/discover")
+	req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 18776}))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("default localhost protection status=%d, want 403", rr.Code)
+	}
+}
+
+func TestRelayStreamableOptionsOnlyRelaxExplicitReverseProxyTopology(t *testing.T) {
+	if !relayStreamableHTTPOptions("127.0.0.1:18776", "https://chat-with-cli.example").DisableLocalhostProtection {
+		t.Fatal("loopback Relay behind public reverse proxy did not relax SDK localhost protection")
+	}
+	for _, tc := range []struct{ listen, public string }{
+		{"127.0.0.1:18776", "http://127.0.0.1:18776"},
+		{"0.0.0.0:18776", "https://chat-with-cli.example"},
+		{"[::]:18776", "https://chat-with-cli.example"},
+	} {
+		if relayStreamableHTTPOptions(tc.listen, tc.public).DisableLocalhostProtection {
+			t.Fatalf("unexpected localhost-protection relaxation for listen=%q public=%q", tc.listen, tc.public)
 		}
 	}
 }
