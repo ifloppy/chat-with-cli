@@ -1019,6 +1019,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusInternalServerError, "server_error", "failed to persist client registration")
 		return
 	}
+	registeredScope := "mcp offline_access"
+	if client.DeviceKeyVerified {
+		registeredScope = "agent:connect offline_access"
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id": clientID, "client_id_issued_at": client.IssuedAt, "client_name": client.Name,
 		"redirect_uris": client.RedirectURIs, "token_endpoint_auth_method": "none",
@@ -1026,7 +1030,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"chat_with_cli_device_public_key":   client.DevicePublicKey,
 		"chat_with_cli_device_key_verified": client.DeviceKeyVerified,
 		"grant_types":                       []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
-		"scope": "mcp agent:connect offline_access",
+		"scope": registeredScope,
 	})
 }
 
@@ -1157,7 +1161,7 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth authorization request is too large or has invalid PKCE parameters")
 		return
 	}
-	kind, _, resource, ok := s.resourceParts(q.Get("resource"))
+	kind, device, resource, ok := s.resourceParts(q.Get("resource"))
 	if !ok {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth resource must be a local /mcp/<device> or /agent/<device> URL")
 		return
@@ -1177,6 +1181,14 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		s.oauthPageError(w, http.StatusBadRequest, "unknown client or redirect URI")
 		return
+	}
+	if client.DeviceKeyVerified || client.DeviceID != "" || client.DevicePublicKey != "" {
+		expected := "id/" + client.DeviceID
+		if !client.DeviceKeyVerified || client.DeviceID == "" || client.DevicePublicKey == "" || kind != "agent" || device != expected {
+			s.mu.Unlock()
+			s.oauthPageError(w, http.StatusForbidden, "this device-bound OAuth client may only authorize its exact Agent resource")
+			return
+		}
 	}
 	if len(s.pending) >= maxPendingAuth {
 		s.mu.Unlock()

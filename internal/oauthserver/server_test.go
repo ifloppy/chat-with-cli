@@ -2438,6 +2438,10 @@ func TestRevokedCryptographicDeviceCannotBeReclaimedAndPersists(t *testing.T) {
 		s.mu.Unlock()
 		t.Fatal("revoked device was not permanently retired")
 	}
+	if _, exists := s.clients["retire-client"]; exists {
+		s.mu.Unlock()
+		t.Fatal("permanent device revocation left its cryptographically bound OAuth client registered")
+	}
 	attacker, err := s.createUserLocked("attacker", "attacker-password-12345")
 	if err != nil {
 		s.mu.Unlock()
@@ -2494,11 +2498,12 @@ func TestDeletingUserRetiresOwnedCryptographicDevices(t *testing.T) {
 	s.mu.Lock()
 	retired := s.retiredDevices[route]
 	_, stillOwned := s.devices[route]
+	_, oldClientPresent := s.clients["victim-device-client"]
 	s.clients["reclaim-client"] = Client{ID: "reclaim-client", DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
 	err = s.authorizeResourceLocked(ownerID, "reclaim-client", resource)
 	s.mu.Unlock()
-	if !retired || stillOwned {
-		t.Fatalf("deleted user's device retirement state wrong: retired=%v stillOwned=%v", retired, stillOwned)
+	if !retired || stillOwned || oldClientPresent {
+		t.Fatalf("deleted user's device retirement state wrong: retired=%v stillOwned=%v oldClientPresent=%v", retired, stillOwned, oldClientPresent)
 	}
 	if err == nil {
 		t.Fatal("deleted user's retired device identity was reclaimable")
@@ -2614,5 +2619,43 @@ func TestRegistrationChallengeEndpointRejectsRetiredIdentity(t *testing.T) {
 	s.handleRegistrationChallenge(rr, req)
 	if rr.Code != http.StatusGone {
 		t.Fatalf("retired identity challenge status=%d want 410 body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDeviceBoundOAuthClientCannotRequestMCPOrAnotherAgent(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19142", Password: "client-bound-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := deviceidentity.Generate()
+	other, _ := deviceidentity.Generate()
+	const redirect = "http://127.0.0.1:45126/callback"
+	s.mu.Lock()
+	s.clients["device-bound-client"] = Client{
+		ID: "device-bound-client", Name: "chat-with-cli agent bound", RedirectURIs: []string{redirect}, IssuedAt: time.Now().Unix(),
+		DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true,
+	}
+	s.mu.Unlock()
+	authorize := func(resource, scope string) *httptest.ResponseRecorder {
+		t.Helper()
+		q := url.Values{
+			"response_type": {"code"}, "client_id": {"device-bound-client"}, "redirect_uri": {redirect},
+			"code_challenge": {strings.Repeat("a", 43)}, "code_challenge_method": {"S256"},
+			"resource": {resource}, "scope": {scope}, "state": {"state"},
+		}
+		req := httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize")+"?"+q.Encode(), nil)
+		rr := httptest.NewRecorder()
+		s.handleAuthorizeGET(rr, req)
+		return rr
+	}
+	exactAgent := s.absolute("/agent/id/" + identity.ID())
+	if rr := authorize(exactAgent, "agent:connect offline_access"); rr.Code != http.StatusOK {
+		t.Fatalf("device-bound client exact Agent authorization status=%d want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := authorize(s.absolute("/mcp/id/"+identity.ID()), "mcp offline_access"); rr.Code != http.StatusForbidden {
+		t.Fatalf("device-bound client obtained MCP authorization page: status=%d want 403 body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := authorize(s.absolute("/agent/id/"+other.ID()), "agent:connect offline_access"); rr.Code != http.StatusForbidden {
+		t.Fatalf("device-bound client targeted another Agent: status=%d want 403 body=%s", rr.Code, rr.Body.String())
 	}
 }

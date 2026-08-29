@@ -567,6 +567,7 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		delete(s.disabledDevices, target)
 		delete(s.deviceRecords, target)
 		s.revokeDeviceTokensLocked(target)
+		s.revokeDeviceClientsLocked(target)
 	case "rename-device":
 		if !validateDeviceRoute(target) || !validateDeviceDisplayName(value) {
 			return errInvalidAdminAction
@@ -612,6 +613,7 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 				// Deleting an account must not make its old device identities
 				// claimable by whoever still holds a device private key.
 				s.retiredDevices[device] = true
+				s.revokeDeviceClientsLocked(device)
 				delete(s.devices, device)
 				delete(s.disabledDevices, device)
 				delete(s.deviceRecords, device)
@@ -640,42 +642,7 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		if _, exists := s.clients[target]; !exists {
 			return errUnknownClient
 		}
-		for _, record := range s.access {
-			if record.ClientID == target {
-				s.resetAgentSessionForResourceLocked(record.Resource)
-			}
-		}
-		for _, record := range s.refresh {
-			if record.ClientID == target {
-				s.resetAgentSessionForResourceLocked(record.Resource)
-			}
-		}
-		delete(s.clients, target)
-		for key, record := range s.access {
-			if record.ClientID == target {
-				delete(s.access, key)
-			}
-		}
-		for key, record := range s.refresh {
-			if record.ClientID == target {
-				delete(s.refresh, key)
-			}
-		}
-		for key, record := range s.refreshUsed {
-			if record.ClientID == target {
-				delete(s.refreshUsed, key)
-			}
-		}
-		for key, pending := range s.pending {
-			if pending.ClientID == target {
-				delete(s.pending, key)
-			}
-		}
-		for key, code := range s.codes {
-			if code.ClientID == target {
-				delete(s.codes, key)
-			}
-		}
+		s.revokeClientLocked(target)
 	case "revoke-token":
 		if !validOpaqueHandle(target) {
 			return errUnknownToken
@@ -762,6 +729,57 @@ func (s *Server) deleteUserSessionsLocked(userID string) {
 	for key, record := range s.sessions {
 		if record.UserID == userID {
 			delete(s.sessions, key)
+		}
+	}
+}
+
+func (s *Server) revokeClientLocked(clientID string) {
+	for _, record := range s.access {
+		if record.ClientID == clientID {
+			s.resetAgentSessionForResourceLocked(record.Resource)
+		}
+	}
+	for _, record := range s.refresh {
+		if record.ClientID == clientID {
+			s.resetAgentSessionForResourceLocked(record.Resource)
+		}
+	}
+	delete(s.clients, clientID)
+	for key, record := range s.access {
+		if record.ClientID == clientID {
+			delete(s.access, key)
+		}
+	}
+	for key, record := range s.refresh {
+		if record.ClientID == clientID {
+			delete(s.refresh, key)
+		}
+	}
+	for key, record := range s.refreshUsed {
+		if record.ClientID == clientID {
+			delete(s.refreshUsed, key)
+		}
+	}
+	for key, pending := range s.pending {
+		if pending.ClientID == clientID {
+			delete(s.pending, key)
+		}
+	}
+	for key, code := range s.codes {
+		if code.ClientID == clientID {
+			delete(s.codes, key)
+		}
+	}
+}
+
+func (s *Server) revokeDeviceClientsLocked(device string) {
+	if !strings.HasPrefix(device, "id/") {
+		return
+	}
+	deviceID := strings.TrimPrefix(device, "id/")
+	for clientID, client := range s.clients {
+		if client.DeviceKeyVerified && client.DeviceID == deviceID {
+			s.revokeClientLocked(clientID)
 		}
 	}
 }
