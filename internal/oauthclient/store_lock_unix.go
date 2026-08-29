@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 // withCredentialStoreLock serializes credential reads, refresh-token rotation,
@@ -31,15 +33,28 @@ func withCredentialStoreLock(path string, fn func() error) error {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("credential store lock must be a regular file")
 		}
+		if err := securefile.CheckSingleLink(info, "credential store lock"); err != nil {
+			return err
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := securefile.Open(lockPath, os.O_CREATE|os.O_RDWR, 0o600, "credential store lock")
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
 	if err := lock.Chmod(0o600); err != nil {
+		return err
+	}
+	info, err := lock.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("credential store lock must be a regular file")
+	}
+	if err := securefile.CheckSingleLink(info, "credential store lock"); err != nil {
 		return err
 	}
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {

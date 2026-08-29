@@ -31,6 +31,7 @@ import (
 	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 	"github.com/ifloppy/chat-with-cli/internal/relay"
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -473,7 +474,10 @@ func readPrivateCredential(path string) (string, error) {
 	if info.Mode().Perm()&0o077 != 0 {
 		return "", errors.New("credential file permissions must not grant group or other access")
 	}
-	data, err := os.ReadFile(path)
+	if err := securefile.CheckSingleLink(info, "credential file"); err != nil {
+		return "", err
+	}
+	data, err := securefile.Read(path, "credential file")
 	if err != nil {
 		return "", err
 	}
@@ -484,8 +488,13 @@ func writePrivateCredential(path, value string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("credential path must not be a symlink: %s", path)
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("credential path must be a regular file, not a symlink")
+		}
+		if err := securefile.CheckSingleLink(info, "credential file"); err != nil {
+			return err
+		}
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}

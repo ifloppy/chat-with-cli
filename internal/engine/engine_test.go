@@ -40,6 +40,45 @@ func TestFilesystemWritesAreOptIn(t *testing.T) {
 	}
 }
 
+func TestCheckpointReadRejectsSymlinkAndHardlink(t *testing.T) {
+	eng := testEngine(t, false)
+	workspace, checkpoint := "", ""
+	var err error
+	workspace, checkpoint, err = eng.checkpointPath(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace == "" {
+		t.Fatal("checkpoint workspace is empty")
+	}
+	outside := filepath.Join(t.TempDir(), "secret.md")
+	if err := os.WriteFile(outside, []byte("private checkpoint material"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Symlink(outside, checkpoint); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skip("symlinks are unavailable")
+		}
+		t.Fatal(err)
+	}
+	if _, err := eng.ReadCheckpoint(CheckpointReadInput{Workspace: "."}); err == nil {
+		t.Fatal("checkpoint_read followed a private-state symlink")
+	}
+	if err := os.Remove(checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(outside, checkpoint); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skip("hardlinks are unavailable")
+		}
+		t.Fatal(err)
+	}
+	if _, err := eng.ReadCheckpoint(CheckpointReadInput{Workspace: "."}); err == nil {
+		t.Fatal("checkpoint_read accepted a hardlinked private-state file")
+	}
+}
+
 func TestEngineRejectsSymlinkedStateDirectory(t *testing.T) {
 	target := t.TempDir()
 	link := filepath.Join(t.TempDir(), "state")

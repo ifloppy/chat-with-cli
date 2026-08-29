@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 // Values is the intentionally small, dependency-free TOML subset used by the
@@ -27,7 +29,10 @@ func Load(path string) (Values, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("configuration path must be a regular file")
 	}
-	data, err := os.Open(path)
+	if err := securefile.CheckSingleLink(info, "configuration file"); err != nil {
+		return nil, err
+	}
+	data, err := securefile.Open(path, os.O_RDONLY, 0, "configuration file")
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +161,9 @@ func Write(path string, values map[string]any) error {
 		}
 		if !info.Mode().IsRegular() {
 			return errors.New("configuration path must be a regular file")
+		}
+		if err := securefile.CheckSingleLink(info, "configuration file"); err != nil {
+			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

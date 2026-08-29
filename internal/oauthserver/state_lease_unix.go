@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 type stateLease struct {
@@ -16,16 +18,37 @@ type stateLease struct {
 
 func acquireStateLease(stateDir string) (*stateLease, error) {
 	path := filepath.Join(stateDir, "oauth-state.lease")
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("OAuth state lease must not be a symlink")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("OAuth state lease must not be a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("OAuth state lease must be a regular file")
+		}
+		if err := securefile.CheckSingleLink(info, "OAuth state lease"); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := securefile.Open(path, os.O_CREATE|os.O_RDWR, 0o600, "OAuth state lease")
 	if err != nil {
 		return nil, err
 	}
 	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, errors.New("OAuth state lease must be a regular file")
+	}
+	if err := securefile.CheckSingleLink(info, "OAuth state lease"); err != nil {
 		_ = file.Close()
 		return nil, err
 	}

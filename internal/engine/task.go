@@ -18,6 +18,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 type TaskManager struct {
@@ -52,7 +53,11 @@ func NewTaskManager(engine *Engine, dir string) *TaskManager {
 func (m *TaskManager) loadHistory() {
 	matches, _ := filepath.Glob(filepath.Join(m.dir, "*.json"))
 	for _, path := range matches {
-		data, err := os.ReadFile(path)
+		fileInfo, err := os.Lstat(path)
+		if err != nil || fileInfo.Mode()&os.ModeSymlink != 0 || !fileInfo.Mode().IsRegular() || securefile.CheckSingleLink(fileInfo, "task history") != nil {
+			continue
+		}
+		data, err := securefile.Read(path, "task history")
 		if err != nil {
 			continue
 		}
@@ -138,6 +143,18 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	if err != nil {
 		cleanupTemp()
 		return TaskInfo{}, err
+	}
+	if info, statErr := logFile.Stat(); statErr != nil || !info.Mode().IsRegular() {
+		_ = logFile.Close()
+		cleanupTemp()
+		if statErr != nil {
+			return TaskInfo{}, statErr
+		}
+		return TaskInfo{}, errors.New("task log must be a regular file")
+	} else if linkErr := securefile.CheckSingleLink(info, "task log"); linkErr != nil {
+		_ = logFile.Close()
+		cleanupTemp()
+		return TaskInfo{}, linkErr
 	}
 	cmd, err := m.engine.command(in.Command, cwd, tempDir)
 	if err != nil {
@@ -295,7 +312,7 @@ func (m *TaskManager) readContext(ctx context.Context, in ReadTaskInput) (ReadTa
 	if limit > m.engine.cfg.MaxReadBytes {
 		limit = m.engine.cfg.MaxReadBytes
 	}
-	file, err := os.Open(filepath.Join(m.dir, in.TaskID+".log"))
+	file, err := securefile.Open(filepath.Join(m.dir, in.TaskID+".log"), os.O_RDONLY, 0, "task log")
 	if err != nil {
 		return ReadTaskOutput{}, err
 	}
@@ -305,6 +322,12 @@ func (m *TaskManager) readContext(ctx context.Context, in ReadTaskInput) (ReadTa
 	}
 	stat, err := file.Stat()
 	if err != nil {
+		return ReadTaskOutput{}, err
+	}
+	if !stat.Mode().IsRegular() {
+		return ReadTaskOutput{}, errors.New("task log must be a regular file")
+	}
+	if err := securefile.CheckSingleLink(stat, "task log"); err != nil {
 		return ReadTaskOutput{}, err
 	}
 	if in.Offset > stat.Size() {
@@ -562,6 +585,9 @@ func (w *cappedLogWriter) Write(p []byte) (int, error) {
 }
 
 func (m *TaskManager) Wait(ctx context.Context, in WaitTaskInput) (ReadTaskOutput, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := m.engine.checkContext(ctx); err != nil {
 		return ReadTaskOutput{}, err
 	}

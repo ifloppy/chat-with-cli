@@ -1297,6 +1297,105 @@ func TestAuthorizationGrantRollsBackDeviceClaimWhenPersistenceFails(t *testing.T
 	}
 }
 
+func TestDCRRegistrationRollsBackEvictionWhenPersistenceFails(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18924", Password: "rollback-dcr-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		clientName = "chat-with-cli agent rollback-registration"
+		redirect   = "http://127.0.0.1:43224/callback"
+	)
+	publicKey := deviceidentity.EncodePublicKey(identity.PublicKey())
+	challenge, err := s.issueRegistrationChallenge(identity.ID(), publicKey, clientName, redirect, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := identity.SignRegistrationProof(clientName, redirect, challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	s.mu.Lock()
+	s.clients["oldest-unapproved-client"] = Client{ID: "oldest-unapproved-client", IssuedAt: now.Add(-time.Minute).Unix()}
+	s.pending["oldest-client-pending"] = pendingAuth{
+		ClientID: "oldest-unapproved-client", RedirectURI: redirect,
+		Resource: s.absolute("/agent/id/" + identity.ID()), Scope: "agent:connect offline_access",
+		Expires: now.Add(time.Minute),
+	}
+	for i := 0; len(s.clients) < maxClients; i++ {
+		id := fmt.Sprintf("dcr-capacity-approved-%d", i)
+		s.clients[id] = Client{ID: id, Approved: true, IssuedAt: now.Unix()}
+	}
+	s.mu.Unlock()
+
+	body, err := json.Marshal(map[string]any{
+		"redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none",
+		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
+		"client_name": clientName, "scope": "agent:connect offline_access",
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": publicKey,
+		"chat_with_cli_device_challenge": challenge, "chat_with_cli_device_proof": proof,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forceOAuthPersistenceFailure(t, s)
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.handleRegister(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("DCR persistence failure status=%d want 500 body=%s", rr.Code, rr.Body.String())
+	}
+
+	s.mu.Lock()
+	_, oldClientPresent := s.clients["oldest-unapproved-client"]
+	_, pendingPresent := s.pending["oldest-client-pending"]
+	clientCount := len(s.clients)
+	newDeviceClient := false
+	for _, client := range s.clients {
+		if client.DeviceID == identity.ID() {
+			newDeviceClient = true
+			break
+		}
+	}
+	persistenceFault := s.persistenceFault
+	s.mu.Unlock()
+	if !oldClientPresent || !pendingPresent || clientCount != maxClients || newDeviceClient {
+		t.Fatalf("failed DCR transaction did not roll back client eviction/registration: old=%v pending=%v clients=%d new_device_client=%v", oldClientPresent, pendingPresent, clientCount, newDeviceClient)
+	}
+	if !persistenceFault {
+		t.Fatal("failed DCR persistence did not latch the fail-closed state")
+	}
+}
+
+func TestResourceOwnershipRejectsConflictingDeviceRecord(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18925", Password: "record-conflict-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	const route = "record-conflict-device"
+	resource := s.absolute("/mcp/" + route)
+	s.devices[route] = ownerID
+	s.deviceRecords[route] = DeviceRecord{ID: "record-conflict-record", OwnerID: "another-user"}
+	owned := s.resourceOwnedByUserLocked(ownerID, resource, "mcp")
+	unknownScope := s.resourceOwnedByUserLocked(ownerID, resource, "unexpected-scope")
+	s.mu.Unlock()
+	if owned {
+		t.Fatal("resource ownership ignored a conflicting immutable device record")
+	}
+	if unknownScope {
+		t.Fatal("resource ownership accepted an unknown required scope")
+	}
+}
+
 func TestCrossUserTokensCannotCrossDeviceOrScope(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:19020", StateDir: t.TempDir(), Mode: ModePublic, AllowLegacyUnboundAgents: true})
 	if err != nil {
@@ -2866,10 +2965,21 @@ func TestDeviceBoundOAuthClientCannotRequestMCPOrAnotherAgent(t *testing.T) {
 	s.mu.Unlock()
 	authorize := func(resource, scope string) *httptest.ResponseRecorder {
 		t.Helper()
+		codeChallenge := strings.Repeat("a", 43)
+		authorizationChallenge, err := s.issueAuthorizationChallenge("device-bound-client", redirect, resource, scope, "state", codeChallenge, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof, err := identity.SignAuthorizationProof("device-bound-client", redirect, resource, scope, "state", codeChallenge, authorizationChallenge)
+		if err != nil {
+			t.Fatal(err)
+		}
 		q := url.Values{
 			"response_type": {"code"}, "client_id": {"device-bound-client"}, "redirect_uri": {redirect},
-			"code_challenge": {strings.Repeat("a", 43)}, "code_challenge_method": {"S256"},
+			"code_challenge": {codeChallenge}, "code_challenge_method": {"S256"},
 			"resource": {resource}, "scope": {scope}, "state": {"state"},
+			"chat_with_cli_authorization_challenge": {authorizationChallenge},
+			"chat_with_cli_device_proof":            {proof},
 		}
 		req := httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize")+"?"+q.Encode(), nil)
 		rr := httptest.NewRecorder()
@@ -2888,6 +2998,147 @@ func TestDeviceBoundOAuthClientCannotRequestMCPOrAnotherAgent(t *testing.T) {
 	}
 	if rr := authorize(s.absolute("/agent/legacy-device-name"), "agent:connect offline_access"); rr.Code != http.StatusForbidden {
 		t.Fatalf("device-bound client fell back to a legacy Agent name route: status=%d want 403 body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthorizationChallengeIsBoundAndSingleUse(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19143", Password: "authorization-challenge-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		clientID    = "authorization-challenge-client"
+		redirectURI = "http://127.0.0.1:45143/callback"
+		state       = "authorization-state"
+	)
+	resource := s.absolute("/agent/id/" + identity.ID())
+	codeChallenge := strings.Repeat("b", 43)
+	s.mu.Lock()
+	s.clients[clientID] = Client{ID: clientID, RedirectURIs: []string{redirectURI}, IssuedAt: time.Now().Unix(), DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	s.mu.Unlock()
+
+	body, err := json.Marshal(authorizationChallengeRequest{ClientID: clientID, RedirectURI: redirectURI, Resource: resource, Scope: "agent:connect offline_access", State: state, CodeChallenge: codeChallenge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challengeReq := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/authorize/challenge"), bytes.NewReader(body))
+	challengeReq.Header.Set("Content-Type", "application/json")
+	challengeRR := httptest.NewRecorder()
+	s.handleAuthorizationChallenge(challengeRR, challengeReq)
+	if challengeRR.Code != http.StatusOK {
+		t.Fatalf("authorization challenge status=%d body=%s", challengeRR.Code, challengeRR.Body.String())
+	}
+	var challengeResponse struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.Unmarshal(challengeRR.Body.Bytes(), &challengeResponse); err != nil || challengeResponse.Challenge == "" {
+		t.Fatalf("authorization challenge response=%q err=%v", challengeResponse.Challenge, err)
+	}
+	proof, err := identity.SignAuthorizationProof(clientID, redirectURI, resource, "agent:connect offline_access", state, codeChallenge, challengeResponse.Challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := url.Values{
+		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {redirectURI},
+		"code_challenge": {codeChallenge}, "code_challenge_method": {"S256"}, "resource": {resource},
+		"scope": {"agent:connect offline_access"}, "state": {state},
+		"chat_with_cli_authorization_challenge": {challengeResponse.Challenge}, "chat_with_cli_device_proof": {proof},
+	}
+	get := func() *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		s.handleAuthorizeGET(rr, httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize")+"?"+q.Encode(), nil))
+		return rr
+	}
+	if rr := get(); rr.Code != http.StatusOK {
+		t.Fatalf("valid authorization challenge status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := get(); rr.Code != http.StatusForbidden {
+		t.Fatalf("authorization challenge replay status=%d want 403 body=%s", rr.Code, rr.Body.String())
+	}
+
+	wrongState := maps.Clone(q)
+	wrongState.Set("state", "other-state")
+	if rr := func() *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		s.handleAuthorizeGET(rr, httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize")+"?"+wrongState.Encode(), nil))
+		return rr
+	}(); rr.Code != http.StatusForbidden {
+		t.Fatalf("authorization challenge accepted altered state: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDeviceBoundAuthorizationRequiresCurrentPrivateKey(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19144", Password: "authorization-proof-password-12345", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientID = "authorization-proof-client"
+	const redirect = "http://127.0.0.1:45144/callback"
+	resource := s.absolute("/agent/id/" + identity.ID())
+	codeChallenge := strings.Repeat("a", 43)
+	authorizationChallenge, err := s.issueAuthorizationChallenge(clientID, redirect, resource, "agent:connect offline_access", "fresh-state", codeChallenge, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	s.clients[clientID] = Client{
+		ID: clientID, RedirectURIs: []string{redirect}, IssuedAt: time.Now().Unix(),
+		DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true,
+	}
+	s.mu.Unlock()
+
+	authorize := func(proof string) *httptest.ResponseRecorder {
+		t.Helper()
+		q := url.Values{
+			"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {redirect},
+			"code_challenge": {codeChallenge}, "code_challenge_method": {"S256"},
+			"resource": {resource}, "scope": {"agent:connect offline_access"}, "state": {"fresh-state"},
+			"chat_with_cli_authorization_challenge": {authorizationChallenge},
+		}
+		if proof != "" {
+			q.Set("chat_with_cli_device_proof", proof)
+		}
+		rr := httptest.NewRecorder()
+		s.handleAuthorizeGET(rr, httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize")+"?"+q.Encode(), nil))
+		return rr
+	}
+	if rr := authorize(""); rr.Code != http.StatusForbidden {
+		t.Fatalf("authorization without device private-key proof status=%d want 403 body=%s", rr.Code, rr.Body.String())
+	}
+	wrongProof, err := wrong.SignAuthorizationProof(clientID, redirect, resource, "agent:connect offline_access", "fresh-state", codeChallenge, authorizationChallenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := authorize(wrongProof); rr.Code != http.StatusForbidden {
+		t.Fatalf("authorization with wrong device private-key proof status=%d want 403 body=%s", rr.Code, rr.Body.String())
+	}
+	validProof, err := identity.SignAuthorizationProof(clientID, redirect, resource, "agent:connect offline_access", "fresh-state", codeChallenge, authorizationChallenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := authorize(validProof); rr.Code != http.StatusOK {
+		t.Fatalf("authorization with current device private-key proof status=%d want 200 body=%s", rr.Code, rr.Body.String())
+	}
+
+	s.mu.Lock()
+	owner := s.devices["id/"+identity.ID()]
+	pending := len(s.pending)
+	s.mu.Unlock()
+	if owner != "" || pending != 1 {
+		t.Fatalf("authorization page changed device ownership or created unexpected requests: owner=%q pending=%d", owner, pending)
 	}
 }
 
@@ -3458,6 +3709,116 @@ func TestDirtyRecoveryGuardCannotBeConsumedByOrdinaryPersistence(t *testing.T) {
 	}
 	if !s.persistenceFault || !s.killSwitch || s.agentEnabled {
 		t.Fatalf("post-recovery in-memory safety state wrong: fault=%v kill=%v agent=%v", s.persistenceFault, s.killSwitch, s.agentEnabled)
+	}
+}
+
+func TestDirtyStateDoesNotResurrectPersistedBrowserSession(t *testing.T) {
+	stateDir := t.TempDir()
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19170", Password: "dirty-session-password-12345", StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerID := s.usernames["owner"]
+	session, err := s.createSession(s.users[ownerID])
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.persistenceFault = true
+	if err := writeStateGuard(s.stateGuard, stateGuardDirty); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+
+	logout := httptest.NewRequest(http.MethodPost, s.absolute("/admin/logout"), nil)
+	logout.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	s.clearSession(httptest.NewRecorder(), logout)
+	if _, ok := s.sessionUser(logout); ok {
+		t.Fatal("logged-out session remained usable during dirty recovery")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(Config{PublicURL: "http://127.0.0.1:19170", Password: "dirty-session-password-12345", StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	stale := httptest.NewRequest(http.MethodGet, restarted.absolute("/admin"), nil)
+	stale.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	if _, ok := restarted.sessionUser(stale); ok {
+		t.Fatal("persisted browser session resurrected while the state guard was dirty")
+	}
+
+	fresh, err := restarted.createSession(restarted.users[ownerID])
+	if err != nil || fresh == "" {
+		t.Fatalf("fresh recovery login could not create an ephemeral session: token=%q err=%v", fresh, err)
+	}
+	current := httptest.NewRequest(http.MethodGet, restarted.absolute("/admin"), nil)
+	current.AddCookie(&http.Cookie{Name: sessionCookie, Value: fresh})
+	if _, ok := restarted.sessionUser(current); !ok {
+		t.Fatal("fresh process-local recovery session was rejected")
+	}
+	if !restarted.persistenceFault {
+		t.Fatal("fresh recovery login unexpectedly cleared the dirty guard")
+	}
+}
+
+func TestDirtyRecoveryReauthKeepsFreshSessionProcessLocal(t *testing.T) {
+	const password = "dirty-reauth-password-12345"
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19171", Password: password, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	owner := s.users[ownerID]
+	s.persistenceFault = true
+	s.mu.Unlock()
+	oldSession, err := s.createSession(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	csrf := "reauth-csrf"
+	form := url.Values{"csrf_token": {csrf}, "password": {password}}
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/admin/reauth"), strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: oldSession})
+	req.AddCookie(&http.Cookie{Name: adminCSRFCookie, Value: csrf})
+	rr := httptest.NewRecorder()
+	s.handleAdminReauthPOST(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("dirty recovery reauth status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var newSession string
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == sessionCookie {
+			newSession = cookie.Value
+			break
+		}
+	}
+	if newSession == "" || newSession == oldSession {
+		t.Fatalf("dirty recovery reauth did not rotate the session cookie: empty=%v unchanged=%v", newSession == "", newSession == oldSession)
+	}
+	check := httptest.NewRequest(http.MethodGet, s.absolute("/admin"), nil)
+	check.AddCookie(&http.Cookie{Name: sessionCookie, Value: newSession})
+	if _, ok := s.sessionUser(check); !ok {
+		t.Fatal("freshly reauthenticated recovery session was rejected")
+	}
+	s.mu.Lock()
+	_, oldPresent := s.sessions[tokenKey(oldSession)]
+	_, newPresent := s.sessions[tokenKey(newSession)]
+	_, newEphemeral := s.ephemeralSessions[tokenKey(newSession)]
+	fault := s.persistenceFault
+	s.mu.Unlock()
+	if oldPresent || !newPresent || !newEphemeral || !fault {
+		t.Fatalf("dirty reauth session state wrong: old=%v new=%v ephemeral=%v fault=%v", oldPresent, newPresent, newEphemeral, fault)
 	}
 }
 

@@ -212,14 +212,17 @@ func (s *Server) handleAdminReauthPOST(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().Unix()
 	delete(s.sessions, handle)
+	delete(s.ephemeralSessions, handle)
 	record.LastSeenAt = now
 	record.LastReauthAt = now
-	s.sessions[tokenKey(newSession)] = record
+	newHandle := tokenKey(newSession)
+	s.sessions[newHandle] = record
 	s.recordSecurityLocked(SecurityEvent{Event: "admin_reauth", User: current.Username, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
 	if recovering {
 		// Fresh authentication is kept process-local during recovery. It may
 		// authorize a subsequent authority-reducing recovery action, but must
 		// not consume the dirty authorization-state guard by itself.
+		s.ephemeralSessions[newHandle] = struct{}{}
 		err = nil
 	} else {
 		err = s.saveOrRollbackLocked(snapshot)
@@ -249,7 +252,10 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !authenticated || !user.Admin {
-		s.recordSecurity(SecurityEvent{Event: "admin_login", User: r.Form.Get("username"), RemoteIP: requestIP(r, s.trustedProxies), Success: false})
+		// Do not record the submitted username: a malformed client can put a
+		// password or another secret in that field, and security events are
+		// deliberately durable operator-visible metadata.
+		s.recordSecurity(SecurityEvent{Event: "admin_login", RemoteIP: requestIP(r, s.trustedProxies), Success: false})
 		http.Error(w, "invalid administrator credentials", http.StatusUnauthorized)
 		return
 	}
@@ -807,6 +813,7 @@ func (s *Server) deleteUserSessionsLocked(userID string) {
 	for key, record := range s.sessions {
 		if record.UserID == userID {
 			delete(s.sessions, key)
+			delete(s.ephemeralSessions, key)
 		}
 	}
 }

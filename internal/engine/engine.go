@@ -199,6 +199,9 @@ func (e *Engine) updateKillSwitchState(active bool) {
 }
 
 func (e *Engine) callContext(parent context.Context) (context.Context, context.CancelFunc, bool) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	e.killSwitchMu.Lock()
 	killCtx := e.killSwitchCtx
 	active := e.killSwitchLatched
@@ -405,6 +408,9 @@ func decode[T any](raw json.RawMessage) (T, error) {
 }
 
 func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage) (result any, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	started := time.Now()
 	auditMethod := method
 	if len(auditMethod) > maxEngineMethodBytes {

@@ -1035,10 +1035,10 @@ func doctorMCPRequest(ctx context.Context, client *http.Client, target, token st
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, errors.New("invalid MCP JSON response")
 	}
-	if rpcError, ok := response["error"].(map[string]any); ok {
-		if message, ok := rpcError["message"].(string); ok {
-			return nil, errors.New(message)
-		}
+	if _, ok := response["error"].(map[string]any); ok {
+		// The remote endpoint controls this string and may reflect bearer
+		// credentials, tool arguments, or file content. Diagnostics must never
+		// print a server-supplied JSON-RPC error verbatim.
 		return nil, errors.New("MCP returned a JSON-RPC error")
 	}
 	return response, nil
@@ -1064,7 +1064,7 @@ func doctorHTTPCheck(ctx context.Context, client *http.Client, name, target stri
 func normalizeDiagnosticURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1"))) {
-		return "", fmt.Errorf("invalid relay URL %q; use HTTPS or loopback HTTP without a path/query", raw)
+		return "", errors.New("invalid relay URL; use HTTPS or loopback HTTP without a path/query")
 	}
 	if u.Path != "" && u.Path != "/" {
 		return "", errors.New("relay URL must be an origin without a path")
@@ -1074,7 +1074,18 @@ func normalizeDiagnosticURL(raw string) (string, error) {
 }
 
 func redactDiagnosticError(err error) string {
-	return strings.ReplaceAll(err.Error(), "?", "")
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request timed out"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "request canceled"
+	}
+	// Network/client errors frequently include the complete request URL. Do
+	// not echo that string: diagnostic requests may carry OAuth query values.
+	return "network request failed"
 }
 
 func writeConfigFile(path string, values map[string]any, force bool) error {

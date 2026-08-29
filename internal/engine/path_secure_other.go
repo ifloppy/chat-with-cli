@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 func (e *Engine) secureOpenRead(path string) (*os.File, string, error) {
@@ -15,6 +17,18 @@ func (e *Engine) secureOpenRead(path string) (*os.File, string, error) {
 	}
 	file, err := os.Open(resolved)
 	if err != nil {
+		return nil, "", err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, "", errors.New("path is not a regular file")
+	}
+	if err := securefile.CheckSingleLink(info, "file"); err != nil {
+		_ = file.Close()
 		return nil, "", err
 	}
 	return file, resolved, nil
@@ -40,6 +54,18 @@ func (e *Engine) secureOpenAppend(path string) (*os.File, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, "", errors.New("append target is not a regular file")
+	}
+	if err := securefile.CheckSingleLink(info, "file"); err != nil {
+		_ = file.Close()
+		return nil, "", err
+	}
 	return file, resolved, nil
 }
 
@@ -55,6 +81,9 @@ func (e *Engine) secureAtomicWrite(path string, data []byte, fallbackMode os.Fil
 	if info, err := os.Lstat(resolved); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return "", errors.New("refusing to replace a non-regular file or symlink")
+		}
+		if err := securefile.CheckSingleLink(info, "file"); err != nil {
+			return "", err
 		}
 		mode = info.Mode().Perm()
 	} else if !errors.Is(err, os.ErrNotExist) {

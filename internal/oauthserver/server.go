@@ -28,6 +28,7 @@ import (
 	"github.com/ifloppy/chat-with-cli/internal/authzctx"
 	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 const (
@@ -43,7 +44,9 @@ const (
 	maxRegistrationChallengesConsumedDevice = 64
 	maxAgentChallengesConsumedDevice        = 64
 	registrationChallengeLifetime           = 30 * time.Second
+	authorizationChallengeLifetime          = 30 * time.Second
 	agentChallengeLifetime                  = 30 * time.Second
+	maxAuthorizationChallengesClient        = 64
 )
 
 var errAuthorizationRecoveryRequired = errors.New("authorization state recovery is required before ordinary state changes can be persisted")
@@ -164,44 +167,47 @@ type authCode struct {
 }
 
 type Server struct {
-	cfg                            Config
-	base                           *url.URL
-	mu                             sync.Mutex
-	clients                        map[string]Client
-	access                         map[string]tokenRecord
-	refresh                        map[string]tokenRecord
-	refreshUsed                    map[string]tokenRecord
-	pending                        map[string]pendingAuth
-	codes                          map[string]authCode
-	users                          map[string]User
-	usernames                      map[string]string
-	devices                        map[string]string
-	disabledDevices                map[string]bool
-	retiredDevices                 map[string]bool
-	deviceRecords                  map[string]DeviceRecord
-	sessions                       map[string]sessionRecord
-	passwordSlots                  chan struct{}
-	stateFile                      string
-	registrationEnabled            bool
-	dcrEnabled                     bool
-	mcpEnabled                     bool
-	agentEnabled                   bool
-	killSwitch                     bool
-	trustedProxies                 []*net.IPNet
-	rateMu                         sync.Mutex
-	rates                          map[string]rateWindow
-	consumedRegistrationChallenges map[string]map[string]int64
-	registrationChallengeKey       [32]byte
-	consumedAgentChallenges        map[string]map[string]int64
-	agentChallengeKey              [32]byte
-	setupTokenHash                 string
-	setupTokenPath                 string
-	securityEvents                 []SecurityEvent
-	statusProvider                 func() map[string]DeviceStatus
-	agentSessionResetter           func(device string)
-	stateLease                     *stateLease
-	stateGuard                     *os.File
-	startedAt                      time.Time
+	cfg                             Config
+	base                            *url.URL
+	mu                              sync.Mutex
+	clients                         map[string]Client
+	access                          map[string]tokenRecord
+	refresh                         map[string]tokenRecord
+	refreshUsed                     map[string]tokenRecord
+	pending                         map[string]pendingAuth
+	codes                           map[string]authCode
+	users                           map[string]User
+	usernames                       map[string]string
+	devices                         map[string]string
+	disabledDevices                 map[string]bool
+	retiredDevices                  map[string]bool
+	deviceRecords                   map[string]DeviceRecord
+	sessions                        map[string]sessionRecord
+	ephemeralSessions               map[string]struct{}
+	passwordSlots                   chan struct{}
+	stateFile                       string
+	registrationEnabled             bool
+	dcrEnabled                      bool
+	mcpEnabled                      bool
+	agentEnabled                    bool
+	killSwitch                      bool
+	trustedProxies                  []*net.IPNet
+	rateMu                          sync.Mutex
+	rates                           map[string]rateWindow
+	consumedRegistrationChallenges  map[string]map[string]int64
+	registrationChallengeKey        [32]byte
+	consumedAuthorizationChallenges map[string]map[string]int64
+	authorizationChallengeKey       [32]byte
+	consumedAgentChallenges         map[string]map[string]int64
+	agentChallengeKey               [32]byte
+	setupTokenHash                  string
+	setupTokenPath                  string
+	securityEvents                  []SecurityEvent
+	statusProvider                  func() map[string]DeviceStatus
+	agentSessionResetter            func(device string)
+	stateLease                      *stateLease
+	stateGuard                      *os.File
+	startedAt                       time.Time
 	// persistenceFault is a fail-closed latch. Once authorization state cannot
 	// be durably written, MCP/Agent access remains frozen until process restart
 	// and a clean state load. Availability is preferred over stale authorization.
@@ -231,6 +237,7 @@ type mutableStateSnapshot struct {
 	retiredDevices      map[string]bool
 	deviceRecords       map[string]DeviceRecord
 	sessions            map[string]sessionRecord
+	ephemeralSessions   map[string]struct{}
 	registrationEnabled bool
 	dcrEnabled          bool
 	mcpEnabled          bool
@@ -262,7 +269,7 @@ func (s *Server) snapshotMutableStateLocked() mutableStateSnapshot {
 	return mutableStateSnapshot{
 		clients: cloneClients(s.clients), access: cloneMap(s.access), refresh: cloneMap(s.refresh), refreshUsed: cloneMap(s.refreshUsed),
 		pending: cloneMap(s.pending), codes: cloneMap(s.codes), users: cloneMap(s.users), usernames: cloneMap(s.usernames),
-		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), retiredDevices: cloneMap(s.retiredDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions),
+		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), retiredDevices: cloneMap(s.retiredDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions), ephemeralSessions: cloneMap(s.ephemeralSessions),
 		registrationEnabled: s.registrationEnabled, dcrEnabled: s.dcrEnabled, mcpEnabled: s.mcpEnabled, agentEnabled: s.agentEnabled,
 		killSwitch: s.killSwitch, setupTokenHash: s.setupTokenHash, securityEvents: append([]SecurityEvent(nil), s.securityEvents...), mode: s.cfg.Mode,
 	}
@@ -271,7 +278,7 @@ func (s *Server) snapshotMutableStateLocked() mutableStateSnapshot {
 func (s *Server) restoreMutableStateLocked(snapshot mutableStateSnapshot) {
 	s.clients, s.access, s.refresh, s.refreshUsed = snapshot.clients, snapshot.access, snapshot.refresh, snapshot.refreshUsed
 	s.pending, s.codes, s.users, s.usernames = snapshot.pending, snapshot.codes, snapshot.users, snapshot.usernames
-	s.devices, s.disabledDevices, s.retiredDevices, s.deviceRecords, s.sessions = snapshot.devices, snapshot.disabledDevices, snapshot.retiredDevices, snapshot.deviceRecords, snapshot.sessions
+	s.devices, s.disabledDevices, s.retiredDevices, s.deviceRecords, s.sessions, s.ephemeralSessions = snapshot.devices, snapshot.disabledDevices, snapshot.retiredDevices, snapshot.deviceRecords, snapshot.sessions, snapshot.ephemeralSessions
 	s.registrationEnabled, s.dcrEnabled, s.mcpEnabled, s.agentEnabled = snapshot.registrationEnabled, snapshot.dcrEnabled, snapshot.mcpEnabled, snapshot.agentEnabled
 	s.killSwitch, s.setupTokenHash, s.securityEvents, s.cfg.Mode = snapshot.killSwitch, snapshot.setupTokenHash, snapshot.securityEvents, snapshot.mode
 }
@@ -289,6 +296,10 @@ func (s *Server) saveRecoveryOrRollbackLocked(snapshot mutableStateSnapshot) err
 		s.restoreMutableStateLocked(snapshot)
 		return err
 	}
+	// Keep the process-local recovery markers while the fail-closed latch is
+	// active. This lets a freshly authenticated administrator continue to make
+	// authority-reducing recovery changes; restart drops the markers and the
+	// clean persisted state becomes the source of truth.
 	return nil
 }
 
@@ -358,17 +369,21 @@ func New(cfg Config) (*Server, error) {
 	if _, err := rand.Read(agentChallengeKey[:]); err != nil {
 		return nil, fmt.Errorf("generate Agent challenge key: %w", err)
 	}
+	var authorizationChallengeKey [32]byte
+	if _, err := rand.Read(authorizationChallengeKey[:]); err != nil {
+		return nil, fmt.Errorf("generate authorization challenge key: %w", err)
+	}
 	s := &Server{
 		cfg: cfg, base: base,
 		clients: make(map[string]Client), access: make(map[string]tokenRecord),
 		refresh: make(map[string]tokenRecord), refreshUsed: make(map[string]tokenRecord), pending: make(map[string]pendingAuth),
 		codes: make(map[string]authCode), users: make(map[string]User), usernames: make(map[string]string),
-		devices: make(map[string]string), disabledDevices: make(map[string]bool), retiredDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), passwordSlots: make(chan struct{}, 4),
+		devices: make(map[string]string), disabledDevices: make(map[string]bool), retiredDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), ephemeralSessions: make(map[string]struct{}), passwordSlots: make(chan struct{}, 4),
 		stateFile:           filepath.Join(cfg.StateDir, "oauth-state.json"),
 		registrationEnabled: mode == ModePublic && !cfg.RegistrationDisabled,
 		dcrEnabled:          true,
 		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
-		rates: make(map[string]rateWindow), consumedRegistrationChallenges: make(map[string]map[string]int64), registrationChallengeKey: registrationChallengeKey, consumedAgentChallenges: make(map[string]map[string]int64), agentChallengeKey: agentChallengeKey, setupTokenPath: cfg.SetupTokenPath,
+		rates: make(map[string]rateWindow), consumedRegistrationChallenges: make(map[string]map[string]int64), registrationChallengeKey: registrationChallengeKey, consumedAuthorizationChallenges: make(map[string]map[string]int64), authorizationChallengeKey: authorizationChallengeKey, consumedAgentChallenges: make(map[string]map[string]int64), agentChallengeKey: agentChallengeKey, setupTokenPath: cfg.SetupTokenPath,
 		stateLease: lease, stateGuard: guard,
 		persistenceFault: guardDirty,
 		startedAt:        time.Now(),
@@ -434,7 +449,7 @@ func (s *Server) Close() error {
 func validatePublicURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("invalid --public-url %q", raw)
+		return nil, errors.New("invalid --public-url")
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("--public-url must be an origin without credentials, query, or fragment")
@@ -653,12 +668,20 @@ func (s *Server) canonicalizeDiskState(state *diskState) error {
 
 func (s *Server) load() error {
 	return withStateFileLock(s.stateFile, func() error {
-		if info, err := os.Lstat(s.stateFile); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("OAuth state file must not be a symlink")
-		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if info, err := os.Lstat(s.stateFile); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("OAuth state file must not be a symlink")
+			}
+			if !info.Mode().IsRegular() {
+				return errors.New("OAuth state file must be a regular file")
+			}
+			if err := securefile.CheckSingleLink(info, "OAuth state file"); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("inspect OAuth state: %w", err)
 		}
-		data, err := os.ReadFile(s.stateFile)
+		data, err := securefile.Read(s.stateFile, "OAuth state file")
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -790,9 +813,17 @@ func (s *Server) saveLockedUnlocked() error {
 	if err != nil {
 		return err
 	}
-	if info, err := os.Lstat(s.stateFile); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("OAuth state file must not be a symlink")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if info, err := os.Lstat(s.stateFile); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("OAuth state file must not be a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("OAuth state file must be a regular file")
+		}
+		if err := securefile.CheckSingleLink(info, "OAuth state file"); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	tmpFile, err := os.CreateTemp(filepath.Dir(s.stateFile), ".oauth-state-*")
@@ -851,6 +882,12 @@ func (s *Server) cleanupLocked(now time.Time) {
 	for key, rec := range s.sessions {
 		if rec.Expires <= unix || !s.activeUserLocked(rec.UserID) {
 			delete(s.sessions, key)
+			delete(s.ephemeralSessions, key)
+		}
+	}
+	for key := range s.ephemeralSessions {
+		if _, exists := s.sessions[key]; !exists {
+			delete(s.ephemeralSessions, key)
 		}
 	}
 	for key, p := range s.pending {
@@ -949,6 +986,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/agent/id/{id}", s.handleAgentResourceMetadata)
 	mux.HandleFunc("POST /oauth/register/challenge", s.handleRegistrationChallenge)
 	mux.HandleFunc("POST /oauth/register", s.handleRegister)
+	mux.HandleFunc("POST /oauth/authorize/challenge", s.handleAuthorizationChallenge)
 	mux.HandleFunc("GET /oauth/authorize", s.handleAuthorizeGET)
 	mux.HandleFunc("POST /oauth/authorize", s.handleAuthorizePOST)
 	mux.HandleFunc("POST /oauth/token", s.handleToken)
@@ -969,6 +1007,7 @@ func (s *Server) handleAuthorizationMetadata(w http.ResponseWriter, _ *http.Requ
 		"token_endpoint":         s.absolute("/oauth/token"),
 		"registration_endpoint":  s.absolute("/oauth/register"),
 		"chat_with_cli_registration_challenge_endpoint":  s.absolute("/oauth/register/challenge"),
+		"chat_with_cli_authorization_challenge_endpoint": s.absolute("/oauth/authorize/challenge"),
 		"revocation_endpoint":                            s.absolute("/oauth/revoke"),
 		"scopes_supported":                               []string{"mcp", "agent:connect", "offline_access"},
 		"response_types_supported":                       []string{"code"},
@@ -1082,6 +1121,15 @@ type registrationChallengeRequest struct {
 	DevicePublicKey string `json:"chat_with_cli_device_public_key"`
 }
 
+type authorizationChallengeRequest struct {
+	ClientID      string `json:"client_id"`
+	RedirectURI   string `json:"redirect_uri"`
+	Resource      string `json:"resource"`
+	Scope         string `json:"scope"`
+	State         string `json:"state"`
+	CodeChallenge string `json:"code_challenge"`
+}
+
 func contains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -1141,6 +1189,62 @@ func (s *Server) handleRegistrationChallenge(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"challenge": challenge, "expires_in": int(registrationChallengeLifetime.Seconds())})
+}
+
+func (s *Server) handleAuthorizationChallenge(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(r, "authorize-challenge", 60, time.Minute) {
+		rateLimited(w, 60)
+		return
+	}
+	body := http.MaxBytesReader(w, r.Body, 32<<10)
+	defer body.Close()
+	var req authorizationChallengeRequest
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "invalid JSON authorization challenge metadata")
+		return
+	}
+	clientID := strings.TrimSpace(req.ClientID)
+	redirectURI := strings.TrimSpace(req.RedirectURI)
+	resource := strings.TrimSpace(req.Resource)
+	state := strings.TrimSpace(req.State)
+	codeChallenge := strings.TrimSpace(req.CodeChallenge)
+	if clientID == "" || len(clientID) > 256 || !validAgentRedirectURI(redirectURI) || len(state) == 0 || len(state) > 512 || !validPKCEChallenge(codeChallenge) {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "authorization challenge metadata is invalid")
+		return
+	}
+	kind, device, canonical, ok := s.resourceParts(resource)
+	if !ok || canonical != resource || kind != "agent" || !strings.HasPrefix(device, "id/") {
+		oauthError(w, http.StatusBadRequest, "invalid_target", "authorization challenge requires an immutable Agent resource")
+		return
+	}
+	scope, ok := normalizeScope(strings.TrimSpace(req.Scope), kind)
+	if !ok || scope != strings.TrimSpace(req.Scope) {
+		oauthError(w, http.StatusBadRequest, "invalid_scope", "authorization challenge scope is invalid")
+		return
+	}
+
+	s.mu.Lock()
+	client, exists := s.clients[clientID]
+	validClient := exists && clientIDMatches(clientID, client) && exactRedirect(client, redirectURI)
+	if validClient {
+		validClient = client.DeviceKeyVerified && client.DeviceID == strings.TrimPrefix(device, "id/") && client.DevicePublicKey != ""
+	}
+	if validClient {
+		_, err := s.validateAgentDeviceKeyLocked(clientID, resource)
+		validClient = err == nil && s.resourceEnabledLocked(resource, "agent:connect")
+	}
+	s.mu.Unlock()
+	if !validClient {
+		oauthError(w, http.StatusForbidden, "access_denied", "authorization challenge is not valid for this Agent client")
+		return
+	}
+
+	challenge, err := s.issueAuthorizationChallenge(clientID, redirectURI, resource, scope, state, codeChallenge, time.Now().UTC())
+	if err != nil {
+		oauthError(w, http.StatusInternalServerError, "server_error", "failed to issue authorization challenge")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"challenge": challenge, "expires_in": int(authorizationChallengeLifetime.Seconds())})
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -1234,6 +1338,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	s.cleanupLocked(now)
+	snapshot := s.snapshotMutableStateLocked()
 	if deviceKeyVerified {
 		if s.retiredDevices["id/"+deviceID] {
 			writeJSON(w, http.StatusGone, map[string]string{"error": "invalid_client_metadata", "error_description": "this cryptographic device identity has been permanently retired"})
@@ -1267,8 +1372,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	clientID := randomToken(24)
 	client := Client{ID: clientID, Name: strings.TrimSpace(req.ClientName), RedirectURIs: append([]string(nil), req.RedirectURIs...), DeviceID: deviceID, DevicePublicKey: devicePublicKey, DeviceKeyVerified: deviceKeyVerified, IssuedAt: time.Now().Unix()}
 	s.clients[clientID] = client
-	if err := s.saveLocked(); err != nil {
-		delete(s.clients, clientID)
+	if err := s.saveOrRollbackLocked(snapshot); err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error", "failed to persist client registration")
 		return
 	}
@@ -1410,7 +1514,9 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 	}
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
-	if len(clientID) == 0 || len(clientID) > 256 || len(redirectURI) == 0 || len(redirectURI) > 2048 || len(q.Get("state")) > 512 {
+	deviceProof := strings.TrimSpace(q.Get("chat_with_cli_device_proof"))
+	authorizationChallenge := strings.TrimSpace(q.Get("chat_with_cli_authorization_challenge"))
+	if len(clientID) == 0 || len(clientID) > 256 || len(redirectURI) == 0 || len(redirectURI) > 2048 || len(q.Get("state")) > 512 || len(deviceProof) > 256 || len(authorizationChallenge) > 256 {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth authorization request is too large or has invalid PKCE parameters")
 		return
 	}
@@ -1427,6 +1533,8 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 
 	csrfToken := randomToken(24)
 	remoteIP := requestIP(r, s.trustedProxies)
+	authorizationChallengeHash := ""
+	authorizationChallengeExpires := int64(0)
 	s.mu.Lock()
 	s.cleanupLocked(time.Now())
 	client, exists := s.clients[clientID]
@@ -1441,6 +1549,19 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		if !client.DeviceKeyVerified || client.DeviceID == "" || client.DevicePublicKey == "" || kind != "agent" || device != expected {
 			s.mu.Unlock()
 			s.oauthPageError(w, http.StatusForbidden, "this device-bound OAuth client may only authorize its exact Agent resource")
+			return
+		}
+		if _, err := s.validateAgentDeviceKeyLocked(clientID, resource); err != nil {
+			s.mu.Unlock()
+			s.oauthPageError(w, http.StatusForbidden, "this device-bound OAuth client has invalid device identity metadata")
+			return
+		}
+		pub, err := deviceidentity.DecodePublicKey(client.DevicePublicKey)
+		var challengeOK bool
+		authorizationChallengeHash, authorizationChallengeExpires, challengeOK = s.validateAuthorizationChallenge(clientID, redirectURI, resource, scope, q.Get("state"), q.Get("code_challenge"), authorizationChallenge, time.Now().UTC())
+		if err != nil || !challengeOK || !deviceidentity.VerifyAuthorizationProof(pub, clientID, redirectURI, resource, scope, q.Get("state"), q.Get("code_challenge"), authorizationChallenge, deviceProof) {
+			s.mu.Unlock()
+			s.oauthPageError(w, http.StatusForbidden, "this device-bound OAuth client must prove possession of its device identity for authorization")
 			return
 		}
 	} else if kind == "agent" && !s.cfg.AllowLegacyUnboundAgents {
@@ -1464,6 +1585,11 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		rateLimited(w, 60)
 		return
 	}
+	if hasDeviceIdentity && !s.consumeAuthorizationChallengeLocked(clientID, authorizationChallengeHash, authorizationChallengeExpires, time.Now().UTC()) {
+		s.mu.Unlock()
+		s.oauthPageError(w, http.StatusForbidden, "this device-bound OAuth authorization challenge was already used or is unavailable")
+		return
+	}
 	requestID := randomToken(24)
 	s.pending[requestID] = pendingAuth{
 		ClientID: clientID, RedirectURI: redirectURI, State: q.Get("state"), Scope: scope,
@@ -1481,7 +1607,7 @@ var authorizationTemplate = template.Must(template.New("authorization").Parse(`<
 <title>Authorize chat-with-cli</title><style>:root{color-scheme:light dark}body{font:16px system-ui;max-width:620px;margin:6vh auto;padding:24px;line-height:1.5}input,button{font:inherit;padding:10px;width:100%;box-sizing:border-box}button{margin-top:12px}.meta,form,.identity{border:1px solid #8885;background:#8881;padding:14px;border-radius:10px;margin-top:14px}.secondary{background:#8881}.verified{border-color:#18803888;background:#18803814}.warning{border-color:#b8860b88;background:#b8860b14}.muted{color:#777}code{overflow-wrap:anywhere}</style></head><body>
 <h1>Authorize chat-with-cli</h1><div class="meta"><b>Client name:</b> {{.Client}}<br><b>Client ID:</b> <code>{{.ClientID}}</code><br><b>Callback:</b> <code>{{.Callback}}</code><br><b>Resource:</b> <code>{{.Resource}}</code><br><b>Scope:</b> {{.Scope}}</div>
 {{if .UnverifiedClient}}<div class="identity warning"><b>Unverified dynamic OAuth client</b><br>The client name above is self-asserted. Only authorize if the callback origin matches the application you intended to connect.</div>{{end}}
-{{if .VerifiedDevice}}<div class="identity verified"><b>Verified device identity</b><br>This Agent proved possession of the Ed25519 private key for device <code>{{.DeviceID}}</code>. The Relay will require a fresh signed proof on every Agent connection.</div>{{else if .AgentDevice}}<div class="identity warning"><b>Legacy unbound Agent</b><br>This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.</div>{{end}}
+{{if .VerifiedDevice}}<div class="identity verified"><b>Verified device identity</b><br>This Agent proved possession of the Ed25519 private key for device <code>{{.DeviceID}}</code>. The Relay requires a request-bound signed proof for authorization and a fresh signed proof on every Agent connection.</div>{{else if .AgentDevice}}<div class="identity warning"><b>Legacy unbound Agent</b><br>This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.</div>{{end}}
 {{if .LoggedIn}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><p>Signed in as <b>{{.Username}}</b>.</p><button name="decision" value="allow" type="submit">Authorize</button><button name="decision" value="deny" type="submit">Deny</button><button name="decision" value="logout" type="submit">Sign out</button></form>
 {{else}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Sign in</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="current-password" placeholder="Password" required><button name="decision" value="login" type="submit">Sign in and authorize</button></form>
 {{if .Public}}<form class="secondary" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Create account</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="new-password" placeholder="Password (12+ characters)" minlength="12" required><button name="decision" value="register" type="submit">Register and authorize</button></form>{{end}}{{end}}
@@ -2113,7 +2239,10 @@ func (s *Server) VerifyAgentConnection(credentialHash, device string) bool {
 
 func (s *Server) resourceOwnedByUserLocked(userID, resource, requiredScope string) bool {
 	user, exists := s.users[userID]
-	if !exists || user.ID == "" || user.Disabled || !s.resourceEnabledLocked(resource, requiredScope) {
+	if requiredScope != "mcp" && requiredScope != "agent:connect" {
+		return false
+	}
+	if !exists || user.ID != userID || user.Disabled || !s.resourceEnabledLocked(resource, requiredScope) {
 		return false
 	}
 	kind, device, _, ok := s.resourceParts(resource)
@@ -2121,6 +2250,9 @@ func (s *Server) resourceOwnedByUserLocked(userID, resource, requiredScope strin
 		return false
 	}
 	if (requiredScope == "mcp" && kind != "mcp") || (requiredScope == "agent:connect" && kind != "agent") {
+		return false
+	}
+	if record, exists := s.deviceRecords[device]; exists && (record.Disabled || (record.OwnerID != "" && record.OwnerID != userID)) {
 		return false
 	}
 	return s.devices[device] == userID
@@ -2147,11 +2279,17 @@ func (s *Server) verifyAccessKeyLocked(credentialHash, resource, requiredScope s
 }
 
 func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
+	if requiredScope != "mcp" && requiredScope != "agent:connect" {
+		return false
+	}
 	if s.persistenceFault || s.killSwitch || (requiredScope == "mcp" && !s.mcpEnabled) || (requiredScope == "agent:connect" && !s.agentEnabled) {
 		return false
 	}
-	_, device, _, ok := s.resourceParts(resource)
-	if !ok || s.disabledDevices[device] || s.retiredDevices[device] {
+	kind, device, _, ok := s.resourceParts(resource)
+	if !ok || (requiredScope == "mcp" && kind != "mcp") || (requiredScope == "agent:connect" && kind != "agent") {
+		return false
+	}
+	if s.disabledDevices[device] || s.retiredDevices[device] {
 		return false
 	}
 	if record, exists := s.deviceRecords[device]; exists && record.Disabled {
@@ -2238,6 +2376,86 @@ func (s *Server) consumeRegistrationChallengeLocked(deviceID, challengeHash stri
 	if bucket == nil {
 		bucket = make(map[string]int64)
 		s.consumedRegistrationChallenges[deviceID] = bucket
+	}
+	bucket[challengeHash] = expires
+	return true
+}
+
+func authorizationChallengeMACInput(payload []byte, clientID, redirectURI, resource, scope, state, codeChallenge string) []byte {
+	const context = "chat-with-cli-authorization-challenge-v1"
+	out := make([]byte, 0, len(payload)+len(clientID)+len(redirectURI)+len(resource)+len(scope)+len(state)+len(codeChallenge)+len(context)+7)
+	out = append(out, context...)
+	out = append(out, '\n')
+	out = append(out, payload...)
+	out = append(out, '\n')
+	for _, value := range []string{clientID, redirectURI, resource, scope, state, codeChallenge} {
+		out = append(out, value...)
+		out = append(out, '\n')
+	}
+	return out
+}
+
+func (s *Server) issueAuthorizationChallenge(clientID, redirectURI, resource, scope, state, codeChallenge string, now time.Time) (string, error) {
+	var payload [32]byte
+	if _, err := rand.Read(payload[:24]); err != nil {
+		return "", err
+	}
+	expires := now.Add(authorizationChallengeLifetime).Unix()
+	binary.BigEndian.PutUint64(payload[24:], uint64(expires))
+	mac := hmac.New(sha256.New, s.authorizationChallengeKey[:])
+	_, _ = mac.Write(authorizationChallengeMACInput(payload[:], clientID, redirectURI, resource, scope, state, codeChallenge))
+	return base64.RawURLEncoding.EncodeToString(payload[:]) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (s *Server) validateAuthorizationChallenge(clientID, redirectURI, resource, scope, state, codeChallenge, challenge string, now time.Time) (string, int64, bool) {
+	parts := strings.Split(challenge, ".")
+	if len(parts) != 2 {
+		return "", 0, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || len(payload) != 32 {
+		return "", 0, false
+	}
+	providedMAC, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(providedMAC) != sha256.Size {
+		return "", 0, false
+	}
+	mac := hmac.New(sha256.New, s.authorizationChallengeKey[:])
+	_, _ = mac.Write(authorizationChallengeMACInput(payload, clientID, redirectURI, resource, scope, state, codeChallenge))
+	if !hmac.Equal(providedMAC, mac.Sum(nil)) {
+		return "", 0, false
+	}
+	expires := int64(binary.BigEndian.Uint64(payload[24:]))
+	if expires <= now.Unix() || expires > now.Add(authorizationChallengeLifetime+5*time.Second).Unix() {
+		return "", 0, false
+	}
+	sum := sha256.Sum256([]byte(challenge))
+	return hex.EncodeToString(sum[:]), expires, true
+}
+
+func (s *Server) authorizationChallengeAvailableLocked(clientID, challengeHash string, now time.Time) bool {
+	bucket := s.consumedAuthorizationChallenges[clientID]
+	if bucket == nil {
+		return true
+	}
+	nowUnix := now.Unix()
+	for candidate, expiry := range bucket {
+		if expiry <= nowUnix {
+			delete(bucket, candidate)
+		}
+	}
+	_, replay := bucket[challengeHash]
+	return !replay && len(bucket) < maxAuthorizationChallengesClient
+}
+
+func (s *Server) consumeAuthorizationChallengeLocked(clientID, challengeHash string, expires int64, now time.Time) bool {
+	if !s.authorizationChallengeAvailableLocked(clientID, challengeHash, now) {
+		return false
+	}
+	bucket := s.consumedAuthorizationChallenges[clientID]
+	if bucket == nil {
+		bucket = make(map[string]int64)
+		s.consumedAuthorizationChallenges[clientID] = bucket
 	}
 	bucket[challengeHash] = expires
 	return true

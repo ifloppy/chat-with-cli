@@ -29,6 +29,9 @@ type Client struct {
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if c.Engine == nil {
 		return errors.New("engine is required")
 	}
@@ -172,7 +175,7 @@ func agentURL(base, device string) (string, error) {
 func agentURLForRoute(base, device, deviceID string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(base))
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "", fmt.Errorf("invalid relay URL %q", base)
+		return "", errors.New("invalid relay URL")
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return "", errors.New("relay URL must be an origin without credentials, path, query, or fragment")

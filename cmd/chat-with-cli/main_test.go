@@ -1,10 +1,44 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestDiagnosticErrorRedactionDoesNotEchoSecrets(t *testing.T) {
+	secret := "refresh-secret-that-must-not-be-printed"
+	got := redactDiagnosticError(errors.New("request failed for https://relay.example.test/oauth?refresh_token=" + secret))
+	if strings.Contains(got, secret) || strings.Contains(got, "relay.example.test") {
+		t.Fatalf("diagnostic redaction leaked request details: %q", got)
+	}
+	if got != "network request failed" {
+		t.Fatalf("unexpected redacted network error: %q", got)
+	}
+	if got := redactDiagnosticError(context.DeadlineExceeded); got != "request timed out" {
+		t.Fatalf("unexpected timeout diagnostic: %q", got)
+	}
+}
+
+func TestDoctorMCPErrorDoesNotEchoRemoteMessage(t *testing.T) {
+	const secret = "bearer-or-tool-data-that-must-not-be-printed"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"` + secret + `"}}`))
+	}))
+	defer server.Close()
+
+	_, err := doctorMCPRequest(context.Background(), server.Client(), server.URL, "unused-token", map[string]any{"probe": true})
+	if err == nil {
+		t.Fatal("expected MCP JSON-RPC error")
+	}
+	if strings.Contains(err.Error(), secret) || err.Error() != "MCP returned a JSON-RPC error" {
+		t.Fatalf("doctor exposed remote MCP error details: %v", err)
+	}
+}
 
 func TestBearerAuthFailsClosedOnEmptyToken(t *testing.T) {
 	called := false

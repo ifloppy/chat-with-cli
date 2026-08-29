@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 type Credential struct {
@@ -51,16 +53,30 @@ func loadStore(path string) (credentialStore, error) {
 		if !info.Mode().IsRegular() {
 			return store, errors.New("credential store must be a regular file")
 		}
-		if err := os.Chmod(path, 0o600); err != nil {
-			return store, fmt.Errorf("secure credentials %s: %w", path, err)
+		if err := securefile.CheckSingleLink(info, "credential store"); err != nil {
+			return store, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return store, err
 	}
-	data, err := os.ReadFile(path)
+	file, err := securefile.Open(path, os.O_RDONLY, 0, "credential store")
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil
 	}
+	if err != nil {
+		return store, err
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err != nil {
+		return store, err
+	} else if info.Mode().Perm()&0o077 != 0 {
+		// Preserve the historical self-healing behavior, but chmod the already
+		// validated descriptor so a path replacement cannot change another inode.
+		if err := file.Chmod(0o600); err != nil {
+			return store, fmt.Errorf("secure credentials: %w", err)
+		}
+	}
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return store, err
 	}
@@ -84,6 +100,9 @@ func saveStore(path string, store credentialStore) error {
 		}
 		if !info.Mode().IsRegular() {
 			return errors.New("credential store must be a regular file")
+		}
+		if err := securefile.CheckSingleLink(info, "credential store"); err != nil {
+			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

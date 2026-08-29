@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 	"golang.org/x/sys/unix"
 )
 
@@ -70,7 +71,20 @@ func (e *Engine) secureOpenRead(path string) (*os.File, string, error) {
 		}
 		return nil, "", errors.New("resolved path is outside the allowed root or reserved for chat-with-cli private state")
 	}
-	return os.NewFile(uintptr(fd), canonical), canonical, nil
+	file := os.NewFile(uintptr(fd), canonical)
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, "", errors.New("resolved path is not a regular file")
+	}
+	if err := securefile.CheckSingleLink(info, "file"); err != nil {
+		_ = file.Close()
+		return nil, "", err
+	}
+	return file, canonical, nil
 }
 
 func openChildDir(parentFD int, name string, create bool) (int, error) {
@@ -160,7 +174,20 @@ func (e *Engine) secureOpenAppend(path string) (*os.File, string, error) {
 		}
 		return nil, "", errors.New("append target is not a regular file")
 	}
-	return os.NewFile(uintptr(fd), canonical), canonical, nil
+	file := os.NewFile(uintptr(fd), canonical)
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, "", errors.New("append target is not a regular file")
+	}
+	if err := securefile.CheckSingleLink(info, "file"); err != nil {
+		_ = file.Close()
+		return nil, "", err
+	}
+	return file, canonical, nil
 }
 
 func secureExistingMode(parentFD int, base string, fallback os.FileMode) (os.FileMode, error) {

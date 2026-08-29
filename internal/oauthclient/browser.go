@@ -53,8 +53,13 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 		return Credential{}, err
 	}
 	registrationChallengeEndpoint := ""
+	authorizationChallengeEndpoint := ""
 	if m.DeviceIdentity != nil {
 		registrationChallengeEndpoint, err = sameOriginEndpoint(base, meta.RegistrationChallengeEndpoint, "registration challenge endpoint")
+		if err != nil {
+			return Credential{}, err
+		}
+		authorizationChallengeEndpoint, err = sameOriginEndpoint(base, meta.AuthorizationChallengeEndpoint, "authorization challenge endpoint")
 		if err != nil {
 			return Credential{}, err
 		}
@@ -124,6 +129,28 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 	q.Set("scope", "agent:connect offline_access")
 	q.Set("resource", resource)
 	q.Set("state", state)
+	if m.DeviceIdentity != nil {
+		challengeBody := map[string]any{
+			"client_id": reg.ClientID, "redirect_uri": redirect, "resource": resource,
+			"scope": "agent:connect offline_access", "state": state, "code_challenge": challenge,
+		}
+		var challengeResponse struct {
+			Challenge string `json:"challenge"`
+		}
+		if err := postJSON(ctx, client, authorizationChallengeEndpoint, challengeBody, &challengeResponse); err != nil {
+			return Credential{}, fmt.Errorf("obtain device authorization challenge: %w", err)
+		}
+		authorizationChallenge := strings.TrimSpace(challengeResponse.Challenge)
+		if authorizationChallenge == "" {
+			return Credential{}, errors.New("device authorization challenge returned no challenge")
+		}
+		proof, err := m.DeviceIdentity.SignAuthorizationProof(reg.ClientID, redirect, resource, "agent:connect offline_access", state, challenge, authorizationChallenge)
+		if err != nil {
+			return Credential{}, fmt.Errorf("sign device authorization proof: %w", err)
+		}
+		q.Set("chat_with_cli_authorization_challenge", authorizationChallenge)
+		q.Set("chat_with_cli_device_proof", proof)
+	}
 	u.RawQuery = q.Encode()
 
 	result := make(chan callbackResult, 1)
@@ -157,7 +184,13 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 		opener = openBrowser
 	}
 	if err := opener(u.String()); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Could not open a browser automatically (%v). Open this URL manually:\n%s\n", err, u.String())
+		manualPath, saveErr := saveManualAuthorizationURL(u.String())
+		if saveErr == nil {
+			defer os.Remove(manualPath)
+			_, _ = fmt.Fprintf(os.Stderr, "Could not open a browser automatically. The authorization URL was saved to a private temporary file: %s\nOpen that file locally in a browser; it will be removed after this OAuth attempt.\n", manualPath)
+		} else {
+			_, _ = fmt.Fprintln(os.Stderr, "Could not open a browser automatically and could not save the authorization URL privately. Fix the browser opener and retry.")
+		}
 	}
 	var cb callbackResult
 	select {
@@ -188,6 +221,33 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 	return Credential{Issuer: meta.Issuer, Resource: resource, ClientID: reg.ClientID,
 		AccessToken: token.AccessToken, RefreshToken: token.RefreshToken,
 		ExpiresAt: time.Now().Add(time.Duration(token.ExpiresIn) * time.Second).Unix()}, nil
+}
+
+func saveManualAuthorizationURL(target string) (string, error) {
+	file, err := os.CreateTemp("", ".chat-with-cli-oauth-url-*")
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	cleanup := func(err error) (string, error) {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return cleanup(err)
+	}
+	if _, err := file.WriteString(target + "\n"); err != nil {
+		return cleanup(err)
+	}
+	if err := file.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
 }
 
 func sameOriginEndpoint(base, raw, name string) (string, error) {

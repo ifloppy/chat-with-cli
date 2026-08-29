@@ -3,7 +3,6 @@ package oauthclient
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,11 +25,12 @@ type Manager struct {
 }
 
 type authMetadata struct {
-	Issuer                        string `json:"issuer"`
-	AuthorizationEndpoint         string `json:"authorization_endpoint"`
-	TokenEndpoint                 string `json:"token_endpoint"`
-	RegistrationEndpoint          string `json:"registration_endpoint"`
-	RegistrationChallengeEndpoint string `json:"chat_with_cli_registration_challenge_endpoint"`
+	Issuer                         string `json:"issuer"`
+	AuthorizationEndpoint          string `json:"authorization_endpoint"`
+	TokenEndpoint                  string `json:"token_endpoint"`
+	RegistrationEndpoint           string `json:"registration_endpoint"`
+	RegistrationChallengeEndpoint  string `json:"chat_with_cli_registration_challenge_endpoint"`
+	AuthorizationChallengeEndpoint string `json:"chat_with_cli_authorization_challenge_endpoint"`
 }
 
 type registrationResponse struct {
@@ -47,7 +47,7 @@ type tokenResponse struct {
 func normalizeRelay(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "", fmt.Errorf("invalid relay URL %q", raw)
+		return "", errors.New("invalid relay URL")
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
@@ -92,6 +92,9 @@ func (m *Manager) Resource() (string, error) {
 }
 
 func (m *Manager) Token(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	resource, err := m.Resource()

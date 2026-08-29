@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 const maxAuditLogBytes int64 = 8 << 20
@@ -41,15 +42,23 @@ func (a *auditLog) record(method string, started time.Time, callErr error) {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return
 		}
+		if err := securefile.CheckSingleLink(info, "audit log"); err != nil {
+			return
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return
 	}
 	_ = a.rotateLocked(int64(len(data) + 1))
-	file, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	file, err := securefile.Open(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600, "audit log")
 	if err != nil {
 		return
 	}
-	_ = os.Chmod(a.path, 0o600)
+	_ = file.Chmod(0o600)
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || securefile.CheckSingleLink(info, "audit log") != nil {
+		_ = file.Close()
+		return
+	}
 	_, _ = file.Write(append(data, '\n'))
 	_ = file.Close()
 }
@@ -64,6 +73,9 @@ func (a *auditLog) rotateLocked(incoming int64) error {
 			return err
 		}
 		return errors.New("audit log must be a regular file")
+	}
+	if err := securefile.CheckSingleLink(info, "audit log"); err != nil {
+		return err
 	}
 	if info.Size()+incoming <= maxAuditLogBytes {
 		return err
@@ -97,11 +109,21 @@ func (a *auditLog) recent(limit int) (AuditRecentOutput, error) {
 }
 
 func readAuditFile(path string) ([]AuditEvent, error) {
-	file, err := os.Open(path)
+	file, err := securefile.Open(path, os.O_RDONLY, 0, "audit log")
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("audit log must be a regular file")
+	}
+	if err := securefile.CheckSingleLink(info, "audit log"); err != nil {
+		return nil, err
+	}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	events := make([]AuditEvent, 0, 128)

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 const (
@@ -19,7 +21,7 @@ func openStateGuard(stateDir string) (*os.File, bool, error) {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, false, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := securefile.Open(path, os.O_CREATE|os.O_RDWR, 0o600, "OAuth state guard")
 	if err != nil {
 		return nil, false, err
 	}
@@ -36,6 +38,9 @@ func openStateGuard(stateDir string) (*os.File, bool, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return fail(errors.New("OAuth state guard must be a regular file"))
+	}
+	if err := securefile.CheckSingleLink(info, "OAuth state guard"); err != nil {
+		return fail(err)
 	}
 	data := make([]byte, 16)
 	n, err := file.ReadAt(data, 0)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 const (
@@ -365,7 +366,18 @@ func (e *Engine) loadPortalRestoreTokenLocked() {
 	if e.cfg.ComputerPersistMode != "persistent" {
 		return
 	}
-	data, err := os.ReadFile(e.portalTokenPath())
+	path := e.portalTokenPath()
+	info, err := os.Lstat(path)
+	if err != nil {
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return
+	}
+	if err := securefile.CheckSingleLink(info, "desktop portal restore token"); err != nil {
+		return
+	}
+	data, err := securefile.Read(path, "desktop portal restore token")
 	if err == nil {
 		e.portalRestoreToken = strings.TrimSpace(string(data))
 	}

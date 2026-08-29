@@ -81,6 +81,9 @@ func (c RemoteCaller) Call(ctx context.Context, method string, raw json.RawMessa
 }
 
 func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMessage) (json.RawMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	rpcCtx, cancel := context.WithTimeout(ctx, maxRPCTime)
 	defer cancel()
 	b.mu.RLock()

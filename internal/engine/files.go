@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
@@ -45,6 +47,9 @@ func (e *Engine) readFileContext(ctx context.Context, in FileReadInput) (FileRea
 	}
 	if !stat.Mode().IsRegular() {
 		return FileReadOutput{}, errors.New("path is not a regular file")
+	}
+	if err := securefile.CheckSingleLink(stat, "file"); err != nil {
+		return FileReadOutput{}, err
 	}
 	if in.Offset > stat.Size() {
 		in.Offset = stat.Size()
@@ -352,7 +357,7 @@ func (e *Engine) readCheckpointContext(ctx context.Context, in CheckpointReadInp
 	if err != nil {
 		return CheckpointOutput{}, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := securefile.Read(path, "checkpoint")
 	if errors.Is(err, os.ErrNotExist) {
 		return CheckpointOutput{Workspace: workspace}, nil
 	}
@@ -422,6 +427,9 @@ func atomicWriteFile(path string, data []byte) error {
 		if !info.Mode().IsRegular() {
 			return errors.New("refusing to replace a non-regular file")
 		}
+		if err := securefile.CheckSingleLink(info, "file"); err != nil {
+			return err
+		}
 		mode = info.Mode().Perm()
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -436,6 +444,9 @@ func atomicWriteFileMode(path string, data []byte, mode os.FileMode) error {
 		}
 		if !info.Mode().IsRegular() {
 			return errors.New("refusing to replace a non-regular file")
+		}
+		if err := securefile.CheckSingleLink(info, "file"); err != nil {
+			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

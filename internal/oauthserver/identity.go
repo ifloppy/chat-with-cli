@@ -221,7 +221,9 @@ func (s *Server) register(username, password string) (User, error, bool) {
 func (s *Server) clearSession(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil && cookie.Value != "" {
 		s.mu.Lock()
-		delete(s.sessions, tokenKey(cookie.Value))
+		handle := tokenKey(cookie.Value)
+		delete(s.sessions, handle)
+		delete(s.ephemeralSessions, handle)
 		_ = s.saveLocked()
 		s.mu.Unlock()
 	}
@@ -242,6 +244,14 @@ func (s *Server) sessionUser(r *http.Request) (User, bool) {
 	record, ok := s.sessions[tokenKey(cookie.Value)]
 	if !ok {
 		return User{}, false
+	}
+	if s.persistenceFault {
+		if _, ephemeral := s.ephemeralSessions[tokenKey(cookie.Value)]; !ephemeral {
+			// Persisted sessions may reflect a state mutation that was not
+			// durably resolved. Require a fresh login, which creates only an
+			// explicitly process-local recovery session until recovery writes.
+			return User{}, false
+		}
 	}
 	user, ok := s.users[record.UserID]
 	if !ok || user.Disabled {
@@ -270,10 +280,12 @@ func (s *Server) createSession(authenticated User) (string, error) {
 	}
 	now := time.Now().Unix()
 	snapshot := s.snapshotMutableStateLocked()
-	s.sessions[tokenKey(token)] = sessionRecord{UserID: current.ID, CreatedAt: now, LastSeenAt: now, LastReauthAt: now, Expires: time.Now().Add(sessionLifetime).Unix()}
+	handle := tokenKey(token)
+	s.sessions[handle] = sessionRecord{UserID: current.ID, CreatedAt: now, LastSeenAt: now, LastReauthAt: now, Expires: time.Now().Add(sessionLifetime).Unix()}
 	if s.persistenceFault {
 		// Recovery sessions are process-local. Browser login must remain
 		// possible without consuming a dirty authorization-state guard.
+		s.ephemeralSessions[handle] = struct{}{}
 		s.mu.Unlock()
 		return token, nil
 	}

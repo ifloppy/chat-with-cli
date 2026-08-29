@@ -71,3 +71,38 @@ func TestRegistrationProofBindsDeviceAndRedirect(t *testing.T) {
 		t.Fatal("registration proof accepted for another Relay challenge")
 	}
 }
+
+func TestAuthorizationProofBindsOAuthRequest(t *testing.T) {
+	identity, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		clientID               = "client-id"
+		redirectURI            = "http://127.0.0.1:4321/callback"
+		resource               = "http://127.0.0.1:4321/agent/id/0123456789abcdef0123456789abcdef"
+		scope                  = "agent:connect offline_access"
+		state                  = "fresh-state"
+		codeChallenge          = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012"
+		authorizationChallenge = "relay-issued-authorization-challenge"
+	)
+	proof, err := identity.SignAuthorizationProof(clientID, redirectURI, resource, scope, state, codeChallenge, authorizationChallenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyAuthorizationProof(identity.PublicKey(), clientID, redirectURI, resource, scope, state, codeChallenge, authorizationChallenge, proof) {
+		t.Fatal("authorization proof was rejected")
+	}
+	if VerifyAuthorizationProof(identity.PublicKey(), clientID, redirectURI, resource, scope, "other-state", codeChallenge, authorizationChallenge, proof) {
+		t.Fatal("authorization proof was accepted for another OAuth state")
+	}
+	if VerifyAuthorizationProof(identity.PublicKey(), clientID, redirectURI, resource, scope, state, "other-challenge", authorizationChallenge, proof) {
+		t.Fatal("authorization proof was accepted for another PKCE challenge")
+	}
+	if VerifyAuthorizationProof(identity.PublicKey(), "other-client", redirectURI, resource, scope, state, codeChallenge, authorizationChallenge, proof) {
+		t.Fatal("authorization proof was accepted for another client")
+	}
+	if VerifyAuthorizationProof(identity.PublicKey(), clientID, redirectURI, resource, scope, state, codeChallenge, "other-authorization-challenge", proof) {
+		t.Fatal("authorization proof was accepted for another Relay authorization challenge")
+	}
+}

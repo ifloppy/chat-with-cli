@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
 const (
@@ -64,7 +66,10 @@ func Load(path string) (*Identity, error) {
 	if info.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("device identity %s must not be accessible by group/other", path)
 	}
-	data, err := os.ReadFile(path)
+	if err := securefile.CheckSingleLink(info, "device identity"); err != nil {
+		return nil, err
+	}
+	data, err := securefile.Read(path, "device identity")
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +91,9 @@ func (i *Identity) Save(path string) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("refusing to replace non-regular device identity")
+		}
+		if err := securefile.CheckSingleLink(info, "device identity"); err != nil {
+			return err
 		}
 		return os.ErrExist
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -209,4 +217,36 @@ func VerifyRegistrationProof(pub ed25519.PublicKey, deviceID, clientName, redire
 		return false
 	}
 	return ed25519.Verify(pub, registrationProofMessage(deviceID, clientName, redirectURI, challenge), sig)
+}
+
+const authorizationProofContext = "chat-with-cli-agent-authorization-v1"
+
+func authorizationProofMessage(clientID, redirectURI, resource, scope, state, codeChallenge, authorizationChallenge string) []byte {
+	return []byte(authorizationProofContext + "\n" + clientID + "\n" + redirectURI + "\n" + resource + "\n" + scope + "\n" + state + "\n" + codeChallenge + "\n" + authorizationChallenge)
+}
+
+// SignAuthorizationProof binds an Agent browser authorization request to the
+// the device private key and a Relay-issued one-time challenge. The request
+// contains fresh OAuth state and PKCE values, so a proof cannot be moved to
+// another client, redirect, resource, or flow.
+func (i *Identity) SignAuthorizationProof(clientID, redirectURI, resource, scope, state, codeChallenge, authorizationChallenge string) (string, error) {
+	if i == nil || len(i.private) != ed25519.PrivateKeySize {
+		return "", errors.New("device identity is unavailable")
+	}
+	if clientID == "" || redirectURI == "" || resource == "" || scope == "" || state == "" || codeChallenge == "" || authorizationChallenge == "" {
+		return "", errors.New("complete OAuth authorization binding is required")
+	}
+	sig := ed25519.Sign(i.private, authorizationProofMessage(clientID, redirectURI, resource, scope, state, codeChallenge, authorizationChallenge))
+	return base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+func VerifyAuthorizationProof(pub ed25519.PublicKey, clientID, redirectURI, resource, scope, state, codeChallenge, authorizationChallenge, encodedSignature string) bool {
+	if len(pub) != ed25519.PublicKeySize || clientID == "" || redirectURI == "" || resource == "" || scope == "" || state == "" || codeChallenge == "" || authorizationChallenge == "" {
+		return false
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(encodedSignature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(pub, authorizationProofMessage(clientID, redirectURI, resource, scope, state, codeChallenge, authorizationChallenge), sig)
 }
