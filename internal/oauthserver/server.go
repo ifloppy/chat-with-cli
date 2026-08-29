@@ -995,6 +995,7 @@ func (s *Server) resourceOwnershipIntactLocked(userID, resource, requiredScope s
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /assets/app.css", s.handleUIAsset)
 	mux.HandleFunc("GET /assets/app.js", s.handleUIAsset)
+	mux.HandleFunc("GET /assets/material-web.js", s.handleUIAsset)
 	mux.HandleFunc("GET /{$}", s.handleLanding)
 	mux.HandleFunc("GET /docs", s.handleDocs)
 	mux.HandleFunc("GET /connect", s.handleConnect)
@@ -1634,7 +1635,7 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	s.setCSRFCookie(w, csrfToken)
 	user, loggedIn := s.sessionUser(r)
-	s.renderAuthorizationWithCSRF(w, requestID, client, resource, scope, redirectURI, csrfToken, user, loggedIn)
+	s.renderAuthorizationWithCSRFRequest(w, r, requestID, client, resource, scope, redirectURI, csrfToken, user, loggedIn)
 }
 
 var authorizationTemplate = template.Must(template.New("authorization").Parse(`<!doctype html>
@@ -1657,6 +1658,10 @@ func (s *Server) renderAuthorization(w http.ResponseWriter, requestID string, cl
 }
 
 func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID string, client Client, resource, scope, redirectURI, csrfToken string, user User, loggedIn bool) {
+	s.renderAuthorizationWithCSRFRequest(w, nil, requestID, client, resource, scope, redirectURI, csrfToken, user, loggedIn)
+}
+
+func (s *Server) renderAuthorizationWithCSRFRequest(w http.ResponseWriter, r *http.Request, requestID string, client Client, resource, scope, redirectURI, csrfToken string, user User, loggedIn bool) {
 	name := strings.TrimSpace(client.Name)
 	if name == "" {
 		name = client.ID
@@ -1678,7 +1683,7 @@ func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID st
 	if origin := callbackOrigin(redirectURI); origin != "" {
 		callback = origin
 	}
-	_ = executeUITemplate(w, nil, authorizationTemplate, map[string]any{
+	_ = executeUITemplate(w, r, authorizationTemplate, map[string]any{
 		"RequestID": requestID, "Client": name, "ClientID": client.ID, "Callback": callback, "Resource": resource, "Scope": scope,
 		"CSRFToken": csrfToken, "LoggedIn": loggedIn, "Username": user.Username, "PublicInstance": publicInstance,
 		"RegistrationAvailable": openRegistration || inviteOnly, "InviteRequired": inviteOnly,
@@ -1762,7 +1767,7 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		s.setCSRFCookie(w, csrfToken)
-		s.renderAuthorizationWithCSRF(w, requestID, client, pending.Resource, pending.Scope, pending.RedirectURI, csrfToken, User{}, false)
+		s.renderAuthorizationWithCSRFRequest(w, r, requestID, client, pending.Resource, pending.Scope, pending.RedirectURI, csrfToken, User{}, false)
 		return
 	}
 	if decision == "deny" {

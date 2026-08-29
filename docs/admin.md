@@ -16,6 +16,9 @@ actions use one-way handles.
 
 Available controls include:
 
+- review the current private/public instance mode and, when the mode was not
+  fixed by startup configuration, switch it from the dashboard; a mode change
+  closes open registration until it is explicitly enabled again;
 - enable/disable open public registration and DCR, create single-use 24-hour
   invites, and revoke unused invites;
 - emergency disable/re-enable MCP or Agent access;

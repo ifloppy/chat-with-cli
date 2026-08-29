@@ -34,6 +34,7 @@ func TestLocalUIAssetsAndMonetizationContract(t *testing.T) {
 	}{
 		{"/assets/app.css", "text/css", "--md-primary"},
 		{"/assets/app.js", "application/javascript", "data-i18n"},
+		{"/assets/material-web.js", "application/javascript", "md-filled-button"},
 	} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, s.absolute(tc.path), nil))
@@ -79,8 +80,12 @@ func TestLocalUIAssetsAndMonetizationContract(t *testing.T) {
 	if strings.Contains(body, "<style") || !strings.Contains(body, "/assets/app.css") || !strings.Contains(body, "/assets/app.js") {
 		t.Fatalf("landing page did not use the shared local UI assets")
 	}
-	if strings.Contains(landing.Header().Get("Content-Security-Policy"), "unsafe-inline") {
-		t.Fatalf("UI CSP unexpectedly permits inline code: %s", landing.Header().Get("Content-Security-Policy"))
+	csp := landing.Header().Get("Content-Security-Policy")
+	if strings.Contains(csp, "script-src 'unsafe-inline'") || strings.Contains(csp, "style-src 'unsafe-inline'") {
+		t.Fatalf("UI CSP unexpectedly permits inline code: %s", csp)
+	}
+	if !strings.Contains(csp, "style-src-attr 'unsafe-inline'") || !strings.Contains(csp, "style-src 'self' 'nonce-") {
+		t.Fatalf("UI CSP is missing the scoped Material Web style policy: %s", csp)
 	}
 	for _, path := range []string{"/docs?lang=zh-CN", "/connect?lang=zh-CN", "/account?lang=zh-CN", "/admin?lang=zh-CN"} {
 		page := httptest.NewRecorder()

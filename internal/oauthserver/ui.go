@@ -2,11 +2,19 @@ package oauthserver
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"html/template"
 	"net/http"
 	"strings"
 )
+
+// materialWebJS is the audited, tree-shaken Material Web runtime generated
+// from web/src/material-web.js. It is embedded so the Relay remains a single
+// binary and never reaches a CDN for UI code.
+//
+//go:embed assets/material-web.js
+var materialWebJS []byte
 
 // appCSS is intentionally shipped with the binary. The Relay remains a
 // single-file deployment while the web UI gets a consistent Material 3
@@ -40,6 +48,26 @@ const appCSS = `
   --md-radius-sm: 8px;
   --md-radius-md: 16px;
   --md-radius-lg: 28px;
+  /* Material Web consumes the canonical M3 system-token names. */
+  --md-sys-color-primary: var(--md-primary);
+  --md-sys-color-on-primary: var(--md-on-primary);
+  --md-sys-color-primary-container: var(--md-primary-container);
+  --md-sys-color-on-primary-container: var(--md-on-primary-container);
+  --md-sys-color-secondary: var(--md-secondary);
+  --md-sys-color-secondary-container: var(--md-secondary-container);
+  --md-sys-color-surface: var(--md-surface);
+  --md-sys-color-surface-container: var(--md-surface-container);
+  --md-sys-color-surface-container-high: var(--md-surface-container-high);
+  --md-sys-color-on-surface: var(--md-on-surface);
+  --md-sys-color-on-surface-variant: var(--md-on-surface-variant);
+  --md-sys-color-outline: var(--md-outline);
+  --md-sys-color-outline-variant: var(--md-outline-variant);
+  --md-sys-color-error: var(--md-danger);
+  --md-sys-color-on-error: #ffffff;
+  --md-sys-color-error-container: var(--md-danger-container);
+  --md-sys-color-on-error-container: var(--md-danger);
+  --md-sys-color-shadow: #000000;
+  --md-ref-typeface-plain: Inter, ui-sans-serif, system-ui, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -292,12 +320,221 @@ details[open] > summary::after { content: "−"; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+
+/* Material 3 component layer. Keep these tokens and state layers local so the
+   single-binary Relay does not depend on a CDN or an opaque runtime bundle. */
+body {
+  padding: 0;
+  background: var(--md-surface);
+}
+.page {
+  width: min(1200px, 100%);
+  padding: 0 32px 72px;
+}
+.page.narrow { width: min(860px, 100%); }
+.page.compact { width: min(560px, 100%); }
+.topbar {
+  min-height: 80px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--md-outline-variant);
+}
+.brand-mark { border-radius: 12px; box-shadow: none; }
+.nav { gap: 4px; }
+.nav a {
+  position: relative;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 14px;
+  border-radius: 20px;
+  overflow: hidden;
+}
+.nav a::after, .button::after, button::after, .icon-button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .16s ease;
+}
+.nav a:hover::after, .button:hover::after, button:hover::after, .icon-button:hover::after,
+.nav a:focus-visible::after, .button:focus-visible::after, button:focus-visible::after, .icon-button:focus-visible::after { opacity: .08; }
+.nav a:active, .button:active, button:active, .icon-button:active { transform: scale(.97); }
+.ui-controls { gap: 8px; margin-left: 8px; padding-left: 12px; border-left: 1px solid var(--md-outline-variant); }
+.ui-controls-floating {
+  top: 16px;
+  right: 24px;
+  border-radius: 16px;
+  padding: 4px;
+}
+.ui-controls select, .icon-button {
+  min-height: 40px;
+  border-radius: 12px;
+  background: var(--md-surface);
+}
+.ui-controls select { padding: 7px 30px 7px 12px; }
+.icon-button { position: relative; overflow: hidden; padding: 8px 11px; }
+.hero {
+  margin-top: 12px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: 24px;
+  background: var(--md-surface-container-low);
+  padding: 48px;
+}
+.hero-visual { border-radius: 24px; box-shadow: var(--md-shadow); }
+.eyebrow, .badge { border-radius: 8px; }
+.feature-card, .card, .control-card, .stat-card, .auth-card, .surface, .table-card, .onboarding {
+  border: 1px solid var(--md-outline-variant);
+  border-radius: 16px;
+  background: var(--md-surface-container-low);
+  box-shadow: none;
+}
+.feature-card, .card { padding: 24px; }
+.section { border: 0; background: transparent; margin: 0; padding: 40px 0; }
+.section-heading { margin-bottom: 24px; }
+.stat-card {
+  display: flex;
+  min-height: 126px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 20px;
+}
+.stat-value { display: block; color: var(--md-on-surface); font-size: 32px; font-weight: 760; letter-spacing: -.04em; line-height: 1; }
+.stat-label { display: block; color: var(--md-on-surface-variant); font-size: 14px; line-height: 1.35; }
+.stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.button, button {
+  position: relative;
+  min-height: 40px;
+  overflow: hidden;
+  border-radius: 20px;
+  border-color: transparent;
+  padding: 9px 20px;
+  box-shadow: none;
+  transition: background .16s ease, box-shadow .16s ease, transform .12s ease;
+}
+.button:hover, button:hover { box-shadow: none; transform: translateY(-1px); }
+.button.primary, button.primary { box-shadow: 0 1px 2px color-mix(in srgb, var(--md-on-surface) 18%, transparent); }
+.button.tonal { border-color: transparent; background: var(--md-secondary-container); color: var(--md-on-surface); }
+.button.outlined, button.outlined { border-color: var(--md-outline); background: transparent; color: var(--md-primary); }
+.button.text { min-height: 40px; padding-inline: 12px; }
+.button.danger, button.danger, .danger { border-color: transparent; }
+button:disabled { cursor: not-allowed; opacity: .55; box-shadow: none; }
+.ripple {
+  position: absolute;
+  z-index: 1;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .24;
+  pointer-events: none;
+  transform: scale(0);
+  animation: md-ripple .52s ease-out;
+}
+@keyframes md-ripple { to { opacity: 0; transform: scale(7); } }
+.surface { margin: 20px 0; padding: 24px; }
+.admin-page .page-header { padding: 32px 0 24px; }
+.admin-page .page-header h1 { font-size: clamp(32px, 5vw, 52px); }
+.admin-summary { display: flex; align-items: end; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin: 0 0 24px; }
+.admin-summary p { margin: 0; color: var(--md-on-surface-variant); }
+.admin-summary strong { color: var(--md-on-surface); }
+.section-heading .eyebrow { margin-bottom: 10px; }
+.control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.control-card { display: flex; flex-direction: column; gap: 14px; min-height: 178px; padding: 20px; }
+.control-card h3 { margin: 0; }
+.control-card p { margin: 0; color: var(--md-on-surface-variant); font-size: 14px; }
+.control-card-header { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.setting-form { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: auto; }
+.setting-form select { width: auto; min-width: 140px; }
+.setting-form button { margin-top: 0; }
+.field-label { display: block; margin: 0; color: var(--md-on-surface-variant); font-size: 12px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.field-help { color: var(--md-on-surface-variant); font-size: 13px; }
+.status, .pill { min-height: 28px; border: 1px solid var(--md-outline-variant); border-radius: 8px; padding: 4px 9px; }
+.status.ok { border-color: color-mix(in srgb, var(--md-success) 35%, var(--md-outline-variant)); background: color-mix(in srgb, var(--md-success-container) 42%, var(--md-surface)); }
+.status.bad { border-color: color-mix(in srgb, var(--md-danger) 35%, var(--md-outline-variant)); background: color-mix(in srgb, var(--md-danger-container) 42%, var(--md-surface)); }
+.status.warn { border-color: color-mix(in srgb, var(--md-warning) 35%, var(--md-outline-variant)); background: color-mix(in srgb, var(--md-warning-container) 42%, var(--md-surface)); }
+.table-card { padding: 0; overflow: hidden; }
+.table-card > .table-intro, .table-card > form:first-child { margin: 0; padding: 20px 24px; }
+.table-wrap { overflow-x: auto; padding: 0 24px 20px; }
+.table-wrap table { min-width: 720px; }
+table { display: table; overflow: visible; }
+th, td { padding: 16px 12px; }
+th { background: var(--md-surface-container); }
+.table-actions { min-width: 250px; }
+.disclosure { padding: 0; overflow: hidden; }
+.disclosure > summary { padding: 20px 24px; }
+.disclosure > table, .disclosure > p, .disclosure > .table-wrap { margin-inline: 24px; }
+.disclosure > table { width: calc(100% - 48px); }
+.auth-card { margin: 28px 0; padding: 28px; }
+.auth-card .eyebrow { margin-bottom: 8px; }
+.auth-card h1 { margin: 8px 0 10px; font-size: clamp(32px, 6vw, 46px); }
+.auth-card > p { color: var(--md-on-surface-variant); }
+.auth-form { display: grid; gap: 4px; margin-top: 24px; }
+.auth-form label { margin: 8px 0 0; }
+.auth-form button { justify-self: start; margin-top: 16px; }
+.auth-footer { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 20px; }
+.topbar .button { min-height: 36px; padding: 7px 14px; }
+.onboarding { padding: 24px; }
+.onboarding > p { margin-top: 0; color: var(--md-on-surface-variant); }
+
+/* The controls below are upgraded to the official Material Web elements when
+   the local bundle is ready. These host rules keep the no-JS fallback and the
+   custom-element layout aligned during that progressive enhancement. */
+md-filled-button, md-filled-tonal-button, md-outlined-button, md-text-button, md-icon-button, md-outlined-select {
+  --md-sys-typescale-label-large-font: var(--md-ref-typeface-plain);
+  vertical-align: middle;
+}
+md-filled-button.danger {
+  --md-filled-button-container-color: var(--md-danger);
+  --md-filled-button-label-text-color: #ffffff;
+  --md-filled-button-hover-label-text-color: #ffffff;
+  --md-filled-button-focus-label-text-color: #ffffff;
+  --md-filled-button-pressed-label-text-color: #ffffff;
+  --md-filled-button-hover-state-layer-color: #ffffff;
+  --md-filled-button-pressed-state-layer-color: #ffffff;
+}
+md-filled-button.primary { --md-filled-button-container-color: var(--md-primary); }
+md-filled-tonal-button.tonal { --md-filled-tonal-button-container-color: var(--md-secondary-container); }
+md-outlined-button.outlined { --md-outlined-button-outline-color: var(--md-outline); }
+md-text-button.text { --md-text-button-label-text-color: var(--md-primary); }
+md-icon-button { --md-icon-button-icon-color: var(--md-on-surface-variant); }
+.setting-form md-outlined-select { min-width: 150px; }
+.setting-form md-filled-button, .setting-form md-filled-tonal-button,
+.setting-form md-outlined-button, .setting-form md-text-button { margin-top: 0; }
+.auth-form md-filled-button, .auth-form md-filled-tonal-button,
+.auth-form md-outlined-button, .auth-form md-text-button { justify-self: start; margin-top: 16px; }
+.copy-row md-outlined-button, .copy-row md-text-button { flex: 0 0 auto; }
+.table-actions md-filled-button, .table-actions md-filled-tonal-button,
+.table-actions md-outlined-button, .table-actions md-text-button { min-width: max-content; }
+
+@media (max-width: 840px) {
+  .page { padding-inline: 24px; }
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .control-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 620px) {
+  .page { padding: 0 16px 48px; }
+  .topbar { min-height: 72px; }
+  .ui-controls { margin-left: 0; padding-left: 0; border-left: 0; }
+  .hero { padding: 32px 20px; }
+  .stats-grid { grid-template-columns: 1fr; }
+  .surface, .auth-card, .onboarding { padding: 20px; }
+  .table-card > .table-intro, .table-card > form:first-child { padding: 18px 20px; }
+  .table-wrap { padding-inline: 20px; }
+  .disclosure > summary { padding: 18px 20px; }
+  .disclosure > table, .disclosure > p, .disclosure > .table-wrap { margin-inline: 20px; }
+  .disclosure > table { width: calc(100% - 40px); }
+}
 `
 
 const appJS = `
 (() => {
   "use strict";
   const root = document.documentElement;
+  const styleNonce = document.querySelector('meta[name="cwc-style-nonce"]')?.getAttribute("content");
+  if (styleNonce) window.litNonce = styleNonce;
   const themeKey = "cwc-theme";
   const localeKey = "cwc-locale";
   const translations = {
@@ -334,7 +571,7 @@ const appJS = `
       "A public Relay isolates normal users from each other, but the operator controls the server code and can observe or alter MCP traffic. This includes instances run by the software author. Self-host a private Relay when confidentiality or high-trust computer access matters.": "公共 Relay 可以隔离普通用户，但运营者控制服务器代码，可能观察或修改 MCP 流量。这也包括软件作者运营的实例。需要保密或高信任电脑访问时，请自建私有 Relay。",
       "Health endpoint": "健康检查端点", "Quick start": "快速开始", "Private Relay": "私有 Relay", "Public Relay": "公共 Relay",
       "Agent configuration": "Agent 配置", "Computer Use": "Computer Use", "Threat model": "威胁模型",
-      "Reverse proxy": "反向代理", "Cloudflare": "Cloudflare", "User account": "用户账户", "Administration": "管理",
+      "Reverse proxy": "反向代理", "Cloudflare": "Cloudflare", "User account": "用户账户", "Administration": "管理", "Account": "账户", "Password": "密码", "Chat with CLI account": "Chat with CLI 账户", "Sign in to manage your connected workstations and authorizations.": "登录以管理已连接的工作站和授权。", "Authorizations": "授权", "Sessions": "会话",
       "Troubleshooting": "故障排查", "Backup and restore": "备份与恢复", "Upgrade and rollback": "升级与回滚",
       "Self-host a private Relay with ChatGPT": "使用 ChatGPT 自建私有 Relay",
       "Get started": "开始使用", "Add a workstation in a few calm steps.": "用几个清晰步骤添加工作站。",
@@ -370,7 +607,7 @@ const appJS = `
       "1 · Local token": "1 · 本地 token", "2 · Owner account": "2 · 所有者账户", "3 · Add devices": "3 · 添加设备",
       "Read the protected setup-token file on the Relay host.": "读取 Relay 主机上受保护的 setup-token 文件。", "Create a strong administrator password.": "创建强管理员密码。",
       "Sign in, then pair workstations with immutable IDs.": "登录后，使用不可变 ID 配对工作站。",
-      "One-time setup token": "一次性 setup token", "Owner username": "所有者用户名", "Owner password": "所有者密码", "Instance mode": "实例模式",
+      "One-time setup token": "一次性 setup token", "Owner username": "所有者用户名", "Owner password": "所有者密码", "Instance mode": "实例模式", "Review the Relay state and change high-impact controls from one auditable surface.": "在一个可审计的界面中查看 Relay 状态并修改高影响控制项。", "instance": "实例", "Uptime": "运行时间", "Current mode": "当前模式", "Set mode": "设置模式", "Apply mode": "应用模式", "Public": "公共", "Private": "私有", "Open registration": "开放注册", "Allow new users to create accounts without an invite.": "允许新用户无需邀请即可创建账户。", "Open": "开放", "Closed": "关闭", "Close registration": "关闭注册", "Available in public mode": "仅公共模式可用", "Open registration is available only in public mode.": "只有公共模式支持开放注册。", "DCR": "DCR", "Dynamic client registration for Agents.": "Agent 的动态客户端注册。", "MCP access": "MCP 访问", "Allow clients to invoke the workstation MCP surface.": "允许客户端调用工作站 MCP 接口。", "Agent access": "Agent 访问", "Allow workstations to maintain outbound sessions.": "允许工作站保持主动外连会话。", "Emergency stop": "紧急停止", "Block all MCP and Agent authorization immediately.": "立即阻断所有 MCP 和 Agent 授权。", "Enabled": "已启用", "Disabled": "已停用", "Off": "关闭", "Invite-only access": "仅限邀请访问", "Registered devices": "已注册设备", "User accounts": "用户账户", "Review the Relay state": "查看 Relay 状态", "in flight": "处理中", "to bypass recovery.": "以绕过恢复。", "clients": "客户端", "token records": "令牌记录", "Recent security events": "最近的安全事件", "Admin changes are recorded as security events.": "管理员变更会记录为安全事件。", "Keep registration and runtime capabilities closed unless this Relay is intentionally operating them.": "除非明确要运行这些功能，否则请保持注册和运行时能力关闭。", "Create and manage tenant accounts. Password rotation revokes existing credentials for that user.": "创建并管理租户账户。轮换密码会撤销该用户现有的凭据。", "Password for": "账户密码：",
       "Private — recommended": "私有 — 推荐", "Public — multi-user": "公共 — 多用户", "After setup, sign in to": "设置完成后，请登录", "to review security controls before connecting a workstation.": "，审阅安全控制后再连接工作站。",
       "Keep the setup token local.": "将 setup token 保留在本地。", "Do not paste it into chat, logs, tickets, or command arguments. It is single-use and removed after successful initialization.": "不要把它粘贴到聊天、日志、工单或命令参数中。它只能使用一次，初始化成功后会被删除。",
       "Enable public self-registration immediately. Leave this off unless you intentionally operate a public multi-user Relay.": "立即启用公共自助注册。除非你明确运营公共多用户 Relay，否则请保持关闭。",
@@ -382,7 +619,25 @@ const appJS = `
       "Owner setup is complete. Devices and credentials are visible only after administrator sign-in.": "所有者设置已完成；设备和凭据只有管理员登录后才能查看。",
       "OAuth credentials are bound to one user, exact device resource, and scope. New public devices use cryptographic immutable IDs.": "OAuth 凭据绑定到单一用户、精确设备资源和 scope；新的公共设备使用加密生成的不可变 ID。",
       "Install once, then run": "安装一次，然后运行", "chat-with-cli ui": "chat-with-cli ui",
-      "Open the interactive terminal hub to set up a workstation, connect it, or run diagnostics.": "打开交互式终端中心，设置工作站、连接工作站或运行诊断。"
+      "Open the interactive terminal hub to set up a workstation, connect it, or run diagnostics.": "打开交互式终端中心，设置工作站、连接工作站或运行诊断。",
+      "Chat with CLI account": "Chat with CLI 账户", "Sign in to manage your connected workstations and authorizations.": "登录以管理已连接的工作站和授权。",
+      "Do not trust a public Relay with sensitive access.": "不要将敏感权限交给公共 Relay。", "The operator controls the server code and can observe or alter MCP traffic. This service isolates users from each other, not from its operator. Self-host a private Relay for high-trust use.": "运营者控制服务器代码，可能观察或修改 MCP 流量。此服务只隔离用户之间的访问，不能隔离用户与运营者。需要高信任时，请自建私有 Relay。",
+      "Public Relay operator is trusted by design.": "公共 Relay 运营者属于信任边界。", "This page can prove that other normal users are isolated from your devices. It cannot prove that the operator is harmless: the operator can run modified Relay code and observe or alter MCP traffic. Do not grant sensitive computer access to any public instance, including one operated by the software author; self-host when trust matters.": "此页面可以证明其他普通用户与你的设备相互隔离，但不能证明运营者没有恶意：运营者可以运行修改后的 Relay 代码，观察或修改 MCP 流量。不要把敏感电脑权限交给任何公共实例，包括软件作者运营的实例；信任重要时请自建 Relay。",
+      "Devices": "设备", "Authorizations": "授权", "Sessions": "会话", "MCP URL": "MCP URL", "Actions": "操作", "Device": "设备", "Status": "状态", "Capabilities": "能力", "Client": "客户端", "Resource": "资源", "Expires": "到期时间", "Action": "操作", "Session": "会话", "Created": "创建时间", "Last seen": "最后活动", "current": "当前",
+      "PoP bound": "已绑定 PoP", "legacy unbound": "旧版未绑定", "online": "在线", "offline": "离线", "disabled": "已停用", "last seen": "最后活动", "not reported": "未报告", "filesystem read": "文件系统读取", "filesystem write": "文件系统写入", "exec": "执行", "screen read": "屏幕读取", "accessibility read": "辅助功能读取", "computer input": "电脑输入",
+      "Only devices owned by your account are shown. Disabling immediately revokes current device tokens; permanent revocation retires the cryptographic identity.": "这里只显示属于你账户的设备。停用会立即撤销当前设备令牌；永久撤销会废弃该加密身份。", "No devices are owned by this account yet. Pair an Agent first.": "此账户还没有设备，请先配对 Agent。", "These are your token families, not globally shared OAuth client registrations. Revoking one cannot revoke another user's access.": "这些是你的令牌族，不是全局共享的 OAuth 客户端注册。撤销一个令牌族不会影响其他用户的访问。", "No active OAuth token families.": "没有活跃的 OAuth 令牌族。", "Changing your password revokes all OAuth credentials and browser sessions for this account. Reconnect devices and apps afterward.": "修改密码会撤销此账户的所有 OAuth 凭据和浏览器会话；之后请重新连接设备和应用。",
+      "online agents": "在线 Agent", "registered devices": "已注册设备", "retired identities": "已废弃身份", "users": "用户", "OAuth clients": "OAuth 客户端", "sessions": "会话", "Administration": "管理", "Review the Relay state and change high-impact controls from one auditable surface.": "在一个可审计的界面中查看 Relay 状态并修改高影响控制项。", "Signed in as": "当前登录：", "Version": "版本", "instance": "实例", "Uptime": "运行时间",
+      "Authorization is frozen": "授权已冻结", "The Relay detected an incomplete authorization-state transaction. MCP and Agent access remain fail-closed across restarts. Repair storage, repeat the intended revoke/disable action, and persist it successfully; recovery writes force the emergency kill switch on. Restart, verify the security state, then explicitly release the kill switch. Do not delete": "Relay 检测到未完成的授权状态事务。MCP 和 Agent 访问在重启后仍保持故障关闭。请修复存储，重新执行原本要做的撤销/停用操作并成功保存；恢复写入会强制开启紧急停止开关。重启并确认安全状态后，再明确释放停止开关。不要删除", "to bypass recovery.": "以绕过恢复。",
+      "Emergency kill switch is active": "紧急停止开关已开启", "MCP and Agent authorization is globally blocked. Releasing it requires recent administrator authentication.": "MCP 和 Agent 授权已被全局阻断；释放它需要近期的管理员认证。", "Legacy bearer-only Agent migration mode is ENABLED": "旧版仅 bearer Agent 迁移模式已启用", "Unbound alpha Agents can connect using only an Agent bearer token. This weakens device impersonation resistance and must be used only long enough to migrate old devices to new Ed25519 identities, then disabled in the Relay configuration.": "未绑定的 alpha Agent 只凭 Agent bearer token 即可连接。这会降低设备冒充防护，只应使用到旧设备迁移到新的 Ed25519 身份为止，然后在 Relay 配置中关闭。",
+      "Public": "公共", "Private": "私有", "Open": "开放", "Closed": "关闭", "Enabled": "已启用", "Disabled": "已停用", "Off": "关闭", "Close registration": "关闭注册", "Available in public mode": "仅公共模式可用", "Open registration is available only in public mode.": "只有公共模式支持开放注册。",
+      "Keep registration and runtime capabilities closed unless this Relay is intentionally operating them.": "除非明确要运行这些功能，否则请保持注册和运行时能力关闭。", "Allow new users to create accounts without an invite.": "允许新用户无需邀请即可创建账户。", "Dynamic client registration for Agents.": "Agent 的动态客户端注册。", "MCP access": "MCP 访问", "Allow clients to invoke the workstation MCP surface.": "允许客户端调用工作站 MCP 接口。", "Agent access": "Agent 访问", "Allow workstations to maintain outbound sessions.": "允许工作站保持主动外连会话。", "Emergency stop": "紧急停止", "Block all MCP and Agent authorization immediately.": "立即阻断所有 MCP 和 Agent 授权。",
+      "Invites": "邀请", "Invite-only access": "仅限邀请访问", "Registered devices": "已注册设备", "User accounts": "用户账户", "Create and manage tenant accounts. Password rotation revokes existing credentials for that user.": "创建并管理租户账户。轮换密码会撤销该用户现有的凭据。", "No active invites.": "没有活跃邀请。", "in flight": "处理中", "No devices have been claimed.": "还没有设备被认领。", "No approved clients.": "没有已批准的客户端。", "No active tokens.": "没有活跃令牌。", "Recent security events": "最近的安全事件", "Admin changes are recorded as security events.": "管理员变更会记录为安全事件。", "clients": "客户端", "token records": "令牌记录",
+      "User": "用户", "Username": "用户名", "Role / state": "角色 / 状态", "Created / last login": "创建时间 / 最后登录", "admin": "管理员", "active": "活跃", "never": "从未", "device(s)": "台设备", "Logout all": "全部退出", "Revoke": "撤销", "Revoke client": "撤销客户端", "No events recorded.": "没有记录的事件。", "Password for": "账户密码：",
+      "Review the Relay state": "查看 Relay 状态", "Security controls": "安全控制", "Disable DCR": "停用 DCR", "Enable DCR": "启用 DCR", "Disable MCP": "停用 MCP", "Enable MCP": "启用 MCP", "Disable Agent": "停用 Agent", "Enable Agent": "启用 Agent", "Emergency disable now": "立即紧急停用",
+      "Connect your first workstation": "连接你的第一台工作站", "No device is registered yet. Start with the read-only profile; nothing is started automatically.": "还没有注册设备。请从只读 profile 开始；任何服务都不会自动启动。", "1. On the workstation": "1. 在工作站上", "2. Connect the immutable device ID": "2. 连接不可变设备 ID", "3. Review unattended mode separately": "3. 单独审阅无人值守模式", "Run chat-with-cli connect. Browser OAuth opens automatically when needed and foreground sessions can require local capability approval.": "运行 chat-with-cli connect。需要时会自动打开浏览器 OAuth，前台会话可能需要本地能力批准。", "The generated systemd service still uses the configured profile only; enable it explicitly only when those persistent capabilities are acceptable.": "生成的 systemd 服务仍只使用已配置的 profile；只有确认长期能力可接受时才明确启用它。",
+      "Disable is reversible. Revoke permanently retires the device identity so the same private key can never claim this ID again; reconnecting requires a newly generated device identity.": "停用可以恢复。永久撤销会废弃设备身份，使同一私钥永远无法再次认领此 ID；重新连接需要生成新的设备身份。", "Display name": "显示名称", "Immutable ID / route": "不可变 ID / 路由", "Owner": "所有者", "Connection": "连接", "Capabilities": "能力", "No devices have been claimed.": "还没有设备被认领。",
+      "Users": "用户", "Create user": "创建用户", "Username": "用户名", "Role / state": "角色 / 状态", "Created / last login": "创建时间 / 最后登录", "admin": "管理员", "active": "活跃", "never": "从未", "device(s)": "台设备", "Logout all": "全部退出", "Rotate password": "轮换密码", "Delete": "删除", "Browser sessions": "浏览器会话", "Session handles are one-way identifiers; browser cookie values are never displayed.": "会话句柄是单向标识符；浏览器 Cookie 值永远不会显示。", "Log out": "退出登录", "OAuth clients and token metadata": "OAuth 客户端和令牌元数据", "Name / redirects": "名称 / 重定向地址", "No approved clients.": "没有已批准的客户端。", "active token records (metadata only; bearer values are never displayed).": "条活跃令牌记录（只有元数据，绝不显示 bearer 值）。", "Kind": "类型", "No active tokens.": "没有活跃令牌。", "Revoke client": "撤销客户端", "Recent security events": "最近的安全事件", "Time": "时间", "Event": "事件", "User / device": "用户 / 设备", "Result": "结果", "success": "成功", "failure": "失败", "No events recorded.": "没有记录的事件。",
+      "new username": "新用户名", "temporary password": "临时密码", "new password": "新密码", "DELETE": "输入 DELETE", "REVOKE": "输入 REVOKE", "type RELEASE": "输入 RELEASE", "Return to admin": "返回管理", "Operator admin": "管理员控制台"
     }
   };
 
@@ -392,7 +647,11 @@ const appJS = `
   function persist(key, value) { try { localStorage.setItem(key, value); } catch (_) {} }
   function locale() {
     const pageLocale = root.dataset.locale || "auto";
-    const selected = pageLocale === "zh-CN" || pageLocale === "en-US" ? pageLocale : stored(localeKey, pageLocale);
+    if (pageLocale === "zh-CN" || pageLocale === "en-US") {
+      persist(localeKey, pageLocale);
+      return pageLocale;
+    }
+    const selected = stored(localeKey, pageLocale);
     if (selected === "zh-CN" || selected === "en-US") return selected;
     return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en-US";
   }
@@ -423,6 +682,11 @@ const appJS = `
       const key = element.dataset.i18nAriaLabel;
       if (!element.dataset.i18nDefaultAriaLabel) element.dataset.i18nDefaultAriaLabel = element.getAttribute("aria-label") || "";
       element.setAttribute("aria-label", dictionary[key] || element.dataset.i18nDefaultAriaLabel);
+    });
+    document.querySelectorAll("[data-i18n-label]").forEach((element) => {
+      const key = element.dataset.i18nLabel;
+      if (!element.dataset.i18nDefaultLabel) element.dataset.i18nDefaultLabel = element.getAttribute("label") || "";
+      element.setAttribute("label", dictionary[key] || element.dataset.i18nDefaultLabel);
     });
     // Older account/admin/OAuth templates do not carry data attributes yet.
     // Translate only complete, non-code text nodes so commands, URLs, user
@@ -459,6 +723,8 @@ const appJS = `
       "Emergency kill switch is active": "紧急停止开关已开启", "MCP and Agent authorization is globally blocked. Releasing it requires recent administrator authentication.": "MCP 和 Agent 授权已被全局阻断；释放它需要近期的管理员认证。",
       "Legacy bearer-only Agent migration mode is ENABLED": "旧版仅 bearer Agent 迁移模式已启用", "Unbound alpha Agents can connect using only an Agent bearer token. This weakens device impersonation resistance and must be used only long enough to migrate old devices to new Ed25519 identities, then disabled in the Relay configuration.": "未绑定的 alpha Agent 只凭 Agent bearer token 即可连接。这会降低设备冒充防护，只应使用到旧设备迁移到新的 Ed25519 身份为止，然后在 Relay 配置中关闭。",
       "Public Relay trust boundary": "公共 Relay 信任边界", "This instance isolates users from each other, not users from the operator. An operator controls the server software and can modify it to observe or alter MCP traffic. Do not promise end-to-end privacy; sensitive users should self-host a private Relay.": "此实例只隔离用户之间的访问，不能隔离用户与运营者。运营者控制服务器软件，可以修改它来观察或修改 MCP 流量。不要承诺端到端隐私；敏感用户应自建私有 Relay。",
+      "This mode is fixed by the Relay configuration. Change the configured instance mode and restart to alter it.": "此模式由 Relay 配置固定。要更改它，请修改实例模式配置并重启。",
+      "Registration is fixed closed by the Relay configuration. Remove the configuration override and restart to change it.": "注册由 Relay 配置固定为关闭。移除配置覆盖并重启后才能更改。", "Fixed by configuration": "由配置固定",
       "online agents": "在线 Agent", "registered devices": "已注册设备", "retired identities": "已废弃身份", "users": "用户", "OAuth clients": "OAuth 客户端", "sessions": "会话",
       "Security controls": "安全控制", "Registration:": "注册：", "DCR:": "DCR：", "MCP:": "MCP：", "Agent:": "Agent：", "Kill switch:": "停止开关：", "enabled": "已启用", "disabled": "已停用", "ACTIVE": "已开启",
       "registration": "注册", "Release kill switch": "释放停止开关", "Emergency disable now": "立即紧急停用", "Invites": "邀请", "Single-use invites allow registration while open self-registration is disabled. Invite plaintext is shown once; only a one-way hash is persisted.": "关闭公开自助注册时，单次邀请仍可允许注册。邀请明文只显示一次，持久化的只有单向哈希。",
@@ -478,6 +744,12 @@ const appJS = `
       "This invite can be used once and expires at": "此邀请只能使用一次，过期时间为", "Shown once.": "只显示一次。", "The Relay stores only a one-way hash of this code. Copy it now.": "Relay 只保存此代码的单向哈希，请现在复制。",
       "Account": "账户", "Password": "密码", "Title": "标题", "Set up Chat with CLI": "设置 Chat with CLI"
     };
+    // A few pages still share older server-rendered copy. Reuse the same
+    // audited dictionary for data attributes on those pages as well.
+    document.querySelectorAll("[data-i18n]").forEach((element) => {
+      const key = element.dataset.i18n;
+      if (!dictionary[key] && legacy[key]) element.textContent = language === "zh-CN" ? legacy[key] : (element.dataset.i18nDefault || element.textContent);
+    });
     const legacyAttributes = {
       "Username": "用户名", "Password": "密码", "current password": "当前密码", "new password": "新密码",
       "new name": "新名称", "new display name": "新的显示名称", "password to enable": "启用所需密码",
@@ -530,9 +802,80 @@ const appJS = `
     });
   }
   function makeControls(host) {
-    host.innerHTML = '<label class="sr-only" for="cwc-language" data-i18n="Language">Language</label><select id="cwc-language" data-language-select aria-label="Language"><option value="auto" data-i18n="Automatic">Auto</option><option value="en-US" data-i18n="English">English</option><option value="zh-CN" data-i18n="中文">中文</option></select><button class="icon-button" type="button" data-theme-toggle><span class="theme-icon" aria-hidden="true">◐</span><span class="sr-only">Theme</span></button>';
-    host.querySelector("select").addEventListener("change", (event) => { root.dataset.locale = event.target.value; persist(localeKey, event.target.value); translate(); applyTheme(stored(themeKey, "auto")); });
-    host.querySelector("[data-theme-toggle]").addEventListener("click", (event) => { const next = event.currentTarget.dataset.nextTheme || "dark"; persist(themeKey, next); applyTheme(next); });
+    host.innerHTML = '<label class="sr-only" for="cwc-language" data-i18n="Language">Language</label><select id="cwc-language" data-language-select data-i18n-label="Language" aria-label="Language"><option value="auto" data-i18n="Automatic">Auto</option><option value="en-US" data-i18n="English">English</option><option value="zh-CN" data-i18n="中文">中文</option></select><button class="icon-button" type="button" data-theme-toggle><span class="theme-icon" aria-hidden="true">◐</span><span class="sr-only">Theme</span></button>';
+  }
+  function bindControls() {
+    document.querySelectorAll("[data-language-select]").forEach((select) => {
+      if (select.dataset.cwcBound) return;
+      select.dataset.cwcBound = "true";
+      select.addEventListener("change", (event) => { root.dataset.locale = event.target.value; persist(localeKey, event.target.value); translate(); applyTheme(stored(themeKey, "auto")); });
+    });
+    document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+      if (button.dataset.cwcBound) return;
+      button.dataset.cwcBound = "true";
+      button.addEventListener("click", (event) => { const next = event.currentTarget.dataset.nextTheme || "dark"; persist(themeKey, next); applyTheme(next); });
+    });
+  }
+
+  function copyElementAttributes(source, target) {
+    Array.from(source.attributes).forEach((attribute) => {
+      if (attribute.name !== "data-cwc-bound") target.setAttribute(attribute.name, attribute.value);
+    });
+  }
+  function materialButtonTag(source) {
+    if (source.classList.contains("primary") || source.classList.contains("danger")) return "md-filled-button";
+    if (source.classList.contains("tonal")) return "md-filled-tonal-button";
+    if (source.classList.contains("outlined")) return "md-outlined-button";
+    return "md-text-button";
+  }
+  function upgradeMaterialButtons() {
+    document.querySelectorAll("a.button, button").forEach((source) => {
+      if (source.closest("md-filled-button, md-filled-tonal-button, md-outlined-button, md-text-button, md-icon-button")) return;
+      if (source.tagName === "A" && !(source.getAttribute("href") || "").startsWith("/")) return;
+      const target = document.createElement(materialButtonTag(source));
+      copyElementAttributes(source, target);
+      target.innerHTML = source.innerHTML;
+      source.replaceWith(target);
+    });
+  }
+  function upgradeMaterialSelects() {
+    document.querySelectorAll("select").forEach((source) => {
+      if (source.closest("md-outlined-select")) return;
+      const target = document.createElement("md-outlined-select");
+      copyElementAttributes(source, target);
+      const label = source.getAttribute("aria-label") || source.previousElementSibling?.textContent.trim() || "";
+      if (label) target.setAttribute("label", label);
+      const selectedValue = source.value;
+      Array.from(source.options).forEach((option) => {
+        const item = document.createElement("md-select-option");
+        if (option.value) item.setAttribute("value", option.value);
+        if (option.disabled) item.setAttribute("disabled", "");
+        if (option.value === selectedValue || option.selected) item.setAttribute("selected", "");
+        const headline = document.createElement("span");
+        headline.slot = "headline";
+        headline.textContent = option.textContent;
+        if (option.dataset.i18n) headline.dataset.i18n = option.dataset.i18n;
+        item.appendChild(headline);
+        target.appendChild(item);
+      });
+      source.replaceWith(target);
+    });
+  }
+  function upgradeMaterialComponents() {
+    if (!customElements.get("md-filled-button")) return;
+    upgradeMaterialSelects();
+    upgradeMaterialButtons();
+    bindControls();
+    bindCopyButtons();
+    translate();
+    applyTheme(stored(themeKey, "auto"));
+  }
+  function loadMaterialWeb() {
+    if (customElements.get("md-filled-button")) { upgradeMaterialComponents(); return; }
+    const script = document.createElement("script");
+    script.src = "/assets/material-web.js?v=1";
+    script.onload = upgradeMaterialComponents;
+    document.head.appendChild(script);
   }
   function copyText(button) {
     const target = document.getElementById(button.dataset.copyTarget);
@@ -552,12 +895,35 @@ const appJS = `
     script.onload = () => { try { (window.adsbygoogle = window.adsbygoogle || []).push({}); } catch (_) {} };
     document.head.appendChild(script);
   }
+  function createRipple(element, event) {
+    if (element.disabled || element.getAttribute("aria-disabled") === "true") return;
+    const rect = element.getBoundingClientRect();
+    const size = Math.max(rect.width, rect.height) * 1.2;
+    const ripple = document.createElement("span");
+    ripple.className = "ripple";
+    ripple.style.width = size + "px";
+    ripple.style.height = size + "px";
+    ripple.style.left = ((event.clientX || rect.left + rect.width / 2) - rect.left - size / 2) + "px";
+    ripple.style.top = ((event.clientY || rect.top + rect.height / 2) - rect.top - size / 2) + "px";
+    element.appendChild(ripple);
+    ripple.addEventListener("animationend", () => ripple.remove(), {once: true});
+  }
   document.querySelectorAll("[data-ui-controls]").forEach(makeControls);
+  bindControls();
   applyTheme(stored(themeKey, "auto"));
   translate();
-  document.querySelectorAll("[data-copy-target]").forEach((button) => button.addEventListener("click", () => copyText(button)));
-  document.querySelectorAll("form").forEach((form) => form.addEventListener("submit", () => { const submit = form.querySelector("button[type=submit], button:not([type])"); if (submit && !form.dataset.allowDoubleSubmit) { submit.disabled = true; submit.setAttribute("aria-busy", "true"); } }));
+  function bindCopyButtons() {
+    document.querySelectorAll("[data-copy-target]").forEach((button) => {
+      if (button.dataset.cwcBound) return;
+      button.dataset.cwcBound = "true";
+      button.addEventListener("click", () => copyText(button));
+    });
+  }
+  bindCopyButtons();
+  document.querySelectorAll(".button, button, .nav a").forEach((element) => element.addEventListener("pointerdown", (event) => createRipple(element, event)));
+  document.querySelectorAll("form").forEach((form) => form.addEventListener("submit", () => { const submit = form.querySelector("button[type=submit], button:not([type]), md-filled-button, md-filled-tonal-button, md-outlined-button, md-text-button"); if (submit && !form.dataset.allowDoubleSubmit) { submit.disabled = true; submit.setAttribute("aria-busy", "true"); } }));
   loadAdSense();
+  loadMaterialWeb();
 })();
 `
 
@@ -607,6 +973,8 @@ func (s *Server) handleUIAsset(w http.ResponseWriter, r *http.Request) {
 		content, contentType = appCSS, "text/css; charset=utf-8"
 	case "/assets/app.js":
 		content, contentType = appJS, "application/javascript; charset=utf-8"
+	case "/assets/material-web.js":
+		content, contentType = string(materialWebJS), "application/javascript; charset=utf-8"
 	default:
 		http.NotFound(w, r)
 		return
@@ -614,6 +982,32 @@ func (s *Server) handleUIAsset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = w.Write([]byte(content))
+}
+
+func uiCSPNonce(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	nonce, _ := r.Context().Value(uiCSPNonceContextKey{}).(string)
+	return nonce
+}
+
+func injectUINonce(html string, r *http.Request) string {
+	nonce := uiCSPNonce(r)
+	if nonce == "" || strings.Contains(html, `name="cwc-style-nonce"`) {
+		return html
+	}
+	meta := `<meta name="cwc-style-nonce" content="` + template.HTMLEscapeString(nonce) + `">`
+	return strings.Replace(html, "<head>", "<head>"+meta, 1)
+}
+
+func executeTemplateWithUINonce(w http.ResponseWriter, r *http.Request, tmpl *template.Template, data any) error {
+	var rendered bytes.Buffer
+	if err := tmpl.Execute(&rendered, data); err != nil {
+		return err
+	}
+	_, err := w.Write([]byte(injectUINonce(rendered.String(), r)))
+	return err
 }
 
 // executeUITemplate upgrades the older, page-local templates during the
@@ -644,9 +1038,12 @@ func executeUITemplate(w http.ResponseWriter, r *http.Request, tmpl *template.Te
 	} else {
 		html = strings.Replace(html, "<html", `<html lang="en" data-locale="`+locale+`"`, 1)
 	}
-	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css">`, 1)
-	html = strings.Replace(html, "<body>", `<body><div class="ui-controls-floating" data-ui-controls></div>`, 1)
-	html = strings.Replace(html, "</body>", `<script src="/assets/app.js" defer></script></body>`, 1)
+	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=3">`, 1)
+	if !strings.Contains(html, `data-ui-controls`) {
+		html = strings.Replace(html, "<body>", `<body><div class="ui-controls-floating" data-ui-controls></div>`, 1)
+	}
+	html = strings.Replace(html, "</body>", `<script src="/assets/app.js?v=3" defer></script></body>`, 1)
+	html = injectUINonce(html, r)
 	_, err := w.Write([]byte(html))
 	return err
 }

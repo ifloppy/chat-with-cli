@@ -1,0 +1,14 @@
+{
+  "name": "chat-with-cli-web-assets",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/material-web.js --bundle --minify --format=iife --legal-comments=inline --outfile=../internal/oauthserver/assets/material-web.js"
+  },
+  "dependencies": {
+    "@material/web": "2.5.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

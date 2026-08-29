@@ -1178,6 +1178,58 @@ func TestAdminFreshAuthPolicyFavorsEmergencyDisable(t *testing.T) {
 	if !requiresFreshAdminAuth("set-kill-switch", "off") {
 		t.Fatal("releasing emergency kill switch should require recent re-authentication")
 	}
+	if !requiresFreshAdminAuth("set-mode", ModePrivate) || !requiresFreshAdminAuth("set-mode", ModePublic) {
+		t.Fatal("changing instance mode should require recent authentication")
+	}
+}
+
+func TestAdminCanSwitchMutableInstanceModeAndKeepsRegistrationClosed(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18922", Password: "mode-switch-admin-password-12345", StateDir: t.TempDir(), Mode: ModePrivate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.mu.Lock()
+	owner := s.users[s.usernames["owner"]]
+	s.mu.Unlock()
+	request := httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)
+	if err := s.applyAdminAction("set-mode", "", ModePublic, owner, request); err != nil {
+		t.Fatalf("switching to public mode failed: %v", err)
+	}
+	s.mu.Lock()
+	if s.cfg.Mode != ModePublic || s.registrationEnabled {
+		s.mu.Unlock()
+		t.Fatalf("public mode did not start with closed registration: mode=%q registration=%v", s.cfg.Mode, s.registrationEnabled)
+	}
+	s.mu.Unlock()
+	if err := s.applyAdminAction("set-registration", "", "on", owner, request); err != nil {
+		t.Fatalf("opening registration in public mode failed: %v", err)
+	}
+	if err := s.applyAdminAction("set-mode", "", ModePrivate, owner, request); err != nil {
+		t.Fatalf("switching back to private mode failed: %v", err)
+	}
+	s.mu.Lock()
+	mode, registration := s.cfg.Mode, s.registrationEnabled
+	s.mu.Unlock()
+	if mode != ModePrivate || registration {
+		t.Fatalf("private mode did not close registration: mode=%q registration=%v", mode, registration)
+	}
+}
+
+func TestConfiguredInstanceModeCannotBeChangedFromAdmin(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18923", Password: "fixed-mode-admin-password-12345", StateDir: t.TempDir(), Mode: ModePrivate, ModeConfigured: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.mu.Lock()
+	owner := s.users[s.usernames["owner"]]
+	s.mu.Unlock()
+	if err := s.applyAdminAction("set-mode", "", ModePublic, owner, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); !errors.Is(err, errInvalidAdminAction) {
+		t.Fatalf("configured mode change returned %v, want invalid administrator action", err)
+	}
 }
 
 func forceOAuthPersistenceFailure(t *testing.T, s *Server) {
@@ -3565,6 +3617,7 @@ func TestPersistenceFaultRecoveryRejectsAuthorityExpansion(t *testing.T) {
 		value  string
 	}{
 		{"create-user", "new-user", "new-user-password-12345"},
+		{"set-mode", "", ModePublic},
 		{"set-registration", "", "on"},
 		{"set-dcr", "", "on"},
 		{"set-mcp", "", "on"},

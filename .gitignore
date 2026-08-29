@@ -1,5 +1,7 @@
 /chat-with-cli
 /dist/
+/.codegraph-cache/
+/web/node_modules/
 *.log
 *.out
 .env
