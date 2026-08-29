@@ -8,6 +8,17 @@ For a normal unprivileged Linux workstation:
 curl -fsSL https://raw.githubusercontent.com/ifloppy/chat-with-cli/main/install.sh | sh
 ```
 
+After the verified binary is installed, the shortest path is:
+
+```bash
+chat-with-cli ui
+```
+
+The interactive terminal hub uses `https://chat-with-cli.iruanp.com` as its
+default Relay and lets you replace it before writing the Agent configuration.
+The same UI opens when `chat-with-cli` is run without arguments in an
+interactive terminal.
+
 The bootstrap script detects Linux amd64/arm64, resolves the newest GitHub
 release (including prereleases), downloads the matching binary and
 `SHA256SUMS`, verifies SHA-256, and atomically installs to

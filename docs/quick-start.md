@@ -11,6 +11,10 @@ go test ./...
 go build -o chat-with-cli ./cmd/chat-with-cli
 ```
 
+For an installed workstation, `chat-with-cli ui` opens the interactive setup
+hub. If no Relay is supplied, the client uses the community public Relay
+`https://chat-with-cli.iruanp.com`; pass `--relay` to use a private Relay.
+
 Run the local MCP server over stdio for a first smoke test:
 
 ```bash

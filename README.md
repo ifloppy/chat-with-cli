@@ -10,6 +10,12 @@ Computer Use controls.
 > Status: early alpha (`v0.1.0-alpha.5`). Linux is the first supported host.
 > Review [SECURITY.md](SECURITY.md) before exposing a Relay publicly.
 
+After installation, run `chat-with-cli ui` (or simply `chat-with-cli` in an
+interactive terminal) to open the terminal hub. It guides first-time setup,
+uses `https://chat-with-cli.iruanp.com` as the default public Relay, and lets
+you run connection diagnostics without memorising subcommands. Pass
+`--relay https://your-relay.example` whenever you want to use another Relay.
+
 ## Five-minute quick start
 
 Build and test locally:
@@ -173,4 +179,6 @@ Portal persistence defaults to the Agent process lifetime. See
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+GPLv3. See [LICENSE](LICENSE). Version/build conventions are documented in
+[docs/release.md](docs/release.md); local commits are encouraged while the
+project remains unreleased.

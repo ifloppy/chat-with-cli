@@ -6,10 +6,11 @@ import (
 	"fmt"
 
 	"github.com/ifloppy/chat-with-cli/internal/engine"
+	"github.com/ifloppy/chat-with-cli/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Version = "0.1.0-alpha.5"
+var Version = version.Value
 
 type Caller interface {
 	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)
