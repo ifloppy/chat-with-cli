@@ -84,6 +84,19 @@ type Config struct {
 	SetupTokenPath string
 	Version        string
 	GitHubURL      string
+	// AdSenseClientID and AdSenseSlot enable the optional web ad slot. They
+	// are intentionally empty by default; no third-party ad code is loaded
+	// until an operator explicitly configures both values.
+	AdSenseClientID string
+	AdSenseSlot     string
+	// AdMob is a native-app integration point. A Relay must never trust a
+	// client-side "I watched an ad" claim; UsageUnlockEndpoint is where a
+	// companion app can exchange a provider-verified reward for a short-lived,
+	// signed entitlement.
+	AdMobAppID          string
+	AdMobRewardUnitID   string
+	UsageUnlockEnabled  bool
+	UsageUnlockEndpoint string
 	// Password is the legacy private-instance bootstrap password alias.
 	Password string
 }
@@ -980,10 +993,13 @@ func (s *Server) resourceOwnershipIntactLocked(userID, resource, requiredScope s
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /assets/app.css", s.handleUIAsset)
+	mux.HandleFunc("GET /assets/app.js", s.handleUIAsset)
 	mux.HandleFunc("GET /{$}", s.handleLanding)
 	mux.HandleFunc("GET /docs", s.handleDocs)
 	mux.HandleFunc("GET /connect", s.handleConnect)
 	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
+	mux.HandleFunc("GET /api/monetization/config", s.handleMonetizationConfig)
 	mux.HandleFunc("GET /setup", s.handleSetupGET)
 	mux.HandleFunc("POST /setup", s.handleSetupPOST)
 	mux.HandleFunc("GET /account", s.handleAccount)
@@ -1623,7 +1639,7 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 
 var authorizationTemplate = template.Must(template.New("authorization").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authorize chat-with-cli</title><style>:root{color-scheme:light dark}body{font:16px system-ui;max-width:620px;margin:6vh auto;padding:24px;line-height:1.5}input,button{font:inherit;padding:10px;width:100%;box-sizing:border-box}button{margin-top:12px}.meta,form,.identity{border:1px solid #8885;background:#8881;padding:14px;border-radius:10px;margin-top:14px}.secondary{background:#8881}.verified{border-color:#18803888;background:#18803814}.warning{border-color:#b8860b88;background:#b8860b14}.muted{color:#777}code{overflow-wrap:anywhere}</style></head><body>
+<title>Authorize chat-with-cli</title></head><body>
 <h1>Authorize chat-with-cli</h1>{{if .PublicInstance}}<div class="identity warning"><b>Public Relay operator is inside the trust boundary</b><br>This Relay can observe or modify MCP requests and results, and its operator can run modified server code. User-to-user isolation does not protect you from the operator. Do not use any public instance for secrets or high-trust computer access; self-host a private Relay instead.</div>{{end}}<div class="meta"><b>Client name:</b> {{.Client}}<br><b>Client ID:</b> <code>{{.ClientID}}</code><br><b>Callback:</b> <code>{{.Callback}}</code><br><b>Resource:</b> <code>{{.Resource}}</code><br><b>Scope:</b> {{.Scope}}</div>
 {{if .UnverifiedClient}}<div class="identity warning"><b>Unverified dynamic OAuth client</b><br>The client name above is self-asserted. Only authorize if the callback origin matches the application you intended to connect.</div>{{end}}
 {{if .VerifiedDevice}}<div class="identity verified"><b>Verified device identity</b><br>This Agent proved possession of the Ed25519 private key for device <code>{{.DeviceID}}</code>. The Relay requires a request-bound signed proof for authorization and a fresh signed proof on every Agent connection.</div>{{else if .AgentDevice}}<div class="identity warning"><b>Legacy unbound Agent</b><br>This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.</div>{{end}}
@@ -1662,7 +1678,7 @@ func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID st
 	if origin := callbackOrigin(redirectURI); origin != "" {
 		callback = origin
 	}
-	_ = authorizationTemplate.Execute(w, map[string]any{
+	_ = executeUITemplate(w, nil, authorizationTemplate, map[string]any{
 		"RequestID": requestID, "Client": name, "ClientID": client.ID, "Callback": callback, "Resource": resource, "Scope": scope,
 		"CSRFToken": csrfToken, "LoggedIn": loggedIn, "Username": user.Username, "PublicInstance": publicInstance,
 		"RegistrationAvailable": openRegistration || inviteOnly, "InviteRequired": inviteOnly,

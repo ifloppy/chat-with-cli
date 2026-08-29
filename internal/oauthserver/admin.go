@@ -104,20 +104,20 @@ type adminPageData struct {
 
 var adminLoginTemplate = template.Must(template.New("admin-login").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin sign in · Chat with CLI</title>
-<style>body{font:16px system-ui,sans-serif;max-width:460px;margin:10vh auto;padding:24px}label{display:block;margin-top:14px}input,button{font:inherit;padding:10px;width:100%;box-sizing:border-box;margin-top:5px}button{margin-top:20px}.note{color:#666}</style></head>
+</head>
 <body><h1>Chat with CLI admin</h1><p class="note">Sign in to manage devices, users, sessions, and emergency capability switches.</p>
 <form method="post" action="/admin/login"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><label>Username<input name="username" autocomplete="username" required></label><label>Password<input type="password" name="password" autocomplete="current-password" required></label><button type="submit">Sign in</button></form>
 <p><a href="/">Back to home</a></p></body></html>`))
 
 var adminReauthTemplate = template.Must(template.New("admin-reauth").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Re-authenticate · Chat with CLI</title>
-<style>:root{color-scheme:light dark}*{box-sizing:border-box}body{font:16px system-ui,sans-serif;max-width:500px;margin:0 auto;padding:64px 24px;line-height:1.5}form{border:1px solid #8885;border-radius:14px;padding:22px}label{display:block;font-weight:650}input,button{font:inherit;width:100%;padding:11px;margin-top:7px;border-radius:8px;border:1px solid #8888}button{margin-top:18px;background:#1769e0;color:#fff;border-color:#1769e0}.muted{color:#777}.actions{margin-top:18px}</style></head>
+</head>
 <body><h1>Confirm it’s you</h1><p class="muted">High-risk administration actions require a password check within the last 15 minutes. This refreshes only the current browser session.</p>
 <form method="post" action="/admin/reauth"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><label>Password for {{.Username}}<input type="password" name="password" autocomplete="current-password" required autofocus></label><button type="submit">Re-authenticate</button></form><p class="actions"><a href="/admin">Cancel and return to admin</a></p></body></html>`))
 
 var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"join": strings.Join}).Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin · Chat with CLI</title>
-<style>:root{color-scheme:light dark}*{box-sizing:border-box}body{font:14px system-ui,sans-serif;max-width:1240px;margin:0 auto;padding:28px 20px 70px;line-height:1.45}h1{font-size:30px;margin:0}h2{margin:30px 0 10px;font-size:20px}a{color:inherit}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.card,section,details{border:1px solid #8885;border-radius:12px;padding:15px;margin:10px 0;background:#8881}.card b{display:block;font-size:25px}.ok{color:#188038}.bad{color:#b3261e}.warning{border-color:#b8860b88;background:#b8860b18}.critical{border-color:#b3261e88;background:#b3261e14}.banner{padding:14px 16px;border-radius:10px;margin:12px 0}.banner b{display:block;margin-bottom:3px}table{width:100%;border-collapse:collapse;display:block;overflow:auto}th,td{text-align:left;padding:8px;border-bottom:1px solid #8884;vertical-align:top}input,select,button{font:inherit;padding:7px;max-width:100%;border-radius:6px;border:1px solid #8888}button{cursor:pointer}form.inline{display:inline-flex;gap:5px;align-items:center;flex-wrap:wrap;margin:2px}.danger{background:#b3261e;color:#fff;border-color:#b3261e}.muted{color:#777}.pill{padding:3px 7px;border-radius:999px;background:#8883}.toolbar{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.toolbar .nav{display:flex;gap:12px;align-items:center}.onboarding{border-color:#1769e066}.steps{display:grid;gap:10px}.step{border-left:3px solid #1769e0;padding-left:12px}.step code{display:block;background:#8882;padding:9px;border-radius:8px;margin-top:5px;overflow-wrap:anywhere}summary{cursor:pointer;font-size:18px;font-weight:650}details>summary{margin:-3px 0}code{overflow-wrap:anywhere}</style></head>
+</head>
 <body><div class="toolbar"><div><h1>Chat with CLI admin</h1><span class="muted">{{.PublicURL}}</span></div><div class="nav"><a href="/">Home</a><a href="/docs">Docs</a><a href="/admin/reauth">Re-authenticate</a><form method="post" action="/admin/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit">Sign out</button></form></div></div>
 <p>Signed in as <b>{{.Username}}</b> · version <b>{{.Version}}</b> · <b>{{.Mode}}</b> instance · uptime <b>{{.Uptime}}</b>.</p>
 {{if .PersistenceFault}}<div class="banner critical"><b>Authorization is frozen</b>The Relay detected an incomplete authorization-state transaction. MCP and Agent access remain fail-closed across restarts. Repair storage, repeat the intended revoke/disable action, and persist it successfully; recovery writes force the emergency kill switch on. Restart, verify the security state, then explicitly release the kill switch. Do not delete <code>oauth-state.guard</code> to bypass recovery.</div>{{end}}
@@ -162,7 +162,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: adminCSRFCookie, Value: token, Path: "/admin", MaxAge: int(sessionLifetime.Seconds()), HttpOnly: true, Secure: s.base.Scheme == "https", SameSite: http.SameSiteStrictMode})
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = adminLoginTemplate.Execute(w, map[string]string{"CSRFToken": token})
+		_ = executeUITemplate(w, r, adminLoginTemplate, map[string]string{"CSRFToken": token})
 		return
 	}
 	s.renderAdmin(w, user)
@@ -178,7 +178,7 @@ func (s *Server) handleAdminReauthGET(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: adminCSRFCookie, Value: csrf, Path: "/admin", MaxAge: int(sessionLifetime.Seconds()), HttpOnly: true, Secure: s.base.Scheme == "https", SameSite: http.SameSiteStrictMode})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = adminReauthTemplate.Execute(w, map[string]string{"CSRFToken": csrf, "Username": user.Username})
+	_ = executeUITemplate(w, r, adminReauthTemplate, map[string]string{"CSRFToken": csrf, "Username": user.Username})
 }
 
 func (s *Server) handleAdminReauthPOST(w http.ResponseWriter, r *http.Request) {
@@ -297,7 +297,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, current User) {
 	data.CSRFToken = csrf
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = adminTemplate.Execute(w, data)
+	_ = executeUITemplate(w, nil, adminTemplate, data)
 }
 
 func (s *Server) adminData(current User) adminPageData {
