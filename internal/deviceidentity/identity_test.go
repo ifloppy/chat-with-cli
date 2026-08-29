@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestIdentityRoundTripAndProof(t *testing.T) {
@@ -57,15 +56,18 @@ func TestRegistrationProofBindsDeviceAndRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Unix(1_700_000_123, 0)
-	proof, err := identity.SignRegistrationProof("chat-with-cli agent workstation", "http://127.0.0.1:4321/callback", now, "registration-nonce-123")
+	challenge := "relay-registration-challenge"
+	proof, err := identity.SignRegistrationProof("chat-with-cli agent workstation", "http://127.0.0.1:4321/callback", challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !VerifyRegistrationProof(identity.PublicKey(), identity.ID(), "chat-with-cli agent workstation", "http://127.0.0.1:4321/callback", now.Unix(), "registration-nonce-123", proof) {
+	if !VerifyRegistrationProof(identity.PublicKey(), identity.ID(), "chat-with-cli agent workstation", "http://127.0.0.1:4321/callback", challenge, proof) {
 		t.Fatal("valid registration proof rejected")
 	}
-	if VerifyRegistrationProof(identity.PublicKey(), identity.ID(), "chat-with-cli agent workstation", "http://127.0.0.1:9999/callback", now.Unix(), "registration-nonce-123", proof) {
+	if VerifyRegistrationProof(identity.PublicKey(), identity.ID(), "chat-with-cli agent workstation", "http://127.0.0.1:9999/callback", challenge, proof) {
 		t.Fatal("registration proof accepted for another redirect")
+	}
+	if VerifyRegistrationProof(identity.PublicKey(), identity.ID(), "chat-with-cli agent workstation", "http://127.0.0.1:4321/callback", "other-challenge", proof) {
+		t.Fatal("registration proof accepted for another Relay challenge")
 	}
 }

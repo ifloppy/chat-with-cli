@@ -29,13 +29,16 @@ name is only a label. New resources are `/agent/id/<id>` and `/mcp/id/<id>`;
 legacy name routes remain compatibility-only.
 
 A new immutable device can be claimed only by an Agent OAuth client that proves
-possession of the matching private key during Dynamic Client Registration. The
-Relay binds the verified public key to the device record. Before every later
-Agent WebSocket, the Agent obtains a short-lived one-time Relay challenge and
-signs it with Ed25519. The challenge is bound to the exact Agent resource and
-current bearer-token fingerprint, can be consumed only once, and is invalid
-after a Relay restart. A stolen Agent bearer, public key, or previously
-captured handshake therefore cannot impersonate a bound workstation.
+possession of the matching private key. Before DCR, the Relay issues a
+short-lived one-time registration challenge bound to the canonical device ID,
+public key, client name, and redirect URI; the Agent signs it and the Relay
+consumes it after one successful registration. A Relay restart invalidates all
+outstanding registration challenges. The Relay then binds the verified public
+key to the device record. Before every later Agent WebSocket, the Agent obtains
+a separate one-time Relay challenge bound to the exact Agent resource and
+current bearer-token fingerprint and signs it with Ed25519. A stolen Agent
+bearer, public key, captured DCR proof, or captured WebSocket handshake
+therefore cannot impersonate a bound workstation.
 
 Legacy unbound Agent connections are disabled by default, including on public
 instances. The migration-only `relay.allow_legacy_unbound_agents` option should

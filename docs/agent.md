@@ -55,10 +55,13 @@ credential before every brokered RPC.
 
 `agent setup` also creates a 0600 Ed25519 identity file and stores its path in
 the config. The immutable device ID is derived from that public key rather than
-chosen independently. A normal first login is simply `chat-with-cli login`;
-the Agent proves possession of the private key during DCR and on every later
-WebSocket connection. The Relay binds the verified public key to the device.
-A stolen Agent OAuth bearer alone is insufficient to impersonate a PoP-bound
+chosen independently. A normal first login is simply `chat-with-cli login`.
+Before DCR, the CLI obtains a short-lived one-time registration challenge from
+the Relay, signs it with the device private key, and submits that proof with
+the DCR request. Every later WebSocket connection uses a separate one-time
+Relay challenge bound to the Agent resource and current bearer fingerprint.
+The Relay binds the verified public key to the device. A stolen Agent OAuth
+bearer or captured old proof alone is insufficient to impersonate a PoP-bound
 device.
 
 Immutable IDs are normalized to one lowercase canonical form across OAuth,

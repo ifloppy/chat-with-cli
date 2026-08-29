@@ -29,19 +29,19 @@ import (
 )
 
 const (
-	accessLifetime                   = time.Hour
-	refreshLifetime                  = 30 * 24 * time.Hour
-	codeLifetime                     = 5 * time.Minute
-	pendingLifetime                  = 10 * time.Minute
-	maxClients                       = 2048
-	maxPendingAuth                   = 1024
-	maxPendingIP                     = 8
-	maxDevicesUser                   = 16
-	maxRateEntries                   = 8192
-	maxRegistrationProofNoncesDevice = 64
-	maxAgentChallengesConsumedDevice = 64
-	agentChallengeLifetime           = 30 * time.Second
-	proofClockSkew                   = 90 * time.Second
+	accessLifetime                          = time.Hour
+	refreshLifetime                         = 30 * 24 * time.Hour
+	codeLifetime                            = 5 * time.Minute
+	pendingLifetime                         = 10 * time.Minute
+	maxClients                              = 2048
+	maxPendingAuth                          = 1024
+	maxPendingIP                            = 8
+	maxDevicesUser                          = 16
+	maxRateEntries                          = 8192
+	maxRegistrationChallengesConsumedDevice = 64
+	maxAgentChallengesConsumedDevice        = 64
+	registrationChallengeLifetime           = 30 * time.Second
+	agentChallengeLifetime                  = 30 * time.Second
 )
 
 type Config struct {
@@ -152,41 +152,42 @@ type authCode struct {
 }
 
 type Server struct {
-	cfg                     Config
-	base                    *url.URL
-	mu                      sync.Mutex
-	clients                 map[string]Client
-	access                  map[string]tokenRecord
-	refresh                 map[string]tokenRecord
-	refreshUsed             map[string]tokenRecord
-	pending                 map[string]pendingAuth
-	codes                   map[string]authCode
-	users                   map[string]User
-	usernames               map[string]string
-	devices                 map[string]string
-	disabledDevices         map[string]bool
-	retiredDevices          map[string]bool
-	deviceRecords           map[string]DeviceRecord
-	sessions                map[string]sessionRecord
-	passwordSlots           chan struct{}
-	stateFile               string
-	registrationEnabled     bool
-	dcrEnabled              bool
-	mcpEnabled              bool
-	agentEnabled            bool
-	killSwitch              bool
-	trustedProxies          []*net.IPNet
-	rateMu                  sync.Mutex
-	rates                   map[string]rateWindow
-	registrationProofNonces map[string]map[string]int64
-	consumedAgentChallenges map[string]map[string]int64
-	agentChallengeKey       [32]byte
-	setupTokenHash          string
-	setupTokenPath          string
-	securityEvents          []SecurityEvent
-	statusProvider          func() map[string]DeviceStatus
-	agentSessionResetter    func(device string)
-	startedAt               time.Time
+	cfg                            Config
+	base                           *url.URL
+	mu                             sync.Mutex
+	clients                        map[string]Client
+	access                         map[string]tokenRecord
+	refresh                        map[string]tokenRecord
+	refreshUsed                    map[string]tokenRecord
+	pending                        map[string]pendingAuth
+	codes                          map[string]authCode
+	users                          map[string]User
+	usernames                      map[string]string
+	devices                        map[string]string
+	disabledDevices                map[string]bool
+	retiredDevices                 map[string]bool
+	deviceRecords                  map[string]DeviceRecord
+	sessions                       map[string]sessionRecord
+	passwordSlots                  chan struct{}
+	stateFile                      string
+	registrationEnabled            bool
+	dcrEnabled                     bool
+	mcpEnabled                     bool
+	agentEnabled                   bool
+	killSwitch                     bool
+	trustedProxies                 []*net.IPNet
+	rateMu                         sync.Mutex
+	rates                          map[string]rateWindow
+	consumedRegistrationChallenges map[string]map[string]int64
+	registrationChallengeKey       [32]byte
+	consumedAgentChallenges        map[string]map[string]int64
+	agentChallengeKey              [32]byte
+	setupTokenHash                 string
+	setupTokenPath                 string
+	securityEvents                 []SecurityEvent
+	statusProvider                 func() map[string]DeviceStatus
+	agentSessionResetter           func(device string)
+	startedAt                      time.Time
 	// persistenceFault is a fail-closed latch. Once authorization state cannot
 	// be durably written, MCP/Agent access remains frozen until process restart
 	// and a clean state load. Availability is preferred over stale authorization.
@@ -304,8 +305,12 @@ func New(cfg Config) (*Server, error) {
 	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure OAuth state directory: %w", err)
 	}
-	var challengeKey [32]byte
-	if _, err := rand.Read(challengeKey[:]); err != nil {
+	var registrationChallengeKey [32]byte
+	if _, err := rand.Read(registrationChallengeKey[:]); err != nil {
+		return nil, fmt.Errorf("generate registration challenge key: %w", err)
+	}
+	var agentChallengeKey [32]byte
+	if _, err := rand.Read(agentChallengeKey[:]); err != nil {
 		return nil, fmt.Errorf("generate Agent challenge key: %w", err)
 	}
 	s := &Server{
@@ -318,7 +323,7 @@ func New(cfg Config) (*Server, error) {
 		registrationEnabled: mode == ModePublic && !cfg.RegistrationDisabled,
 		dcrEnabled:          true,
 		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
-		rates: make(map[string]rateWindow), registrationProofNonces: make(map[string]map[string]int64), consumedAgentChallenges: make(map[string]map[string]int64), agentChallengeKey: challengeKey, setupTokenPath: cfg.SetupTokenPath,
+		rates: make(map[string]rateWindow), consumedRegistrationChallenges: make(map[string]map[string]int64), registrationChallengeKey: registrationChallengeKey, consumedAgentChallenges: make(map[string]map[string]int64), agentChallengeKey: agentChallengeKey, setupTokenPath: cfg.SetupTokenPath,
 		startedAt: time.Now(),
 	}
 	if cfg.SetupToken != "" {
@@ -732,6 +737,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/id/{id}", s.handleMCPResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/agent/{device}", s.handleAgentResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/agent/id/{id}", s.handleAgentResourceMetadata)
+	mux.HandleFunc("POST /oauth/register/challenge", s.handleRegistrationChallenge)
 	mux.HandleFunc("POST /oauth/register", s.handleRegister)
 	mux.HandleFunc("GET /oauth/authorize", s.handleAuthorizeGET)
 	mux.HandleFunc("POST /oauth/authorize", s.handleAuthorizePOST)
@@ -748,10 +754,11 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func (s *Server) handleAuthorizationMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"issuer":                                         s.base.String(),
-		"authorization_endpoint":                         s.absolute("/oauth/authorize"),
-		"token_endpoint":                                 s.absolute("/oauth/token"),
-		"registration_endpoint":                          s.absolute("/oauth/register"),
+		"issuer":                 s.base.String(),
+		"authorization_endpoint": s.absolute("/oauth/authorize"),
+		"token_endpoint":         s.absolute("/oauth/token"),
+		"registration_endpoint":  s.absolute("/oauth/register"),
+		"chat_with_cli_registration_challenge_endpoint":  s.absolute("/oauth/register/challenge"),
 		"revocation_endpoint":                            s.absolute("/oauth/revoke"),
 		"scopes_supported":                               []string{"mcp", "agent:connect", "offline_access"},
 		"response_types_supported":                       []string{"code"},
@@ -822,9 +829,15 @@ type registrationRequest struct {
 	Scope                   string   `json:"scope,omitempty"`
 	DeviceID                string   `json:"chat_with_cli_device_id,omitempty"`
 	DevicePublicKey         string   `json:"chat_with_cli_device_public_key,omitempty"`
-	DeviceProofTimestamp    int64    `json:"chat_with_cli_device_proof_timestamp,omitempty"`
-	DeviceProofNonce        string   `json:"chat_with_cli_device_proof_nonce,omitempty"`
+	DeviceChallenge         string   `json:"chat_with_cli_device_challenge,omitempty"`
 	DeviceProof             string   `json:"chat_with_cli_device_proof,omitempty"`
+}
+
+type registrationChallengeRequest struct {
+	ClientName      string `json:"client_name"`
+	RedirectURI     string `json:"redirect_uri"`
+	DeviceID        string `json:"chat_with_cli_device_id"`
+	DevicePublicKey string `json:"chat_with_cli_device_public_key"`
 }
 
 func contains(values []string, want string) bool {
@@ -836,13 +849,65 @@ func contains(values []string, want string) bool {
 	return false
 }
 
+func (s *Server) handleRegistrationChallenge(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(r, "dcr-challenge", 60, time.Minute) {
+		rateLimited(w, 60)
+		return
+	}
+	s.mu.Lock()
+	dcrEnabled := s.dcrEnabled && !s.persistenceFault
+	s.mu.Unlock()
+	if !dcrEnabled {
+		oauthError(w, http.StatusForbidden, "access_denied", "dynamic client registration is disabled")
+		return
+	}
+	body := http.MaxBytesReader(w, r.Body, 32<<10)
+	defer body.Close()
+	var req registrationChallengeRequest
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "invalid JSON registration challenge metadata"})
+		return
+	}
+	clientName := strings.TrimSpace(req.ClientName)
+	redirectURI := strings.TrimSpace(req.RedirectURI)
+	deviceID, ok := protocol.NormalizeDeviceID(strings.TrimSpace(req.DeviceID))
+	if !ok || clientName == "" || len(clientName) > 256 || !validRedirectURI(redirectURI) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "invalid Agent registration challenge metadata"})
+		return
+	}
+	pub, err := deviceidentity.DecodePublicKey(strings.TrimSpace(req.DevicePublicKey))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "chat_with_cli_device_public_key must be an Ed25519 public key"})
+		return
+	}
+	derivedID, _ := deviceidentity.IDFromPublicKey(pub)
+	if derivedID != deviceID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent device ID does not match its public key"})
+		return
+	}
+	encodedPublicKey := deviceidentity.EncodePublicKey(pub)
+	s.mu.Lock()
+	retired := s.retiredDevices["id/"+deviceID]
+	s.mu.Unlock()
+	if retired {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "invalid_client_metadata", "error_description": "this cryptographic device identity has been permanently retired"})
+		return
+	}
+	challenge, err := s.issueRegistrationChallenge(deviceID, encodedPublicKey, clientName, redirectURI, time.Now().UTC())
+	if err != nil {
+		oauthError(w, http.StatusInternalServerError, "server_error", "failed to issue registration challenge")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"challenge": challenge, "expires_in": int(registrationChallengeLifetime.Seconds())})
+}
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if !s.allowRate(r, "dcr", 30, time.Minute) {
 		rateLimited(w, 60)
 		return
 	}
 	s.mu.Lock()
-	dcrEnabled := s.dcrEnabled
+	dcrEnabled := s.dcrEnabled && !s.persistenceFault
 	s.mu.Unlock()
 	if !dcrEnabled {
 		oauthError(w, http.StatusForbidden, "access_denied", "dynamic client registration is disabled")
@@ -875,12 +940,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	deviceID := strings.TrimSpace(req.DeviceID)
 	devicePublicKey := strings.TrimSpace(req.DevicePublicKey)
-	deviceProofNonce := strings.TrimSpace(req.DeviceProofNonce)
+	deviceChallenge := strings.TrimSpace(req.DeviceChallenge)
 	deviceProof := strings.TrimSpace(req.DeviceProof)
 	deviceKeyVerified := false
-	hasDeviceProofFields := deviceID != "" || devicePublicKey != "" || req.DeviceProofTimestamp != 0 || deviceProofNonce != "" || deviceProof != ""
+	registrationChallengeHash := ""
+	registrationChallengeExpires := int64(0)
+	hasDeviceProofFields := deviceID != "" || devicePublicKey != "" || deviceChallenge != "" || deviceProof != ""
 	if hasDeviceProofFields {
-		if deviceID == "" || devicePublicKey == "" || req.DeviceProofTimestamp == 0 || len(deviceProofNonce) < 16 || len(deviceProofNonce) > 128 || deviceProof == "" || len(req.RedirectURIs) != 1 {
+		if deviceID == "" || devicePublicKey == "" || deviceChallenge == "" || deviceProof == "" || len(req.RedirectURIs) != 1 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "incomplete Agent device proof metadata"})
 			return
 		}
@@ -895,14 +962,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		derivedID, _ := deviceidentity.IDFromPublicKey(pub)
-		now := time.Now().UTC()
-		proofTime := time.Unix(req.DeviceProofTimestamp, 0)
-		if canonicalID != derivedID || proofTime.Before(now.Add(-proofClockSkew)) || proofTime.After(now.Add(proofClockSkew)) || !deviceidentity.VerifyRegistrationProof(pub, canonicalID, strings.TrimSpace(req.ClientName), req.RedirectURIs[0], req.DeviceProofTimestamp, deviceProofNonce, deviceProof) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "invalid Agent device proof"})
+		devicePublicKey = deviceidentity.EncodePublicKey(pub)
+		if canonicalID != derivedID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent device ID does not match its public key"})
+			return
+		}
+		registrationChallengeHash, registrationChallengeExpires, ok = s.validateRegistrationChallenge(canonicalID, devicePublicKey, strings.TrimSpace(req.ClientName), req.RedirectURIs[0], deviceChallenge, time.Now().UTC())
+		if !ok || !deviceidentity.VerifyRegistrationProof(pub, canonicalID, strings.TrimSpace(req.ClientName), req.RedirectURIs[0], deviceChallenge, deviceProof) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "invalid or expired Agent registration challenge proof"})
 			return
 		}
 		deviceID = canonicalID
-		devicePublicKey = deviceidentity.EncodePublicKey(pub)
 		deviceKeyVerified = true
 	}
 	if len(req.ResponseTypes) > 0 && !contains(req.ResponseTypes, "code") {
@@ -932,8 +1002,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		delete(s.clients, oldestID)
 	}
 	if deviceKeyVerified {
-		if !s.consumeRegistrationProofNonceLocked(deviceID, deviceProofNonce, time.Now().UTC()) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent device proof was already used"})
+		if s.retiredDevices["id/"+deviceID] {
+			writeJSON(w, http.StatusGone, map[string]string{"error": "invalid_client_metadata", "error_description": "this cryptographic device identity has been permanently retired"})
+			return
+		}
+		if !s.consumeRegistrationChallengeLocked(deviceID, registrationChallengeHash, registrationChallengeExpires, time.Now().UTC()) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent registration challenge was already used"})
 			return
 		}
 	}
@@ -1784,22 +1858,77 @@ func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
 	return true
 }
 
-func (s *Server) consumeRegistrationProofNonceLocked(device, nonce string, now time.Time) bool {
-	bucket := s.registrationProofNonces[device]
+func registrationChallengeMACInput(payload []byte, deviceID, devicePublicKey, clientName, redirectURI string) []byte {
+	const context = "chat-with-cli-registration-challenge-v1"
+	out := make([]byte, 0, len(payload)+len(deviceID)+len(devicePublicKey)+len(clientName)+len(redirectURI)+len(context)+5)
+	out = append(out, context...)
+	out = append(out, '\n')
+	out = append(out, payload...)
+	out = append(out, '\n')
+	out = append(out, deviceID...)
+	out = append(out, '\n')
+	out = append(out, devicePublicKey...)
+	out = append(out, '\n')
+	out = append(out, clientName...)
+	out = append(out, '\n')
+	out = append(out, redirectURI...)
+	return out
+}
+
+func (s *Server) issueRegistrationChallenge(deviceID, devicePublicKey, clientName, redirectURI string, now time.Time) (string, error) {
+	var payload [32]byte
+	if _, err := rand.Read(payload[:24]); err != nil {
+		return "", err
+	}
+	expires := now.Add(registrationChallengeLifetime).Unix()
+	binary.BigEndian.PutUint64(payload[24:], uint64(expires))
+	mac := hmac.New(sha256.New, s.registrationChallengeKey[:])
+	_, _ = mac.Write(registrationChallengeMACInput(payload[:], deviceID, devicePublicKey, clientName, redirectURI))
+	return base64.RawURLEncoding.EncodeToString(payload[:]) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (s *Server) validateRegistrationChallenge(deviceID, devicePublicKey, clientName, redirectURI, challenge string, now time.Time) (string, int64, bool) {
+	parts := strings.Split(challenge, ".")
+	if len(parts) != 2 {
+		return "", 0, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || len(payload) != 32 {
+		return "", 0, false
+	}
+	providedMAC, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(providedMAC) != sha256.Size {
+		return "", 0, false
+	}
+	mac := hmac.New(sha256.New, s.registrationChallengeKey[:])
+	_, _ = mac.Write(registrationChallengeMACInput(payload, deviceID, devicePublicKey, clientName, redirectURI))
+	if !hmac.Equal(providedMAC, mac.Sum(nil)) {
+		return "", 0, false
+	}
+	expires := int64(binary.BigEndian.Uint64(payload[24:]))
+	if expires <= now.Unix() || expires > now.Add(registrationChallengeLifetime+5*time.Second).Unix() {
+		return "", 0, false
+	}
+	sum := sha256.Sum256([]byte(challenge))
+	return hex.EncodeToString(sum[:]), expires, true
+}
+
+func (s *Server) consumeRegistrationChallengeLocked(deviceID, challengeHash string, expires int64, now time.Time) bool {
+	bucket := s.consumedRegistrationChallenges[deviceID]
 	if bucket == nil {
 		bucket = make(map[string]int64)
-		s.registrationProofNonces[device] = bucket
+		s.consumedRegistrationChallenges[deviceID] = bucket
 	}
 	nowUnix := now.Unix()
-	for candidate, expires := range bucket {
-		if expires <= nowUnix {
+	for candidate, expiry := range bucket {
+		if expiry <= nowUnix {
 			delete(bucket, candidate)
 		}
 	}
-	if _, replay := bucket[nonce]; replay || len(bucket) >= maxRegistrationProofNoncesDevice {
+	if _, replay := bucket[challengeHash]; replay || len(bucket) >= maxRegistrationChallengesConsumedDevice {
 		return false
 	}
-	bucket[nonce] = now.Add(2 * proofClockSkew).Unix()
+	bucket[challengeHash] = expires
 	return true
 }
 

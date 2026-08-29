@@ -26,10 +26,11 @@ type Manager struct {
 }
 
 type authMetadata struct {
-	Issuer                string `json:"issuer"`
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
-	RegistrationEndpoint  string `json:"registration_endpoint"`
+	Issuer                        string `json:"issuer"`
+	AuthorizationEndpoint         string `json:"authorization_endpoint"`
+	TokenEndpoint                 string `json:"token_endpoint"`
+	RegistrationEndpoint          string `json:"registration_endpoint"`
+	RegistrationChallengeEndpoint string `json:"chat_with_cli_registration_challenge_endpoint"`
 }
 
 type registrationResponse struct {

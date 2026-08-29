@@ -2149,7 +2149,7 @@ func TestAgentChallengeFromPreviousRelayProcessIsRejected(t *testing.T) {
 	}
 }
 
-func TestAgentDCRProofRequiresPrivateKeyAndRejectsReplay(t *testing.T) {
+func TestAgentDCRProofRequiresRelayChallengePrivateKeyAndRejectsReplay(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:19042", Password: "dcr-proof-password-12345", StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -2158,59 +2158,127 @@ func TestAgentDCRProofRequiresPrivateKeyAndRejectsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wrong, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
 	const redirect = "http://127.0.0.1:43123/callback"
 	const clientName = "chat-with-cli agent proof-workstation"
-	now := time.Now().UTC()
-	nonce := "registration-proof-nonce-123456"
-	proof, err := identity.SignRegistrationProof(clientName, redirect, now, nonce)
+	publicKey := deviceidentity.EncodePublicKey(identity.PublicKey())
+	challengeRequest := func(name, callback, deviceID, key string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"client_name": name, "redirect_uri": callback,
+			"chat_with_cli_device_id": deviceID, "chat_with_cli_device_public_key": key,
+		})
+		req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register/challenge"), bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.handleRegistrationChallenge(rr, req)
+		return rr
+	}
+	challengeRR := challengeRequest(clientName, redirect, identity.ID(), publicKey)
+	if challengeRR.Code != http.StatusOK {
+		t.Fatalf("registration challenge status=%d body=%s", challengeRR.Code, challengeRR.Body.String())
+	}
+	var challengeBody struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.Unmarshal(challengeRR.Body.Bytes(), &challengeBody); err != nil || challengeBody.Challenge == "" {
+		t.Fatalf("decode registration challenge: challenge=%q err=%v", challengeBody.Challenge, err)
+	}
+	proof, err := identity.SignRegistrationProof(clientName, redirect, challengeBody.Challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
 	validBody := map[string]any{
-		"redirect_uris":                        []string{redirect},
-		"token_endpoint_auth_method":           "none",
-		"grant_types":                          []string{"authorization_code", "refresh_token"},
-		"response_types":                       []string{"code"},
-		"client_name":                          clientName,
-		"scope":                                "agent:connect offline_access",
-		"chat_with_cli_device_id":              identity.ID(),
-		"chat_with_cli_device_public_key":      deviceidentity.EncodePublicKey(identity.PublicKey()),
-		"chat_with_cli_device_proof_timestamp": now.Unix(),
-		"chat_with_cli_device_proof_nonce":     nonce,
-		"chat_with_cli_device_proof":           proof,
+		"redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none",
+		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
+		"client_name": clientName, "scope": "agent:connect offline_access",
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": publicKey,
+		"chat_with_cli_device_challenge": challengeBody.Challenge, "chat_with_cli_device_proof": proof,
 	}
 	register := func(body map[string]any) *httptest.ResponseRecorder {
 		t.Helper()
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			t.Fatal(err)
-		}
+		encoded, _ := json.Marshal(body)
 		req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(encoded))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		s.handleRegister(rr, req)
 		return rr
 	}
+
+	wrongProofBody := maps.Clone(validBody)
+	wrongProof, err := wrong.SignRegistrationProof(clientName, redirect, challengeBody.Challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongProofBody["chat_with_cli_device_proof"] = wrongProof
+	if rr := register(wrongProofBody); rr.Code != http.StatusBadRequest {
+		t.Fatalf("wrong-private-key DCR status=%d want 400 body=%s", rr.Code, rr.Body.String())
+	}
 	if rr := register(validBody); rr.Code != http.StatusCreated {
 		t.Fatalf("valid Agent DCR proof status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	if rr := register(validBody); rr.Code != http.StatusBadRequest {
-		t.Fatalf("replayed Agent DCR proof status=%d want 400 body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("replayed Agent DCR challenge status=%d want 400 body=%s", rr.Code, rr.Body.String())
 	}
 
 	publicOnly := maps.Clone(validBody)
-	publicOnly["chat_with_cli_device_proof_nonce"] = ""
+	publicOnly["chat_with_cli_device_challenge"] = ""
 	publicOnly["chat_with_cli_device_proof"] = ""
 	if rr := register(publicOnly); rr.Code != http.StatusBadRequest {
 		t.Fatalf("public-key-only DCR status=%d want 400 body=%s", rr.Code, rr.Body.String())
 	}
 
-	tamperedNonce := "tampered-proof-nonce-654321"
+	freshRR := challengeRequest(clientName, redirect, identity.ID(), publicKey)
+	var fresh struct {
+		Challenge string `json:"challenge"`
+	}
+	_ = json.Unmarshal(freshRR.Body.Bytes(), &fresh)
+	freshProof, _ := identity.SignRegistrationProof(clientName, redirect, fresh.Challenge)
 	tampered := maps.Clone(validBody)
-	tampered["chat_with_cli_device_proof_nonce"] = tamperedNonce
-	// Reuse the signature from another nonce/client payload: signature must fail.
+	tampered["chat_with_cli_device_challenge"] = fresh.Challenge
+	tampered["chat_with_cli_device_proof"] = freshProof
+	tampered["client_name"] = clientName + " tampered"
 	if rr := register(tampered); rr.Code != http.StatusBadRequest {
-		t.Fatalf("tampered Agent DCR proof status=%d want 400 body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("challenge rebound to another client name status=%d want 400 body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRegistrationChallengeFromPreviousRelayProcessIsRejected(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := Config{PublicURL: "http://127.0.0.1:19046", Password: "dcr-restart-password-12345", StateDir: stateDir}
+	s1, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := deviceidentity.Generate()
+	const redirect = "http://127.0.0.1:44123/callback"
+	const clientName = "chat-with-cli agent restart-proof"
+	publicKey := deviceidentity.EncodePublicKey(identity.PublicKey())
+	challenge, err := s1.issueRegistrationChallenge(identity.ID(), publicKey, clientName, redirect, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, _ := identity.SignRegistrationProof(clientName, redirect, challenge)
+
+	s2, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none",
+		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
+		"client_name": clientName, "scope": "agent:connect offline_access",
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": publicKey,
+		"chat_with_cli_device_challenge": challenge, "chat_with_cli_device_proof": proof,
+	})
+	req := httptest.NewRequest(http.MethodPost, s2.absolute("/oauth/register"), bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	s2.handleRegister(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("challenge from previous Relay process status=%d want 400 body=%s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -2315,16 +2383,17 @@ func TestProofReplayCapacityIsIsolatedPerDevice(t *testing.T) {
 	expires := now.Add(agentChallengeLifetime).Unix()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := 0; i < maxRegistrationProofNoncesDevice; i++ {
-		if !s.consumeRegistrationProofNonceLocked("alice", fmt.Sprintf("reg-%d", i), now) {
-			t.Fatalf("alice registration bucket filled early at %d", i)
+	registrationExpires := now.Add(registrationChallengeLifetime).Unix()
+	for i := 0; i < maxRegistrationChallengesConsumedDevice; i++ {
+		if !s.consumeRegistrationChallengeLocked("alice", fmt.Sprintf("reg-%d", i), registrationExpires, now) {
+			t.Fatalf("alice registration challenge bucket filled early at %d", i)
 		}
 	}
-	if s.consumeRegistrationProofNonceLocked("alice", "overflow", now) {
-		t.Fatal("alice registration bucket exceeded per-device limit")
+	if s.consumeRegistrationChallengeLocked("alice", "overflow", registrationExpires, now) {
+		t.Fatal("alice registration challenge bucket exceeded per-device limit")
 	}
-	if !s.consumeRegistrationProofNonceLocked("bob", "fresh", now) {
-		t.Fatal("alice registration bucket blocked bob")
+	if !s.consumeRegistrationChallengeLocked("bob", "fresh", registrationExpires, now) {
+		t.Fatal("alice registration challenge bucket blocked bob")
 	}
 	for i := 0; i < maxAgentChallengesConsumedDevice; i++ {
 		if !s.consumeAgentChallengeLocked("alice", fmt.Sprintf("challenge-%d", i), expires, now) {
@@ -2492,4 +2561,58 @@ func TestLegacyUnboundAgentDeniedByDefaultAndAllowedOnlyForMigration(t *testing.
 	t.Run("explicit-migration-mode", func(t *testing.T) {
 		test(t, true, http.StatusNoContent)
 	})
+}
+
+func TestRegistrationChallengeBindsMetadataAndExpires(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19140", Password: "registration-challenge-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := deviceidentity.Generate()
+	other, _ := deviceidentity.Generate()
+	const clientName = "chat-with-cli agent challenge-bound"
+	const redirect = "http://127.0.0.1:45123/callback"
+	key := deviceidentity.EncodePublicKey(identity.PublicKey())
+	now := time.Now().UTC()
+	challenge, err := s.issueRegistrationChallenge(identity.ID(), key, clientName, redirect, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := s.validateRegistrationChallenge(identity.ID(), key, clientName, redirect, challenge, now); !ok {
+		t.Fatal("valid registration challenge was rejected")
+	}
+	if _, _, ok := s.validateRegistrationChallenge(identity.ID(), key, clientName+"-other", redirect, challenge, now); ok {
+		t.Fatal("registration challenge was accepted for another client name")
+	}
+	if _, _, ok := s.validateRegistrationChallenge(identity.ID(), key, clientName, "http://127.0.0.1:45124/callback", challenge, now); ok {
+		t.Fatal("registration challenge was accepted for another redirect")
+	}
+	otherKey := deviceidentity.EncodePublicKey(other.PublicKey())
+	if _, _, ok := s.validateRegistrationChallenge(other.ID(), otherKey, clientName, redirect, challenge, now); ok {
+		t.Fatal("registration challenge was accepted for another device identity")
+	}
+	if _, _, ok := s.validateRegistrationChallenge(identity.ID(), key, clientName, redirect, challenge, now.Add(registrationChallengeLifetime+time.Second)); ok {
+		t.Fatal("expired registration challenge was accepted")
+	}
+}
+
+func TestRegistrationChallengeEndpointRejectsRetiredIdentity(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19141", Password: "retired-challenge-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := deviceidentity.Generate()
+	s.mu.Lock()
+	s.retiredDevices["id/"+identity.ID()] = true
+	s.mu.Unlock()
+	body, _ := json.Marshal(map[string]any{
+		"client_name": "chat-with-cli agent retired", "redirect_uri": "http://127.0.0.1:45125/callback",
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": deviceidentity.EncodePublicKey(identity.PublicKey()),
+	})
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register/challenge"), bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleRegistrationChallenge(rr, req)
+	if rr.Code != http.StatusGone {
+		t.Fatalf("retired identity challenge status=%d want 410 body=%s", rr.Code, rr.Body.String())
+	}
 }

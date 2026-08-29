@@ -31,14 +31,15 @@ bounded operational audit trail.
 
 New Agent identities use Ed25519. `agent setup` generates a local private key
 and derives the immutable 128-bit route ID from its public key. Initial Agent
-DCR proves possession of that key before an unowned device can be claimed.
-Every authenticated Agent WebSocket then requires a short-lived, one-time
-Relay-issued challenge signed by the same key and bound to the exact resource
-and bearer fingerprint. The challenge MAC key is process-ephemeral, so a
-challenge captured before a Relay restart cannot be replayed afterward. Only
-successfully consumed challenges occupy bounded per-device replay state, so one
-tenant cannot exhaust another device's replay capacity. Names remain labels and
-legacy compatibility routes.
+DCR first requires a short-lived, one-time Relay challenge bound to the device
+ID, public key, client name, and redirect URI; the private-key signature is
+consumed after one successful registration. Every authenticated Agent
+WebSocket then requires a separate one-time Relay challenge signed by the same
+key and bound to the exact resource and bearer fingerprint. Both challenge MAC
+keys are process-ephemeral, so proofs captured before a Relay restart cannot be
+replayed afterward. Only successfully consumed challenges occupy bounded
+per-device replay state, so one tenant cannot exhaust another device's replay
+capacity. Names remain labels and legacy compatibility routes.
 
 ## Residual risks and assumptions
 

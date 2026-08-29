@@ -95,15 +95,18 @@ Keychain, and Credential Manager backends remain future work.
 New deployments use an Ed25519 device identity created by `agent setup`. The
 immutable 128-bit route ID is derived from the public key; the human-readable
 name remains only a label. Public instances require this cryptographic identity
-for new device claims. During Agent DCR the client proves possession of the
-matching private key. Before every later Agent WebSocket, the authenticated
-Agent obtains a short-lived one-time challenge from the Relay and signs it with
-the device key. The challenge is bound to the exact Agent resource and bearer
-fingerprint, is consumed after one valid handshake, and is authenticated by a
-per-process Relay key so every outstanding challenge becomes invalid after a
-Relay restart. Consumed-challenge replay state is isolated per device. Knowing
-the ID, public key, Agent bearer, or a previously captured handshake alone is
-insufficient to impersonate a PoP-bound device.
+for new device claims. Before Agent DCR, the client requests a short-lived
+one-time registration challenge from the Relay. That challenge is bound to the
+canonical device ID, Ed25519 public key, client name, and loopback/HTTPS
+redirect URI; the Agent signs it with the matching private key and the Relay
+consumes it after one successful registration. The registration challenge MAC
+key is process-ephemeral, so captured proofs cannot be replayed across Relay
+restarts. Before every later Agent WebSocket, the authenticated Agent obtains a
+second short-lived one-time challenge bound to the exact Agent resource and
+bearer fingerprint and signs it with the same device key. Consumed-challenge
+replay state is isolated per device. Knowing the ID, public key, Agent bearer,
+or any previously captured DCR/WebSocket proof alone is insufficient to
+impersonate a PoP-bound device.
 
 Legacy already-owned alpha devices without a bound key are **denied by default**
 because a bearer-only Agent token cannot resist device impersonation. The

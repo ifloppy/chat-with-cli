@@ -10,9 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 )
 
 const (
@@ -155,14 +153,6 @@ func TokenFingerprint(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func NewNonce() (string, error) {
-	buf := make([]byte, 18)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
-}
-
 func proofMessage(resource, tokenFingerprint, challenge string) []byte {
 	return []byte(proofContext + "\n" + resource + "\n" + tokenFingerprint + "\n" + challenge)
 }
@@ -189,25 +179,25 @@ func VerifyProof(pub ed25519.PublicKey, resource, tokenFingerprint, challenge, e
 	return ed25519.Verify(pub, proofMessage(resource, tokenFingerprint, challenge), sig)
 }
 
-const registrationProofContext = "chat-with-cli-agent-registration-v1"
+const registrationProofContext = "chat-with-cli-agent-registration-challenge-v1"
 
-func registrationProofMessage(deviceID, clientName, redirectURI string, timestamp int64, nonce string) []byte {
-	return []byte(registrationProofContext + "\n" + deviceID + "\n" + clientName + "\n" + redirectURI + "\n" + strconv.FormatInt(timestamp, 10) + "\n" + nonce)
+func registrationProofMessage(deviceID, clientName, redirectURI, challenge string) []byte {
+	return []byte(registrationProofContext + "\n" + deviceID + "\n" + clientName + "\n" + redirectURI + "\n" + challenge)
 }
 
-func (i *Identity) SignRegistrationProof(clientName, redirectURI string, now time.Time, nonce string) (string, error) {
+func (i *Identity) SignRegistrationProof(clientName, redirectURI, challenge string) (string, error) {
 	if i == nil || len(i.private) != ed25519.PrivateKeySize {
 		return "", errors.New("device identity is unavailable")
 	}
-	if nonce == "" {
-		return "", errors.New("registration proof nonce is required")
+	if challenge == "" {
+		return "", errors.New("Relay registration challenge is required")
 	}
-	sig := ed25519.Sign(i.private, registrationProofMessage(i.ID(), clientName, redirectURI, now.Unix(), nonce))
+	sig := ed25519.Sign(i.private, registrationProofMessage(i.ID(), clientName, redirectURI, challenge))
 	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-func VerifyRegistrationProof(pub ed25519.PublicKey, deviceID, clientName, redirectURI string, timestamp int64, nonce, encodedSignature string) bool {
-	if len(pub) != ed25519.PublicKeySize || nonce == "" {
+func VerifyRegistrationProof(pub ed25519.PublicKey, deviceID, clientName, redirectURI, challenge, encodedSignature string) bool {
+	if len(pub) != ed25519.PublicKeySize || challenge == "" {
 		return false
 	}
 	derived, err := IDFromPublicKey(pub)
@@ -218,5 +208,5 @@ func VerifyRegistrationProof(pub ed25519.PublicKey, deviceID, clientName, redire
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return false
 	}
-	return ed25519.Verify(pub, registrationProofMessage(deviceID, clientName, redirectURI, timestamp, nonce), sig)
+	return ed25519.Verify(pub, registrationProofMessage(deviceID, clientName, redirectURI, challenge), sig)
 }

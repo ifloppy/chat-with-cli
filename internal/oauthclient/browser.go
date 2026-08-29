@@ -52,6 +52,13 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 	if err != nil {
 		return Credential{}, err
 	}
+	registrationChallengeEndpoint := ""
+	if m.DeviceIdentity != nil {
+		registrationChallengeEndpoint, err = sameOriginEndpoint(base, meta.RegistrationChallengeEndpoint, "registration challenge endpoint")
+		if err != nil {
+			return Credential{}, err
+		}
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return Credential{}, err
@@ -68,19 +75,29 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 		"scope":                      "agent:connect offline_access",
 	}
 	if m.DeviceIdentity != nil {
-		nonce, err := deviceidentity.NewNonce()
-		if err != nil {
-			return Credential{}, fmt.Errorf("generate device registration nonce: %w", err)
+		deviceID := m.DeviceIdentity.ID()
+		devicePublicKey := deviceidentity.EncodePublicKey(m.DeviceIdentity.PublicKey())
+		challengeBody := map[string]any{
+			"client_name": clientName, "redirect_uri": redirect,
+			"chat_with_cli_device_id": deviceID, "chat_with_cli_device_public_key": devicePublicKey,
 		}
-		now := time.Now().UTC()
-		proof, err := m.DeviceIdentity.SignRegistrationProof(clientName, redirect, now, nonce)
+		var challengeResponse struct {
+			Challenge string `json:"challenge"`
+		}
+		if err := postJSON(ctx, client, registrationChallengeEndpoint, challengeBody, &challengeResponse); err != nil {
+			return Credential{}, fmt.Errorf("obtain device registration challenge: %w", err)
+		}
+		challenge := strings.TrimSpace(challengeResponse.Challenge)
+		if challenge == "" {
+			return Credential{}, errors.New("dynamic registration challenge returned no challenge")
+		}
+		proof, err := m.DeviceIdentity.SignRegistrationProof(clientName, redirect, challenge)
 		if err != nil {
 			return Credential{}, fmt.Errorf("sign device registration proof: %w", err)
 		}
-		regBody["chat_with_cli_device_id"] = m.DeviceIdentity.ID()
-		regBody["chat_with_cli_device_public_key"] = deviceidentity.EncodePublicKey(m.DeviceIdentity.PublicKey())
-		regBody["chat_with_cli_device_proof_timestamp"] = now.Unix()
-		regBody["chat_with_cli_device_proof_nonce"] = nonce
+		regBody["chat_with_cli_device_id"] = deviceID
+		regBody["chat_with_cli_device_public_key"] = devicePublicKey
+		regBody["chat_with_cli_device_challenge"] = challenge
 		regBody["chat_with_cli_device_proof"] = proof
 	}
 	var reg registrationResponse

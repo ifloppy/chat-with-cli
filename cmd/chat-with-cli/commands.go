@@ -708,6 +708,9 @@ func runDoctor(args []string) error {
 		// method-aware mux returns 405 with Allow: POST for a healthy endpoint.
 		return resp.StatusCode == http.StatusMethodNotAllowed && strings.Contains(resp.Header.Get("Allow"), http.MethodPost)
 	}))
+	checks = append(checks, doctorHTTPCheck(context.Background(), client, "DCR device challenge endpoint", base+"/oauth/register/challenge", func(resp *http.Response) bool {
+		return resp.StatusCode == http.StatusMethodNotAllowed && strings.Contains(resp.Header.Get("Allow"), http.MethodPost)
+	}))
 	route := strings.TrimSpace(*device)
 	if strings.TrimSpace(*deviceID) != "" {
 		canonicalID, ok := protocol.NormalizeDeviceID(*deviceID)
