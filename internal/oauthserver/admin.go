@@ -65,6 +65,14 @@ type adminSessionView struct {
 	Expires  time.Time
 }
 
+type adminInviteView struct {
+	Handle        string
+	Label         string
+	Expires       time.Time
+	UsesRemaining int
+	CreatedBy     string
+}
+
 type adminPageData struct {
 	Version             string
 	Mode                string
@@ -88,6 +96,7 @@ type adminPageData struct {
 	Clients             []Client
 	Tokens              []adminTokenView
 	SessionList         []adminSessionView
+	Invites             []adminInviteView
 	Events              []SecurityEvent
 	CSRFToken           string
 	Username            string
@@ -114,6 +123,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"
 {{if .PersistenceFault}}<div class="banner critical"><b>Authorization is frozen</b>The Relay detected an incomplete authorization-state transaction. MCP and Agent access remain fail-closed across restarts. Repair storage, repeat the intended revoke/disable action, and persist it successfully; recovery writes force the emergency kill switch on. Restart, verify the security state, then explicitly release the kill switch. Do not delete <code>oauth-state.guard</code> to bypass recovery.</div>{{end}}
 {{if .KillSwitch}}<div class="banner critical"><b>Emergency kill switch is active</b>MCP and Agent authorization is globally blocked. Releasing it requires recent administrator authentication.</div>{{end}}
 {{if .LegacyUnboundAgents}}<div class="banner critical"><b>Legacy bearer-only Agent migration mode is ENABLED</b>Unbound alpha Agents can connect using only an Agent bearer token. This weakens device impersonation resistance and must be used only long enough to migrate old devices to new Ed25519 identities, then disabled in the Relay configuration.</div>{{end}}
+{{if eq .Mode "public"}}<div class="banner warning"><b>Public Relay trust boundary</b>This instance isolates users from each other, not users from the operator. An operator controls the server software and can modify it to observe or alter MCP traffic. Do not promise end-to-end privacy; sensitive users should self-host a private Relay.</div>{{end}}
 <div class="grid"><div class="card"><b>{{.OnlineAgents}}</b>online agents</div><div class="card"><b>{{.RegisteredDevices}}</b>registered devices</div><div class="card"><b>{{.RetiredDevices}}</b>retired identities</div><div class="card"><b>{{.Users}}</b>users</div><div class="card"><b>{{.OAuthClients}}</b>OAuth clients</div><div class="card"><b>{{.Sessions}}</b>sessions</div></div>
 
 <h2>Security controls</h2><section><p>Registration: <span class="pill">{{if .RegistrationEnabled}}enabled{{else}}disabled{{end}}</span> · DCR: <span class="pill">{{if .DCREnabled}}enabled{{else}}disabled{{end}}</span> · MCP: <span class="pill">{{if .MCPEnabled}}enabled{{else}}disabled{{end}}</span> · Agent: <span class="pill">{{if .AgentEnabled}}enabled{{else}}disabled{{end}}</span> · Kill switch: <span class="pill">{{if .KillSwitch}}ACTIVE{{else}}off{{end}}</span></p>
@@ -123,6 +133,8 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"
 <form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="set-agent"><input type="hidden" name="value" value="{{if .AgentEnabled}}off{{else}}on{{end}}"><button type="submit">{{if .AgentEnabled}}Disable{{else}}Enable{{end}} Agent</button></form>
 <form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="set-kill-switch"><input type="hidden" name="value" value="{{if .KillSwitch}}off{{else}}on{{end}}">{{if .KillSwitch}}<input name="confirm" placeholder="type RELEASE" size="11" required>{{end}}<button class="danger" type="submit">{{if .KillSwitch}}Release kill switch{{else}}Emergency disable now{{end}}</button></form>
 </section>
+
+{{if eq .Mode "public"}}<h2>Invites</h2><section><p class="muted">Single-use invites allow registration while open self-registration is disabled. Invite plaintext is shown once; only a one-way hash is persisted.</p><form class="inline" method="post" action="/admin/invite"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit">Create 24-hour invite</button></form><table><tr><th>Handle</th><th>Expires</th><th>Uses</th><th>Created by</th><th>Action</th></tr>{{range .Invites}}<tr><td><code>{{.Label}}</code></td><td>{{.Expires}}</td><td>{{.UsesRemaining}}</td><td>{{.CreatedBy}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-invite"><input type="hidden" name="target" value="{{.Handle}}"><button type="submit">Revoke</button></form></td></tr>{{else}}<tr><td colspan="5" class="muted">No active invites.</td></tr>{{end}}</table></section>{{end}}
 
 {{if eq .RegisteredDevices 0}}<h2>Connect your first workstation</h2><section class="onboarding"><p>No device is registered yet. Start with the read-only profile; nothing is started automatically.</p><div class="steps"><div class="step"><b>1. On the workstation</b><code>chat-with-cli agent setup --relay {{.PublicURL}} --root /path/to/workspace --profile read-only --install-systemd</code></div><div class="step"><b>2. Authorize the immutable device ID</b>The setup command prints the exact <code>chat-with-cli login</code> command. Complete browser OAuth as the intended owner.</div><div class="step"><b>3. Review, then start</b>Review the generated config/unit and explicitly enable the Agent only when its capabilities are acceptable.</div></div></section>{{end}}
 
@@ -339,6 +351,11 @@ func (s *Server) adminData(current User) adminPageData {
 		user := s.users[record.UserID]
 		data.SessionList = append(data.SessionList, adminSessionView{Handle: handle, Label: shortHandle(handle), Username: user.Username, Created: time.Unix(record.CreatedAt, 0), LastSeen: time.Unix(record.LastSeenAt, 0), Expires: time.Unix(record.Expires, 0)})
 	}
+	for handle, record := range s.invites {
+		if record.Expires > time.Now().Unix() && record.UsesRemaining > 0 {
+			data.Invites = append(data.Invites, adminInviteView{Handle: handle, Label: shortHandle(handle), Expires: time.Unix(record.Expires, 0), UsesRemaining: record.UsesRemaining, CreatedBy: record.CreatedBy})
+		}
+	}
 	data.RegisteredDevices = len(data.Devices)
 	s.mu.Unlock()
 	if provider != nil {
@@ -478,7 +495,7 @@ func parseToggle(value string) (bool, bool) {
 
 func persistenceRecoveryActionAllowed(action, value string) bool {
 	switch action {
-	case "rotate-password", "revoke-device", "delete-user", "logout-user", "logout-all", "logout-session", "revoke-client", "revoke-token":
+	case "rotate-password", "revoke-device", "delete-user", "logout-user", "logout-all", "logout-session", "revoke-client", "revoke-token", "revoke-invite":
 		return true
 	case "disable-device", "disable-user":
 		disabled, valid := parseToggle(value)
@@ -744,6 +761,14 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 			break
 		}
 		return errUnknownToken
+	case "revoke-invite":
+		if !validOpaqueHandle(target) {
+			return errInvalidAdminAction
+		}
+		if _, exists := s.invites[target]; !exists {
+			return errInvalidAdminAction
+		}
+		delete(s.invites, target)
 	default:
 		changed = false
 	}

@@ -17,6 +17,9 @@ tokens, browser sessions, device ownership, and audit metadata.
    not initiate inbound workstation connections.
 5. The Engine applies independent local capability gates before filesystem,
    PTY, screen, accessibility, or input operations.
+6. On a public instance, the Relay operator is inside the trusted computing
+   base. Cross-user authorization protects tenants from each other; it does not
+   hide MCP traffic from an operator who controls or modifies the Relay.
 
 ## Security properties
 
@@ -45,6 +48,10 @@ capacity. Names remain labels and legacy compatibility routes.
 
 ## Residual risks and assumptions
 
+- A public Relay provides no operator-excluding end-to-end privacy. The operator
+  controls server code and TLS termination and can observe or alter brokered
+  traffic. Self-host a private Relay when this trust is unacceptable, including
+  when the alternative public instance is operated by the project author.
 - A same-user shell is not contained by `--root`. Without Landlock it has the
   user's normal filesystem, network, process, and environment authority.
 - Landlock is Linux-only filesystem defense in depth; it is not a network,
@@ -63,5 +70,6 @@ capacity. Names remain labels and legacy compatibility routes.
 
 ## Out of scope
 
-This project does not promise a hostile same-user sandbox, covert persistence,
-automatic production deployment, or bypass of desktop compositor consent.
+This project does not promise a hostile same-user sandbox, protection from a
+malicious public Relay operator, covert persistence, automatic production
+deployment, or bypass of desktop compositor consent.

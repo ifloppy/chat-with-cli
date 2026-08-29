@@ -181,9 +181,8 @@ func (s *Server) authenticate(username, password string) (User, bool, bool) {
 	return current, true, false
 }
 
-func (s *Server) register(username, password string) (User, error, bool) {
-	normalized, ok := normalizeUsername(username)
-	if !ok {
+func (s *Server) prepareRegistration(username, password string) (User, error, bool) {
+	if _, ok := normalizeUsername(username); !ok {
 		return User{}, errors.New("username must be 3-64 letters, digits, dot, underscore, or hyphen"), false
 	}
 	if err := validatePassword(password); err != nil {
@@ -199,6 +198,15 @@ func (s *Server) register(username, password string) (User, error, bool) {
 	if err != nil {
 		return User{}, err, false
 	}
+	return User{ID: randomToken(18), Username: strings.TrimSpace(username), PasswordHash: hash, CreatedAt: time.Now().Unix()}, nil, false
+}
+
+func (s *Server) register(username, password string) (User, error, bool) {
+	user, err, busy := s.prepareRegistration(username, password)
+	if err != nil || busy {
+		return User{}, err, busy
+	}
+	normalized, _ := normalizeUsername(user.Username)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.usernames[normalized]; exists {
@@ -207,12 +215,10 @@ func (s *Server) register(username, password string) (User, error, bool) {
 	if len(s.users) >= maxUsers {
 		return User{}, errors.New("user limit reached"), false
 	}
-	user := User{ID: randomToken(18), Username: strings.TrimSpace(username), PasswordHash: hash, CreatedAt: time.Now().Unix()}
+	snapshot := s.snapshotMutableStateLocked()
 	s.users[user.ID] = user
 	s.usernames[normalized] = user.ID
-	if err := s.saveLocked(); err != nil {
-		delete(s.users, user.ID)
-		delete(s.usernames, normalized)
+	if err := s.saveOrRollbackLocked(snapshot); err != nil {
 		return User{}, err, false
 	}
 	return user, nil, false

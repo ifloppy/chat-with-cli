@@ -83,15 +83,23 @@ does not remove the Agent user's network, process, or inherited-secret access.
 Run the Agent as a dedicated unprivileged user and use `--exec-sandbox=landlock`
 when shell work needs an additional kernel boundary.
 
-Private Relay mode is the default. Public mode, account registration, DCR,
-MCP, Agent access, users, devices, and the emergency kill switch are managed
-from `/admin`. Emergency disable operations contract authority immediately;
+Private Relay mode is the default. Public users manage their own devices,
+browser sessions, password, and OAuth token families from `/account`; instance
+operators manage registration/invites, DCR, MCP/Agent access, all users/devices,
+and the emergency kill switch from `/admin`. Emergency disable operations contract authority immediately;
 re-enabling devices/users or releasing the global kill switch requires recent
 administrator re-authentication. OAuth uses PKCE S256, exact user/resource/scope
 and device-owner binding, rotating refresh-token families, bounded sessions,
 and one-way server-side token identifiers. Public traffic must use HTTPS behind
 a carefully configured reverse proxy. A Relay that cannot durably persist
 authorization state fails closed and reports HTTP 503 from `/health`.
+
+**A public Relay is not an end-to-end privacy boundary.** Public mode isolates
+ordinary users from each other, but the Relay operator controls the server
+software and can modify it to observe or alter MCP requests and results. Do not
+trust any public instance—including one operated by the software author—with
+secrets or high-trust computer access. Self-host a private Relay when that
+operator trust is unacceptable.
 
 ## Architecture
 
@@ -129,8 +137,9 @@ security audit and first browser login are complete.
 - [ChatGPT/MCP compatibility](docs/chatgpt.md)
 - [Security](docs/security.md) · [Threat model](docs/threat-model.md)
 - [Reverse proxy](docs/reverse-proxy.md) · [Cloudflare](docs/cloudflare.md)
-- [Administration](docs/admin.md)
+- [User account](docs/account.md) · [Administration](docs/admin.md)
 - [Install](docs/install.md) · [Upgrade](docs/upgrade.md) · [Backup/restore](docs/backup-restore.md)
+- [Self-host with ChatGPT](docs/self-host-with-chatgpt.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
 The MCP server currently advertises 31 tools. Read-only/destructive/open-world

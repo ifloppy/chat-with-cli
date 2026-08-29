@@ -36,10 +36,11 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
 <title>Chat with CLI</title><style>
 :root{color-scheme:light dark}*{box-sizing:border-box}body{font:16px system-ui,sans-serif;max-width:980px;margin:0 auto;padding:56px 24px 80px;line-height:1.55}h1{font-size:clamp(34px,7vw,58px);line-height:1.02;margin:.25em 0}.lead{max-width:720px;font-size:19px;color:#777}.badge,.status{display:inline-flex;align-items:center;border:1px solid #8886;border-radius:999px;padding:5px 10px;font-size:13px}.status.ok{color:#188038}.status.bad{color:#b3261e}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:28px 0}.card{border:1px solid #8885;border-radius:16px;padding:20px;background:#8881}.card h2{font-size:18px;margin:0 0 8px}.meta{display:grid;grid-template-columns:7rem 1fr;gap:7px 12px}.muted{color:#777}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:22px 0}.button{border:1px solid #8888;border-radius:10px;padding:10px 14px;text-decoration:none;color:inherit}.primary{background:#1769e0;color:white;border-color:#1769e0}.steps{counter-reset:step;display:grid;gap:12px}.step{border-left:3px solid #8885;padding-left:14px}.step b{display:block;margin-bottom:3px}code{font:14px ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.command{display:block;padding:10px 12px;border-radius:9px;background:#8882;margin-top:8px}</style></head>
 <body><span class="badge">{{.Mode}} relay</span><h1>Chat with CLI</h1><p class="lead">Connect an MCP client to a workstation through a private, outbound Agent connection. Capabilities stay disabled until the workstation explicitly enables them.</p>
-<div class="actions">{{if .SetupAvailable}}<a class="button primary" href="/setup">Finish first-run setup</a>{{else}}<a class="button primary" href="/admin">Open admin console</a>{{end}}<a class="button" href="/docs">Documentation</a><a class="button" href="{{.GitHubURL}}" rel="noreferrer">GitHub</a></div>
+{{if eq .Mode "public"}}<div class="card" style="border-color:#b8860b88;background:#b8860b18"><h2>Do not trust a public Relay with sensitive access</h2><p>A public Relay isolates normal users from each other, but the operator controls the server code and can observe or alter MCP traffic. This includes instances run by the software author. Self-host a private Relay when confidentiality or high-trust computer access matters.</p></div>{{end}}
+<div class="actions">{{if .SetupAvailable}}<a class="button primary" href="/setup">Finish first-run setup</a>{{else}}{{if eq .Mode "public"}}<a class="button primary" href="/connect">Connect my computer</a><a class="button" href="/account">Manage my account</a><a class="button" href="/admin">Operator admin</a>{{else}}<a class="button primary" href="/admin">Open admin console</a><a class="button" href="/connect">Connect a workstation</a><a class="button" href="/account">My account</a>{{end}}{{end}}<a class="button" href="/docs">Documentation</a><a class="button" href="{{.GitHubURL}}" rel="noreferrer">GitHub</a></div>
 <div class="grid"><div class="card"><h2>Relay</h2><div class="meta"><span>Version</span><b>{{.Version}}</b><span>Instance</span><b>{{.Mode}}</b><span>Status</span>{{if .Degraded}}<b class="status bad">authorization frozen</b>{{else}}<b class="status ok">ready</b>{{end}}</div></div>
 <div class="card"><h2>{{if .SetupAvailable}}Setup required{{else}}Relay configured{{end}}</h2>{{if .SetupAvailable}}<p>The Relay has not created its owner account yet. Use the one-time token stored locally on the Relay host.</p>{{else}}<p>Owner setup is complete. Devices and credentials are visible only after administrator sign-in.</p>{{end}}</div>
-<div class="card"><h2>Security model</h2><p>OAuth credentials are bound to one user, exact device resource, and scope. New public devices use random immutable IDs.</p></div></div>
+<div class="card"><h2>Security model</h2><p>OAuth credentials are bound to one user, exact device resource, and scope. New public devices use cryptographic immutable IDs. Public mode protects tenants from each other, not from the Relay operator.</p></div></div>
 {{if not .SetupAvailable}}<div class="card"><h2>Add a workstation</h2><div class="steps"><div class="step"><b>1. Create a safe local Agent config</b><span class="muted">Read-only is the default profile.</span><code class="command">chat-with-cli agent setup --relay {{.PublicURL}} --root /path/to/workspace --profile read-only --install-systemd</code></div><div class="step"><b>2. Authorize the generated device ID</b><span class="muted">The setup command prints the exact browser-login command. The service remains disabled until you explicitly start it.</span></div><div class="step"><b>3. Connect your MCP client</b><code class="command">{{.PublicURL}}/mcp/id/&lt;device-id&gt;</code></div></div></div>{{end}}
 <p class="muted">Health endpoint: <code>/health</code>. No device inventory or host information is exposed on this public page.</p>
 </body></html>`))
@@ -47,8 +48,23 @@ var docsTemplate = template.Must(template.New("docs").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Documentation · Chat with CLI</title><style>body{font:16px system-ui,sans-serif;max-width:760px;margin:8vh auto;padding:24px;line-height:1.5}li{margin:9px 0}a{color:#69a7ff}.note{border:1px solid #8885;border-radius:10px;padding:14px}</style></head>
 <body><h1>Chat with CLI documentation</h1><p class="note">The binary ships with a small navigation page. The full operator documentation is maintained with the open-source project.</p>
-<ul><li><a href="{{.Base}}/blob/main/docs/quick-start.md">Quick start</a></li><li><a href="{{.Base}}/blob/main/docs/private-instance.md">Private Relay</a></li><li><a href="{{.Base}}/blob/main/docs/public-instance.md">Public Relay</a></li><li><a href="{{.Base}}/blob/main/docs/agent.md">Agent configuration</a></li><li><a href="{{.Base}}/blob/main/docs/computer-use.md">Computer Use</a></li><li><a href="{{.Base}}/blob/main/docs/security.md">Security</a> · <a href="{{.Base}}/blob/main/docs/threat-model.md">Threat model</a></li><li><a href="{{.Base}}/blob/main/docs/reverse-proxy.md">Reverse proxy</a> · <a href="{{.Base}}/blob/main/docs/cloudflare.md">Cloudflare</a></li><li><a href="{{.Base}}/blob/main/docs/admin.md">Administration</a> · <a href="{{.Base}}/blob/main/docs/upgrade.md">Upgrade and rollback</a></li><li><a href="{{.Base}}/blob/main/docs/troubleshooting.md">Troubleshooting</a> · <a href="{{.Base}}/blob/main/docs/backup-restore.md">Backup and restore</a></li></ul>
+<ul><li><a href="{{.Base}}/blob/main/docs/quick-start.md">Quick start</a></li><li><a href="{{.Base}}/blob/main/docs/private-instance.md">Private Relay</a></li><li><a href="{{.Base}}/blob/main/docs/public-instance.md">Public Relay</a></li><li><a href="{{.Base}}/blob/main/docs/agent.md">Agent configuration</a></li><li><a href="{{.Base}}/blob/main/docs/computer-use.md">Computer Use</a></li><li><a href="{{.Base}}/blob/main/docs/security.md">Security</a> · <a href="{{.Base}}/blob/main/docs/threat-model.md">Threat model</a></li><li><a href="{{.Base}}/blob/main/docs/reverse-proxy.md">Reverse proxy</a> · <a href="{{.Base}}/blob/main/docs/cloudflare.md">Cloudflare</a></li><li><a href="{{.Base}}/blob/main/docs/account.md">User account</a> · <a href="{{.Base}}/blob/main/docs/admin.md">Administration</a> · <a href="{{.Base}}/blob/main/docs/upgrade.md">Upgrade and rollback</a></li><li><a href="{{.Base}}/blob/main/docs/troubleshooting.md">Troubleshooting</a> · <a href="{{.Base}}/blob/main/docs/backup-restore.md">Backup and restore</a></li><li><a href="{{.Base}}/blob/main/docs/self-host-with-chatgpt.md">Self-host a private Relay with ChatGPT</a></li></ul>
 <p><a href="/">Back to home</a></p></body></html>`))
+
+var connectTemplate = template.Must(template.New("connect").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect a computer · Chat with CLI</title>
+<style>:root{color-scheme:light dark}*{box-sizing:border-box}body{font:16px system-ui,sans-serif;max-width:820px;margin:0 auto;padding:44px 22px 70px;line-height:1.55}.step,.warning{border:1px solid #8885;border-radius:13px;padding:17px;margin:13px 0}.warning{border-color:#b8860b88;background:#b8860b18}.step b{display:block;font-size:18px;margin-bottom:5px}.muted{color:#777}code{display:block;background:#8882;padding:11px;border-radius:8px;margin-top:8px;overflow-wrap:anywhere;white-space:pre-wrap}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:20px 0}.button{border:1px solid #8888;border-radius:9px;padding:9px 13px;text-decoration:none;color:inherit}</style></head><body>
+<h1>Connect a computer</h1><p>Start with a narrowly scoped read-only Agent. You can enable file writes, shell execution, or Computer Use later from the workstation configuration.</p>
+{{if .Public}}<div class="warning"><b>Public Relay warning</b>This Relay operator controls the server software and can observe or alter brokered MCP traffic. Do not connect sensitive workspaces or secrets to any public instance, including one operated by the project author. For high-trust use, connect only long enough to bootstrap your own private Relay.</div>{{end}}
+<div class="step"><b>1 · Get the binary</b><span class="muted">Use an official release for your Linux architecture and verify it against the same release's SHA256SUMS.</span><div class="actions"><a class="button" href="{{.GitHub}}/releases" rel="noreferrer">Open releases</a><a class="button" href="/docs">Install documentation</a></div></div>
+<div class="step"><b>2 · Create a safe Agent profile</b><code>chat-with-cli agent setup --relay {{.PublicURL}} --root "$HOME/project" --profile read-only --install-systemd</code><span class="muted">Replace the root with the smallest workspace you want ChatGPT to read. The generated systemd unit is not started automatically.</span></div>
+<div class="step"><b>3 · Sign in and authorize this device</b><code>chat-with-cli login</code><span class="muted">On an invite-only public instance, the OAuth page will ask for the single-use invite during account creation. The Agent's immutable device ID is derived from its local Ed25519 key.</span></div>
+<div class="step"><b>4 · Review and start the Agent</b><code>chat-with-cli doctor
+systemctl --user daemon-reload
+systemctl --user enable --now chat-with-cli-agent.service</code><span class="muted">Do not run the Agent as root. Review the roots and capabilities before enabling the unit.</span></div>
+<div class="step"><b>5 · Add it to ChatGPT</b><span class="muted">Use the immutable device ID printed by setup/status.</span><code>{{.PublicURL}}/mcp/id/&lt;device-id&gt;</code></div>
+<div class="step"><b>6 · Prefer self-hosting after bootstrap</b><span class="muted">Once ChatGPT can work through this computer, it can help deploy a verified private Relay on your VPS. Keep the new Relay's owner password and setup token out of the public Relay path.</span><div class="actions"><a class="button" href="{{.GitHub}}/blob/main/docs/self-host-with-chatgpt.md" rel="noreferrer">Self-hosting guide</a></div></div>
+<p><a href="/">Back to home</a> · <a href="/account">My account</a></p></body></html>`))
 
 var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Chat with CLI</title>
@@ -93,6 +109,24 @@ func (s *Server) handleLanding(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = landingTemplate.Execute(w, landingPageData{Version: version, Mode: mode, GitHubURL: github, PublicURL: strings.TrimRight(s.base.String(), "/"), SetupAvailable: s.setupAvailable(), Degraded: degraded})
+}
+
+func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	public := s.cfg.Mode == ModePublic
+	github := s.cfg.GitHubURL
+	s.mu.Unlock()
+	if github == "" {
+		github = "https://github.com/ifloppy/chat-with-cli"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = connectTemplate.Execute(w, map[string]any{"Public": public, "PublicURL": strings.TrimRight(s.base.String(), "/"), "GitHub": strings.TrimRight(github, "/")})
 }
 
 func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {

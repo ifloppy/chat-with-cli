@@ -49,7 +49,10 @@ const (
 	maxAuthorizationChallengesClient        = 64
 )
 
-var errAuthorizationRecoveryRequired = errors.New("authorization state recovery is required before ordinary state changes can be persisted")
+var (
+	errAuthorizationRecoveryRequired = errors.New("authorization state recovery is required before ordinary state changes can be persisted")
+	errAuthorizationClientInvalid    = errors.New("OAuth client was revoked, expired, or no longer matches the authorization redirect")
+)
 
 type Config struct {
 	PublicURL string
@@ -105,6 +108,13 @@ type tokenRecord struct {
 	Expires  int64  `json:"expires"`
 }
 
+type inviteRecord struct {
+	CreatedAt     int64  `json:"created_at"`
+	Expires       int64  `json:"expires"`
+	UsesRemaining int    `json:"uses_remaining"`
+	CreatedBy     string `json:"created_by,omitempty"`
+}
+
 type diskState struct {
 	Clients         map[string]Client        `json:"clients"`
 	Access          map[string]tokenRecord   `json:"access"`
@@ -116,6 +126,7 @@ type diskState struct {
 	RetiredDevices  map[string]bool          `json:"retired_devices,omitempty"`
 	DeviceRecords   map[string]DeviceRecord  `json:"device_records,omitempty"`
 	Sessions        map[string]sessionRecord `json:"sessions"`
+	Invites         map[string]inviteRecord  `json:"invites,omitempty"`
 	Settings        *settingsState           `json:"settings,omitempty"`
 	SecurityEvents  []SecurityEvent          `json:"security_events,omitempty"`
 }
@@ -184,6 +195,7 @@ type Server struct {
 	deviceRecords                   map[string]DeviceRecord
 	sessions                        map[string]sessionRecord
 	ephemeralSessions               map[string]struct{}
+	invites                         map[string]inviteRecord
 	passwordSlots                   chan struct{}
 	stateFile                       string
 	registrationEnabled             bool
@@ -238,6 +250,7 @@ type mutableStateSnapshot struct {
 	deviceRecords       map[string]DeviceRecord
 	sessions            map[string]sessionRecord
 	ephemeralSessions   map[string]struct{}
+	invites             map[string]inviteRecord
 	registrationEnabled bool
 	dcrEnabled          bool
 	mcpEnabled          bool
@@ -269,7 +282,7 @@ func (s *Server) snapshotMutableStateLocked() mutableStateSnapshot {
 	return mutableStateSnapshot{
 		clients: cloneClients(s.clients), access: cloneMap(s.access), refresh: cloneMap(s.refresh), refreshUsed: cloneMap(s.refreshUsed),
 		pending: cloneMap(s.pending), codes: cloneMap(s.codes), users: cloneMap(s.users), usernames: cloneMap(s.usernames),
-		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), retiredDevices: cloneMap(s.retiredDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions), ephemeralSessions: cloneMap(s.ephemeralSessions),
+		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), retiredDevices: cloneMap(s.retiredDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions), ephemeralSessions: cloneMap(s.ephemeralSessions), invites: cloneMap(s.invites),
 		registrationEnabled: s.registrationEnabled, dcrEnabled: s.dcrEnabled, mcpEnabled: s.mcpEnabled, agentEnabled: s.agentEnabled,
 		killSwitch: s.killSwitch, setupTokenHash: s.setupTokenHash, securityEvents: append([]SecurityEvent(nil), s.securityEvents...), mode: s.cfg.Mode,
 	}
@@ -278,7 +291,7 @@ func (s *Server) snapshotMutableStateLocked() mutableStateSnapshot {
 func (s *Server) restoreMutableStateLocked(snapshot mutableStateSnapshot) {
 	s.clients, s.access, s.refresh, s.refreshUsed = snapshot.clients, snapshot.access, snapshot.refresh, snapshot.refreshUsed
 	s.pending, s.codes, s.users, s.usernames = snapshot.pending, snapshot.codes, snapshot.users, snapshot.usernames
-	s.devices, s.disabledDevices, s.retiredDevices, s.deviceRecords, s.sessions, s.ephemeralSessions = snapshot.devices, snapshot.disabledDevices, snapshot.retiredDevices, snapshot.deviceRecords, snapshot.sessions, snapshot.ephemeralSessions
+	s.devices, s.disabledDevices, s.retiredDevices, s.deviceRecords, s.sessions, s.ephemeralSessions, s.invites = snapshot.devices, snapshot.disabledDevices, snapshot.retiredDevices, snapshot.deviceRecords, snapshot.sessions, snapshot.ephemeralSessions, snapshot.invites
 	s.registrationEnabled, s.dcrEnabled, s.mcpEnabled, s.agentEnabled = snapshot.registrationEnabled, snapshot.dcrEnabled, snapshot.mcpEnabled, snapshot.agentEnabled
 	s.killSwitch, s.setupTokenHash, s.securityEvents, s.cfg.Mode = snapshot.killSwitch, snapshot.setupTokenHash, snapshot.securityEvents, snapshot.mode
 }
@@ -378,7 +391,7 @@ func New(cfg Config) (*Server, error) {
 		clients: make(map[string]Client), access: make(map[string]tokenRecord),
 		refresh: make(map[string]tokenRecord), refreshUsed: make(map[string]tokenRecord), pending: make(map[string]pendingAuth),
 		codes: make(map[string]authCode), users: make(map[string]User), usernames: make(map[string]string),
-		devices: make(map[string]string), disabledDevices: make(map[string]bool), retiredDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), ephemeralSessions: make(map[string]struct{}), passwordSlots: make(chan struct{}, 4),
+		devices: make(map[string]string), disabledDevices: make(map[string]bool), retiredDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), ephemeralSessions: make(map[string]struct{}), invites: make(map[string]inviteRecord), passwordSlots: make(chan struct{}, 4),
 		stateFile:           filepath.Join(cfg.StateDir, "oauth-state.json"),
 		registrationEnabled: mode == ModePublic && !cfg.RegistrationDisabled,
 		dcrEnabled:          true,
@@ -731,11 +744,14 @@ func (s *Server) load() error {
 					s.cfg.Mode = persistedMode
 				}
 			}
-			s.registrationEnabled = state.Settings.RegistrationEnabled && s.cfg.Mode == ModePublic
+			s.registrationEnabled = state.Settings.RegistrationEnabled && s.cfg.Mode == ModePublic && !s.cfg.RegistrationDisabled
 			s.dcrEnabled = state.Settings.DCREnabled
 			s.mcpEnabled = state.Settings.MCPEnabled
 			s.agentEnabled = state.Settings.AgentEnabled
 			s.killSwitch = state.Settings.KillSwitch
+		}
+		if state.Invites != nil {
+			s.invites = cloneMap(state.Invites)
 		}
 		if state.SecurityEvents != nil {
 			s.securityEvents = append([]SecurityEvent(nil), state.SecurityEvents...)
@@ -805,7 +821,7 @@ func (s *Server) saveLockedUnlocked() error {
 	registrationEnabled := s.registrationEnabled && s.cfg.Mode == ModePublic
 	state := diskState{
 		Clients: s.clients, Access: s.access, Refresh: s.refresh, RefreshUsed: s.refreshUsed,
-		Users: s.users, Devices: s.devices, DisabledDevices: s.disabledDevices, RetiredDevices: s.retiredDevices, DeviceRecords: s.deviceRecords, Sessions: s.sessions,
+		Users: s.users, Devices: s.devices, DisabledDevices: s.disabledDevices, RetiredDevices: s.retiredDevices, DeviceRecords: s.deviceRecords, Sessions: s.sessions, Invites: s.invites,
 		Settings:       &settingsState{Mode: s.cfg.Mode, RegistrationEnabled: registrationEnabled, DCREnabled: s.dcrEnabled, MCPEnabled: s.mcpEnabled, AgentEnabled: s.agentEnabled, KillSwitch: s.killSwitch},
 		SecurityEvents: append([]SecurityEvent(nil), s.securityEvents...),
 	}
@@ -861,6 +877,11 @@ func (s *Server) saveLockedUnlocked() error {
 
 func (s *Server) cleanupLocked(now time.Time) {
 	unix := now.Unix()
+	for key, invite := range s.invites {
+		if invite.Expires <= unix || invite.UsesRemaining <= 0 {
+			delete(s.invites, key)
+		}
+	}
 	for key, rec := range s.access {
 		client, clientExists := s.clients[rec.ClientID]
 		if rec.Expires <= unix || !s.activeUserLocked(rec.UserID) || !clientExists || !clientIDMatches(rec.ClientID, client) || !client.Approved || !s.resourceOwnershipIntactLocked(rec.UserID, rec.Resource, s.requiredScopeForResource(rec.Resource)) {
@@ -970,14 +991,20 @@ func (s *Server) resourceOwnershipIntactLocked(userID, resource, requiredScope s
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.handleLanding)
 	mux.HandleFunc("GET /docs", s.handleDocs)
+	mux.HandleFunc("GET /connect", s.handleConnect)
 	mux.HandleFunc("GET /setup", s.handleSetupGET)
 	mux.HandleFunc("POST /setup", s.handleSetupPOST)
+	mux.HandleFunc("GET /account", s.handleAccount)
+	mux.HandleFunc("POST /account/login", s.handleAccountLogin)
+	mux.HandleFunc("POST /account/logout", s.handleAccountLogout)
+	mux.HandleFunc("POST /account/action", s.handleAccountAction)
 	mux.HandleFunc("GET /admin", s.handleAdmin)
 	mux.HandleFunc("GET /admin/reauth", s.handleAdminReauthGET)
 	mux.HandleFunc("POST /admin/reauth", s.handleAdminReauthPOST)
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
 	mux.HandleFunc("POST /admin/action", s.handleAdminAction)
+	mux.HandleFunc("POST /admin/invite", s.handleAdminInvite)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleAuthorizationMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleRootResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/{device}", s.handleMCPResourceMetadata)
@@ -1605,12 +1632,12 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 var authorizationTemplate = template.Must(template.New("authorization").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Authorize chat-with-cli</title><style>:root{color-scheme:light dark}body{font:16px system-ui;max-width:620px;margin:6vh auto;padding:24px;line-height:1.5}input,button{font:inherit;padding:10px;width:100%;box-sizing:border-box}button{margin-top:12px}.meta,form,.identity{border:1px solid #8885;background:#8881;padding:14px;border-radius:10px;margin-top:14px}.secondary{background:#8881}.verified{border-color:#18803888;background:#18803814}.warning{border-color:#b8860b88;background:#b8860b14}.muted{color:#777}code{overflow-wrap:anywhere}</style></head><body>
-<h1>Authorize chat-with-cli</h1><div class="meta"><b>Client name:</b> {{.Client}}<br><b>Client ID:</b> <code>{{.ClientID}}</code><br><b>Callback:</b> <code>{{.Callback}}</code><br><b>Resource:</b> <code>{{.Resource}}</code><br><b>Scope:</b> {{.Scope}}</div>
+<h1>Authorize chat-with-cli</h1>{{if .PublicInstance}}<div class="identity warning"><b>Public Relay operator is inside the trust boundary</b><br>This Relay can observe or modify MCP requests and results, and its operator can run modified server code. User-to-user isolation does not protect you from the operator. Do not use any public instance for secrets or high-trust computer access; self-host a private Relay instead.</div>{{end}}<div class="meta"><b>Client name:</b> {{.Client}}<br><b>Client ID:</b> <code>{{.ClientID}}</code><br><b>Callback:</b> <code>{{.Callback}}</code><br><b>Resource:</b> <code>{{.Resource}}</code><br><b>Scope:</b> {{.Scope}}</div>
 {{if .UnverifiedClient}}<div class="identity warning"><b>Unverified dynamic OAuth client</b><br>The client name above is self-asserted. Only authorize if the callback origin matches the application you intended to connect.</div>{{end}}
 {{if .VerifiedDevice}}<div class="identity verified"><b>Verified device identity</b><br>This Agent proved possession of the Ed25519 private key for device <code>{{.DeviceID}}</code>. The Relay requires a request-bound signed proof for authorization and a fresh signed proof on every Agent connection.</div>{{else if .AgentDevice}}<div class="identity warning"><b>Legacy unbound Agent</b><br>This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.</div>{{end}}
 {{if .LoggedIn}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><p>Signed in as <b>{{.Username}}</b>.</p><button name="decision" value="allow" type="submit">Authorize</button><button name="decision" value="deny" type="submit">Deny</button><button name="decision" value="logout" type="submit">Sign out</button></form>
 {{else}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Sign in</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="current-password" placeholder="Password" required><button name="decision" value="login" type="submit">Sign in and authorize</button></form>
-{{if .Public}}<form class="secondary" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Create account</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="new-password" placeholder="Password (12+ characters)" minlength="12" required><button name="decision" value="register" type="submit">Register and authorize</button></form>{{end}}{{end}}
+{{if .RegistrationAvailable}}<form class="secondary" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Create account</h2>{{if .InviteRequired}}<p class="muted">Open registration is disabled. A single-use invite from this instance operator is required.</p><input name="invite_code" autocomplete="off" placeholder="Invite code" required>{{end}}<input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="new-password" placeholder="Password (12+ characters)" minlength="12" required><button name="decision" value="register" type="submit">Register and authorize</button></form>{{end}}{{end}}
 </body></html>`))
 
 func (s *Server) renderAuthorization(w http.ResponseWriter, requestID string, client Client, resource, scope string, user User, loggedIn bool) {
@@ -1634,7 +1661,8 @@ func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID st
 		deviceID = strings.TrimPrefix(route, "id/")
 	}
 	s.mu.Lock()
-	publicRegistration := s.cfg.Mode == ModePublic && s.registrationEnabled
+	publicInstance := s.cfg.Mode == ModePublic
+	openRegistration, inviteOnly := s.registrationPolicyLocked(time.Now())
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -1644,7 +1672,8 @@ func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID st
 	}
 	_ = authorizationTemplate.Execute(w, map[string]any{
 		"RequestID": requestID, "Client": name, "ClientID": client.ID, "Callback": callback, "Resource": resource, "Scope": scope,
-		"CSRFToken": csrfToken, "LoggedIn": loggedIn, "Username": user.Username, "Public": publicRegistration,
+		"CSRFToken": csrfToken, "LoggedIn": loggedIn, "Username": user.Username, "PublicInstance": publicInstance,
+		"RegistrationAvailable": openRegistration || inviteOnly, "InviteRequired": inviteOnly,
 		"AgentDevice": agentDevice, "VerifiedDevice": verifiedDevice, "UnverifiedClient": !verifiedDevice, "DeviceID": deviceID,
 	})
 }
@@ -1749,16 +1778,7 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "register":
-		s.mu.Lock()
-		registrationEnabled := s.cfg.Mode == ModePublic && s.registrationEnabled
-		s.mu.Unlock()
-		if !registrationEnabled {
-			s.oauthPageError(w, http.StatusForbidden, "registration is disabled on this private instance")
-			return
-		}
-		var err error
-		var busy bool
-		user, err, busy = s.register(r.Form.Get("username"), r.Form.Get("password"))
+		prepared, err, busy := s.prepareRegistration(r.Form.Get("username"), r.Form.Get("password"))
 		if busy {
 			s.oauthPageError(w, http.StatusTooManyRequests, err.Error())
 			return
@@ -1767,7 +1787,10 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 			s.oauthPageError(w, http.StatusBadRequest, "registration failed: "+err.Error())
 			return
 		}
-		authenticated = true
+		if err := s.registerAndGrantAuthorization(w, r, requestID, prepared, r.Form.Get("invite_code")); err != nil {
+			s.oauthPageError(w, http.StatusForbidden, "registration failed: "+err.Error())
+		}
+		return
 	default:
 		s.oauthPageError(w, http.StatusBadRequest, "invalid authorization decision")
 		return
@@ -1928,25 +1951,19 @@ func agentDisplayNameHint(client Client) string {
 	return name
 }
 
-func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requestID, userID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Server) commitAuthorizationLocked(requestID, userID string) (pendingAuth, string, error) {
 	pending, ok := s.pending[requestID]
 	if !ok || time.Now().After(pending.Expires) {
-		return errors.New("authorization request expired")
+		return pendingAuth{}, "", errors.New("authorization request expired")
 	}
 	client, exists := s.clients[pending.ClientID]
 	if !exists || !clientIDMatches(pending.ClientID, client) || !exactRedirect(client, pending.RedirectURI) {
-		delete(s.pending, requestID)
-		return errors.New("OAuth client was revoked, expired, or no longer matches the authorization redirect")
+		return pendingAuth{}, "", errAuthorizationClientInvalid
 	}
-	snapshot := s.snapshotMutableStateLocked()
 	if err := s.authorizeResourceLocked(userID, pending.ClientID, pending.Resource); err != nil {
-		s.restoreMutableStateLocked(snapshot)
-		return err
+		return pendingAuth{}, "", err
 	}
 	if kind, device, _, ok := s.resourceParts(pending.Resource); ok && kind == "agent" {
-		client := s.clients[pending.ClientID]
 		if hint := agentDisplayNameHint(client); hint != "" {
 			record := s.ensureDeviceRecordLocked(device, userID)
 			defaultName := strings.TrimPrefix(device, "id/")
@@ -1962,9 +1979,10 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 	s.codes[tokenKey(code)] = authCode{pendingAuth: pending, Expires: time.Now().Add(codeLifetime)}
 	client.Approved = true
 	s.clients[pending.ClientID] = client
-	if err := s.saveOrRollbackLocked(snapshot); err != nil {
-		return errors.New("failed to persist authorization")
-	}
+	return pending, code, nil
+}
+
+func (s *Server) redirectAuthorization(w http.ResponseWriter, r *http.Request, pending pendingAuth, code string) {
 	u, _ := url.Parse(pending.RedirectURI)
 	q := u.Query()
 	q.Set("code", code)
@@ -1974,6 +1992,80 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 	q.Set("iss", s.base.String())
 	u.RawQuery = q.Encode()
 	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requestID, userID string) error {
+	s.mu.Lock()
+	snapshot := s.snapshotMutableStateLocked()
+	pending, code, err := s.commitAuthorizationLocked(requestID, userID)
+	if err != nil {
+		s.restoreMutableStateLocked(snapshot)
+		if errors.Is(err, errAuthorizationClientInvalid) {
+			delete(s.pending, requestID)
+			_ = s.saveLocked()
+		}
+		s.mu.Unlock()
+		return err
+	}
+	if err := s.saveOrRollbackLocked(snapshot); err != nil {
+		s.mu.Unlock()
+		return errors.New("failed to persist authorization")
+	}
+	s.mu.Unlock()
+	s.redirectAuthorization(w, r, pending, code)
+	return nil
+}
+
+func (s *Server) registerAndGrantAuthorization(w http.ResponseWriter, r *http.Request, requestID string, user User, inviteCode string) error {
+	normalized, ok := normalizeUsername(user.Username)
+	if !ok || user.ID == "" || user.PasswordHash == "" {
+		return errors.New("invalid registration")
+	}
+	now := time.Now()
+	session := randomToken(32)
+	s.mu.Lock()
+	openRegistration, inviteOnly := s.registrationPolicyLocked(now)
+	if !openRegistration && !inviteOnly {
+		s.mu.Unlock()
+		return errors.New("registration is closed")
+	}
+	if _, exists := s.usernames[normalized]; exists {
+		s.mu.Unlock()
+		return errors.New("username is already registered")
+	}
+	if len(s.users) >= maxUsers {
+		s.mu.Unlock()
+		return errors.New("user limit reached")
+	}
+	snapshot := s.snapshotMutableStateLocked()
+	s.users[user.ID] = user
+	s.usernames[normalized] = user.ID
+	if !s.consumeInviteLocked(inviteCode, now) {
+		s.restoreMutableStateLocked(snapshot)
+		s.mu.Unlock()
+		return errors.New("a valid invite is required while open registration is disabled")
+	}
+	pending, code, err := s.commitAuthorizationLocked(requestID, user.ID)
+	if err != nil {
+		s.restoreMutableStateLocked(snapshot)
+		if errors.Is(err, errAuthorizationClientInvalid) {
+			delete(s.pending, requestID)
+			_ = s.saveLocked()
+		}
+		s.mu.Unlock()
+		return err
+	}
+	handle := tokenKey(session)
+	nowUnix := now.Unix()
+	s.sessions[handle] = sessionRecord{UserID: user.ID, CreatedAt: nowUnix, LastSeenAt: nowUnix, LastReauthAt: nowUnix, Expires: now.Add(sessionLifetime).Unix()}
+	s.recordSecurityLocked(SecurityEvent{Event: "self_register", User: user.Username, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
+	if err := s.saveOrRollbackLocked(snapshot); err != nil {
+		s.mu.Unlock()
+		return errors.New("failed to persist registration and authorization")
+	}
+	s.mu.Unlock()
+	s.setSessionCookie(w, session)
+	s.redirectAuthorization(w, r, pending, code)
 	return nil
 }
 

@@ -28,6 +28,22 @@ The Relay does not need workstation filesystem access. The Agent initiates an
 outbound WebSocket and reconnects; inbound firewall access to the workstation
 is not required.
 
+### Public Relay operator trust
+
+Public multi-user isolation protects one normal account from another normal
+account. It does **not** protect a user from the Relay operator. The operator
+controls the executable, persistent state, TLS endpoint, and request broker and
+can run modified code that records or changes MCP requests/results. There is no
+end-to-end cryptographic privacy guarantee between an MCP client and the Agent
+that excludes the Relay.
+
+Treat every public Relay operator as part of the trusted computing base. This
+applies even to an instance operated by the project author. Users who cannot
+accept that trust must self-host a private Relay on infrastructure they control.
+Server-side audit defaults and "we do not log content" statements describe the
+shipped code, not a property that remote users can verify against a modified
+public deployment.
+
 ## Default-deny capabilities
 
 - Filesystem reads require explicit `--root` trees.
@@ -70,8 +86,10 @@ client, user, session, and broker resources have bounded counts/lifetimes.
 
 Authorization-state persistence is fail-closed across process restarts. The Relay keeps a 0600 `oauth-state.guard` file open for its lifetime, marks it `dirty` before each authorization-state transaction, fsyncs the JSON state, and marks the guard `clean` only after the durable write succeeds. A dirty guard freezes MCP and Agent access after restart. Repair storage, repeat the intended revoke/disable operation, and persist it successfully; recovery writes force the emergency kill switch on, so the subsequent restart remains blocked until an administrator reviews state and explicitly releases it. Do not delete the guard to bypass recovery. Revoking either an access or refresh token revokes its complete refresh-token family.
 
-Browser forms use CSRF tokens bound to cookies and pending requests. Admin and
-setup pages use HttpOnly, SameSite cookies, Secure cookies on HTTPS, CSP,
+Browser forms use CSRF tokens bound to cookies and pending requests. `/account`
+lets a user manage only that account's devices, sessions, password, and OAuth
+token families; it never revokes a shared OAuth client belonging to other
+users. Admin and setup pages use HttpOnly, SameSite cookies, Secure cookies on HTTPS, CSP,
 frame-denial, nosniff, Referrer-Policy, Permissions-Policy, and no-store
 responses. Destructive admin actions require explicit confirmation and recent
 administrator authentication.
@@ -172,8 +190,12 @@ quotas for public instances.
 
 - Use HTTPS and a reverse proxy with WebSocket support; never trust forwarded
   client-IP headers unless the proxy CIDR is explicitly configured.
-- Keep registration and DCR closed unless needed; apply upstream rate limits
-  and quotas before public exposure.
+- Prefer single-use, expiring invites while testing a public instance. Open
+  self-registration is a larger abuse surface and should be deliberate.
+- Keep DCR closed when it is not needed; apply upstream rate limits and host
+  quotas before public exposure.
+- State prominently that the public Relay operator is trusted and that users
+  should self-host for secrets or high-trust computer access.
 - Inspect Cloudflare/WAF challenge services rather than logging credentials or
   broadly bypassing protection. See [docs/cloudflare.md](docs/cloudflare.md).
 - Back up the Relay state separately from the local Agent credential file, and

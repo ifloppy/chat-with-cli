@@ -11,7 +11,11 @@ Before exposure:
   and a proxy that preserves WebSockets.
 - Complete `/setup` from a controlled browser using the local one-time token;
   then confirm `/setup` returns 404.
-- Keep DCR and registration disabled when not needed. OAuth-enabled Relays reject
+- On public instances, state prominently that the Relay operator is trusted:
+  tenant isolation does not hide MCP traffic from an operator who controls or
+  modifies the server. Recommend private self-hosting for sensitive access.
+- Prefer single-use invites over open registration during public beta. Keep DCR
+  and open registration disabled when not needed. OAuth-enabled Relays reject
   shared static credentials. Legacy static mode is single-tenant and its shared
   credentials have broad authority over registered legacy devices.
 - Use immutable device IDs, narrow filesystem roots, and read-only Agent
@@ -21,8 +25,9 @@ Before exposure:
 
 At runtime:
 
-- Review `/admin` security controls, users, device ownership, sessions, OAuth
-  clients, token metadata, and recent events.
+- Review `/admin` security controls, invites, users, device ownership, sessions,
+  OAuth clients, token metadata, and recent events. Normal users should use
+  `/account` to revoke their own devices, sessions, and token families.
 - Make authority reduction easy and authority restoration deliberate. Disabling
   users/devices/MCP/Agent and engaging the Relay kill switch is immediate;
   re-enabling users/devices and releasing the kill switch requires recent
