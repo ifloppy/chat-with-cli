@@ -30,10 +30,12 @@ legacy name routes remain compatibility-only.
 
 A new immutable device can be claimed only by an Agent OAuth client that proves
 possession of the matching private key during Dynamic Client Registration. The
-Relay binds the verified public key to the device record. Every later Agent
-WebSocket also carries a fresh Ed25519 proof bound to the exact Agent resource,
-current bearer-token fingerprint, timestamp, and nonce. A stolen Agent bearer
-alone therefore cannot impersonate a bound workstation.
+Relay binds the verified public key to the device record. Before every later
+Agent WebSocket, the Agent obtains a short-lived one-time Relay challenge and
+signs it with Ed25519. The challenge is bound to the exact Agent resource and
+current bearer-token fingerprint, can be consumed only once, and is invalid
+after a Relay restart. A stolen Agent bearer, public key, or previously
+captured handshake therefore cannot impersonate a bound workstation.
 
 MCP authorization remains restricted to the same account and exact MCP
 resource. MCP bearer tokens are not sender-constrained by the device key and

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -59,6 +60,7 @@ func (c *Client) Run(ctx context.Context) error {
 				return fmt.Errorf("agent OAuth: %w", err)
 			}
 		}
+		err = nil
 		header := http.Header{}
 		header.Set("Authorization", "Bearer "+token)
 		if c.Identity != nil {
@@ -66,31 +68,37 @@ func (c *Client) Run(ctx context.Context) error {
 			if proofErr != nil {
 				return proofErr
 			}
-			nonce, proofErr := deviceidentity.NewNonce()
+			challenge, proofErr := fetchAgentChallenge(ctx, resource, token)
 			if proofErr != nil {
-				return fmt.Errorf("generate device proof nonce: %w", proofErr)
+				err = fmt.Errorf("obtain Agent device challenge: %w", proofErr)
+			} else {
+				proof, signErr := c.Identity.SignProof(resource, token, challenge)
+				if signErr != nil {
+					return fmt.Errorf("sign Agent device proof: %w", signErr)
+				}
+				header.Set(deviceidentity.HeaderChallenge, challenge)
+				header.Set(deviceidentity.HeaderProof, proof)
 			}
-			now := time.Now().UTC()
-			proof, proofErr := c.Identity.SignProof(resource, token, now, nonce)
-			if proofErr != nil {
-				return fmt.Errorf("sign Agent device proof: %w", proofErr)
-			}
-			header.Set(deviceidentity.HeaderTimestamp, fmt.Sprintf("%d", now.Unix()))
-			header.Set(deviceidentity.HeaderNonce, nonce)
-			header.Set(deviceidentity.HeaderProof, proof)
 		}
-		dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
-		conn, _, err := websocket.Dial(dialCtx, endpoint, &websocket.DialOptions{HTTPHeader: header})
-		cancelDial()
-		if err == nil {
-			conn.SetReadLimit(32 << 20)
-			err = c.serve(ctx, conn)
-			// A detached PTY must not keep executing after the remote authority
-			// disappears. Treat every Relay disconnect as the end of that remote
-			// authorization session; reconnect starts from a clean local state.
-			c.Engine.EndRemoteSession()
-			_ = conn.CloseNow()
-			backoff = time.Second
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		} else {
+			dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
+			conn, _, dialErr := websocket.Dial(dialCtx, endpoint, &websocket.DialOptions{HTTPHeader: header})
+			cancelDial()
+			err = dialErr
+			if err == nil {
+				conn.SetReadLimit(32 << 20)
+				err = c.serve(ctx, conn)
+				// A detached PTY must not keep executing after the remote authority
+				// disappears. Treat every Relay disconnect as the end of that remote
+				// authorization session; reconnect starts from a clean local state.
+				c.Engine.EndRemoteSession()
+				_ = conn.CloseNow()
+				backoff = time.Second
+			}
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -106,6 +114,37 @@ func (c *Client) Run(ctx context.Context) error {
 			backoff *= 2
 		}
 	}
+}
+
+func fetchAgentChallenge(ctx context.Context, resource, token string) (string, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, strings.TrimRight(resource, "/")+"/challenge", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("challenge endpoint returned HTTP %d", resp.StatusCode)
+	}
+	var payload struct {
+		Challenge string `json:"challenge"`
+		ExpiresIn int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode challenge: %w", err)
+	}
+	if len(payload.Challenge) < 40 || len(payload.Challenge) > 256 || payload.ExpiresIn <= 0 || payload.ExpiresIn > 60 {
+		return "", errors.New("Relay returned an invalid Agent challenge")
+	}
+	return payload.Challenge, nil
 }
 
 func agentResourceForEndpoint(endpoint string) (string, error) {

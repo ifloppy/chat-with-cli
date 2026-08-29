@@ -2002,7 +2002,7 @@ func TestImmutableDeviceClaimRequiresMatchingEd25519Key(t *testing.T) {
 	s.mu.Unlock()
 }
 
-func TestBoundAgentRequiresProofOfPossessionAndRejectsReplay(t *testing.T) {
+func TestBoundAgentRequiresRelayChallengeProofAndRejectsReplay(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:19041", Password: "device-proof-password-12345", StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -2024,50 +2024,128 @@ func TestBoundAgentRequiresProofOfPossessionAndRejectsReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	access, _, _, err := s.issueTokensLocked("proof-client", ownerID, resource, "agent:connect offline_access")
+	access2, _, _, err2 := s.issueTokensLocked("proof-client", ownerID, resource, "agent:connect offline_access")
 	s.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || err2 != nil {
+		t.Fatalf("issue tokens: %v / %v", err, err2)
+	}
+
+	challengeHandler := s.AgentChallengeHandler()
+	getChallenge := func(token string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, resource+"/challenge", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		challengeHandler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("challenge status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var payload struct {
+			Challenge string `json:"challenge"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil || payload.Challenge == "" {
+			t.Fatalf("invalid challenge response: %v body=%s", err, rr.Body.String())
+		}
+		return payload.Challenge
 	}
 
 	handler := s.ProtectScopedResource("agent:connect", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	request := func(id *deviceidentity.Identity, now time.Time, nonce string) int {
+	request := func(id *deviceidentity.Identity, token, challenge string) int {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, resource, nil)
-		req.Header.Set("Authorization", "Bearer "+access)
-		if id != nil {
-			proof, err := id.SignProof(resource, access, now, nonce)
+		req.Header.Set("Authorization", "Bearer "+token)
+		if id != nil && challenge != "" {
+			proof, err := id.SignProof(resource, token, challenge)
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header.Set(deviceidentity.HeaderTimestamp, fmt.Sprintf("%d", now.Unix()))
-			req.Header.Set(deviceidentity.HeaderNonce, nonce)
+			req.Header.Set(deviceidentity.HeaderChallenge, challenge)
 			req.Header.Set(deviceidentity.HeaderProof, proof)
 		}
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		return rr.Code
 	}
-	if got := request(nil, time.Now(), ""); got != http.StatusUnauthorized {
+	if got := request(nil, access, ""); got != http.StatusUnauthorized {
 		t.Fatalf("bearer-only bound Agent status=%d want 401", got)
 	}
-	if got := request(wrong, time.Now(), "wrong-key-nonce-123456"); got != http.StatusUnauthorized {
+	challenge := getChallenge(access)
+	if got := request(wrong, access, challenge); got != http.StatusUnauthorized {
 		t.Fatalf("wrong-key Agent proof status=%d want 401", got)
 	}
-	if got := request(identity, time.Now().Add(-10*time.Minute), "expired-proof-nonce-1"); got != http.StatusUnauthorized {
-		t.Fatalf("expired Agent proof status=%d want 401", got)
+	if got := request(identity, access, challenge); got != http.StatusNoContent {
+		t.Fatalf("valid Agent proof after wrong-key attempt status=%d want 204", got)
 	}
-	now := time.Now().UTC()
-	const nonce = "valid-proof-nonce-123456"
-	if got := request(identity, now, nonce); got != http.StatusNoContent {
-		t.Fatalf("valid Agent proof status=%d want 204", got)
+	if got := request(identity, access, challenge); got != http.StatusUnauthorized {
+		t.Fatalf("replayed Agent challenge status=%d want 401", got)
 	}
-	if got := request(identity, now, nonce); got != http.StatusUnauthorized {
-		t.Fatalf("replayed Agent proof status=%d want 401", got)
+	expired, err := s.issueAgentChallenge(resource, tokenKey(access), time.Now().Add(-2*agentChallengeLifetime))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := request(identity, time.Now().UTC(), "fresh-proof-nonce-654321"); got != http.StatusNoContent {
-		t.Fatalf("fresh Agent proof status=%d want 204", got)
+	if got := request(identity, access, expired); got != http.StatusUnauthorized {
+		t.Fatalf("expired Agent challenge status=%d want 401", got)
+	}
+	boundToFirstToken := getChallenge(access)
+	if got := request(identity, access2, boundToFirstToken); got != http.StatusUnauthorized {
+		t.Fatalf("challenge was transferable to another access token: status=%d", got)
+	}
+	if got := request(identity, access2, getChallenge(access2)); got != http.StatusNoContent {
+		t.Fatalf("fresh second-token challenge status=%d want 204", got)
+	}
+}
+
+func TestAgentChallengeFromPreviousRelayProcessIsRejected(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := Config{PublicURL: "http://127.0.0.1:19046", Password: "restart-proof-password-12345", StateDir: stateDir}
+	s1, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := s1.absolute("/agent/id/" + identity.ID())
+	s1.mu.Lock()
+	ownerID := s1.usernames["owner"]
+	s1.clients["restart-proof-client"] = Client{ID: "restart-proof-client", DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true, Approved: true}
+	if err := s1.authorizeResourceLocked(ownerID, "restart-proof-client", resource); err != nil {
+		s1.mu.Unlock()
+		t.Fatal(err)
+	}
+	access, _, _, err := s1.issueTokensLocked("restart-proof-client", ownerID, resource, "agent:connect offline_access")
+	if err == nil {
+		err = s1.saveLocked()
+	}
+	s1.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := s1.issueAgentChallenge(resource, tokenKey(access), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := identity.SignProof(resource, access, challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := New(Config{PublicURL: cfg.PublicURL, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := s2.ProtectScopedResource("agent:connect", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	req := httptest.NewRequest(http.MethodGet, resource, nil)
+	req.Header.Set("Authorization", "Bearer "+access)
+	req.Header.Set(deviceidentity.HeaderChallenge, challenge)
+	req.Header.Set(deviceidentity.HeaderProof, proof)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("challenge from previous Relay process status=%d want 401", rr.Code)
 	}
 }
 
@@ -2228,12 +2306,13 @@ func TestAuthorizationPageExplainsVerifiedDeviceIdentity(t *testing.T) {
 	}
 }
 
-func TestProofNonceCapacityIsIsolatedPerDevice(t *testing.T) {
+func TestProofReplayCapacityIsIsolatedPerDevice(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:19120", Password: "nonce-isolation-password-12345", StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
+	expires := now.Add(agentChallengeLifetime).Unix()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := 0; i < maxRegistrationProofNoncesDevice; i++ {
@@ -2247,12 +2326,15 @@ func TestProofNonceCapacityIsIsolatedPerDevice(t *testing.T) {
 	if !s.consumeRegistrationProofNonceLocked("bob", "fresh", now) {
 		t.Fatal("alice registration bucket blocked bob")
 	}
-	for i := 0; i < maxAgentProofNoncesDevice; i++ {
-		if !s.consumeAgentProofNonceLocked("alice", fmt.Sprintf("agent-%d", i), now) {
-			t.Fatalf("alice Agent bucket filled early at %d", i)
+	for i := 0; i < maxAgentChallengesConsumedDevice; i++ {
+		if !s.consumeAgentChallengeLocked("alice", fmt.Sprintf("challenge-%d", i), expires, now) {
+			t.Fatalf("alice Agent replay bucket filled early at %d", i)
 		}
 	}
-	if !s.consumeAgentProofNonceLocked("bob", "fresh", now) {
-		t.Fatal("alice Agent bucket blocked bob")
+	if s.consumeAgentChallengeLocked("alice", "overflow", expires, now) {
+		t.Fatal("alice Agent replay bucket exceeded per-device limit")
+	}
+	if !s.consumeAgentChallengeLocked("bob", "fresh", expires, now) {
+		t.Fatal("alice Agent replay bucket blocked bob")
 	}
 }

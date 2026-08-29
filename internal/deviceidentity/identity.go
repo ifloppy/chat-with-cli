@@ -16,10 +16,9 @@ import (
 )
 
 const (
-	HeaderTimestamp = "X-Chat-With-CLI-Device-Timestamp"
-	HeaderNonce     = "X-Chat-With-CLI-Device-Nonce"
+	HeaderChallenge = "X-Chat-With-CLI-Device-Challenge"
 	HeaderProof     = "X-Chat-With-CLI-Device-Proof"
-	proofContext    = "chat-with-cli-agent-v1"
+	proofContext    = "chat-with-cli-agent-challenge-v1"
 )
 
 type Identity struct {
@@ -164,30 +163,30 @@ func NewNonce() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-func proofMessage(resource, tokenFingerprint string, timestamp int64, nonce string) []byte {
-	return []byte(proofContext + "\n" + resource + "\n" + tokenFingerprint + "\n" + strconv.FormatInt(timestamp, 10) + "\n" + nonce)
+func proofMessage(resource, tokenFingerprint, challenge string) []byte {
+	return []byte(proofContext + "\n" + resource + "\n" + tokenFingerprint + "\n" + challenge)
 }
 
-func (i *Identity) SignProof(resource, token string, now time.Time, nonce string) (string, error) {
+func (i *Identity) SignProof(resource, token, challenge string) (string, error) {
 	if i == nil || len(i.private) != ed25519.PrivateKeySize {
 		return "", errors.New("device identity is unavailable")
 	}
-	if nonce == "" {
-		return "", errors.New("proof nonce is required")
+	if challenge == "" {
+		return "", errors.New("Relay challenge is required")
 	}
-	sig := ed25519.Sign(i.private, proofMessage(resource, TokenFingerprint(token), now.Unix(), nonce))
+	sig := ed25519.Sign(i.private, proofMessage(resource, TokenFingerprint(token), challenge))
 	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-func VerifyProof(pub ed25519.PublicKey, resource, tokenFingerprint string, timestamp int64, nonce, encodedSignature string) bool {
-	if len(pub) != ed25519.PublicKeySize || nonce == "" {
+func VerifyProof(pub ed25519.PublicKey, resource, tokenFingerprint, challenge, encodedSignature string) bool {
+	if len(pub) != ed25519.PublicKeySize || challenge == "" {
 		return false
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(encodedSignature)
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return false
 	}
-	return ed25519.Verify(pub, proofMessage(resource, tokenFingerprint, timestamp, nonce), sig)
+	return ed25519.Verify(pub, proofMessage(resource, tokenFingerprint, challenge), sig)
 }
 
 const registrationProofContext = "chat-with-cli-agent-registration-v1"

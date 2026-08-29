@@ -20,17 +20,19 @@ func TestIdentityRoundTripAndProof(t *testing.T) {
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("identity permissions: info=%v err=%v", info, err)
 	}
-	now := time.Unix(1_700_000_000, 0)
-	nonce := "fixed-nonce-for-test"
-	sig, err := identity.SignProof("https://relay.example/agent/id/"+identity.ID(), "token", now, nonce)
+	challenge := "relay-issued-challenge-for-test"
+	sig, err := identity.SignProof("https://relay.example/agent/id/"+identity.ID(), "token", challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !VerifyProof(identity.PublicKey(), "https://relay.example/agent/id/"+identity.ID(), TokenFingerprint("token"), now.Unix(), nonce, sig) {
+	if !VerifyProof(identity.PublicKey(), "https://relay.example/agent/id/"+identity.ID(), TokenFingerprint("token"), challenge, sig) {
 		t.Fatal("valid proof rejected")
 	}
-	if VerifyProof(identity.PublicKey(), "https://relay.example/agent/id/"+identity.ID(), TokenFingerprint("other"), now.Unix(), nonce, sig) {
+	if VerifyProof(identity.PublicKey(), "https://relay.example/agent/id/"+identity.ID(), TokenFingerprint("other"), challenge, sig) {
 		t.Fatal("proof accepted for another token")
+	}
+	if VerifyProof(identity.PublicKey(), "https://relay.example/agent/id/"+identity.ID(), TokenFingerprint("token"), challenge+"-other", sig) {
+		t.Fatal("proof accepted for another Relay challenge")
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -117,26 +116,27 @@ func TestAgentURLCanonicalizesImmutableIDCase(t *testing.T) {
 	}
 }
 
-func TestAgentRunSendsEd25519ProofOfPossession(t *testing.T) {
+func TestAgentRunSendsRelayChallengeProofOfPossession(t *testing.T) {
 	identity, err := deviceidentity.Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
 	const token = "proof-bound-agent-token"
+	const challenge = "relay-issued-one-time-challenge-1234567890"
 	verified := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "missing bearer", http.StatusUnauthorized)
 			return
 		}
-		timestamp, err := strconv.ParseInt(r.Header.Get(deviceidentity.HeaderTimestamp), 10, 64)
-		if err != nil || time.Since(time.Unix(timestamp, 0)) > time.Minute || time.Until(time.Unix(timestamp, 0)) > time.Minute {
-			http.Error(w, "bad timestamp", http.StatusUnauthorized)
+		if strings.HasSuffix(r.URL.Path, "/challenge") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"challenge": challenge, "expires_in": 30})
 			return
 		}
 		resource := "http://" + r.Host + r.URL.EscapedPath()
-		if !deviceidentity.VerifyProof(identity.PublicKey(), resource, deviceidentity.TokenFingerprint(token), timestamp,
-			r.Header.Get(deviceidentity.HeaderNonce), r.Header.Get(deviceidentity.HeaderProof)) {
+		if r.Header.Get(deviceidentity.HeaderChallenge) != challenge ||
+			!deviceidentity.VerifyProof(identity.PublicKey(), resource, deviceidentity.TokenFingerprint(token), challenge, r.Header.Get(deviceidentity.HeaderProof)) {
 			http.Error(w, "bad proof", http.StatusUnauthorized)
 			return
 		}
@@ -166,7 +166,7 @@ func TestAgentRunSendsEd25519ProofOfPossession(t *testing.T) {
 		cancel()
 	case <-time.After(3 * time.Second):
 		cancel()
-		t.Fatal("Agent did not complete proof-bound WebSocket handshake")
+		t.Fatal("Agent did not complete challenge-bound WebSocket handshake")
 	}
 	select {
 	case <-done:

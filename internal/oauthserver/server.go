@@ -2,10 +2,12 @@ package oauthserver
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,7 +39,8 @@ const (
 	maxDevicesUser                   = 16
 	maxRateEntries                   = 8192
 	maxRegistrationProofNoncesDevice = 64
-	maxAgentProofNoncesDevice        = 64
+	maxAgentChallengesConsumedDevice = 64
+	agentChallengeLifetime           = 30 * time.Second
 	proofClockSkew                   = 90 * time.Second
 )
 
@@ -171,7 +173,8 @@ type Server struct {
 	rateMu                  sync.Mutex
 	rates                   map[string]rateWindow
 	registrationProofNonces map[string]map[string]int64
-	agentProofNonces        map[string]map[string]int64
+	consumedAgentChallenges map[string]map[string]int64
+	agentChallengeKey       [32]byte
 	setupTokenHash          string
 	setupTokenPath          string
 	securityEvents          []SecurityEvent
@@ -294,6 +297,10 @@ func New(cfg Config) (*Server, error) {
 	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure OAuth state directory: %w", err)
 	}
+	var challengeKey [32]byte
+	if _, err := rand.Read(challengeKey[:]); err != nil {
+		return nil, fmt.Errorf("generate Agent challenge key: %w", err)
+	}
 	s := &Server{
 		cfg: cfg, base: base,
 		clients: make(map[string]Client), access: make(map[string]tokenRecord),
@@ -304,7 +311,7 @@ func New(cfg Config) (*Server, error) {
 		registrationEnabled: mode == ModePublic && !cfg.RegistrationDisabled,
 		dcrEnabled:          true,
 		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
-		rates: make(map[string]rateWindow), registrationProofNonces: make(map[string]map[string]int64), agentProofNonces: make(map[string]map[string]int64), setupTokenPath: cfg.SetupTokenPath,
+		rates: make(map[string]rateWindow), registrationProofNonces: make(map[string]map[string]int64), consumedAgentChallenges: make(map[string]map[string]int64), agentChallengeKey: challengeKey, setupTokenPath: cfg.SetupTokenPath,
 		startedAt: time.Now(),
 	}
 	if cfg.SetupToken != "" {
@@ -1770,22 +1777,70 @@ func (s *Server) consumeRegistrationProofNonceLocked(device, nonce string, now t
 	return true
 }
 
-func (s *Server) consumeAgentProofNonceLocked(device, nonce string, now time.Time) bool {
-	bucket := s.agentProofNonces[device]
+func agentChallengeMACInput(payload []byte, resource, credentialHash string) []byte {
+	out := make([]byte, 0, len(payload)+len(resource)+len(credentialHash)+2)
+	out = append(out, payload...)
+	out = append(out, '\n')
+	out = append(out, resource...)
+	out = append(out, '\n')
+	out = append(out, credentialHash...)
+	return out
+}
+
+func (s *Server) issueAgentChallenge(resource, credentialHash string, now time.Time) (string, error) {
+	var payload [32]byte
+	if _, err := rand.Read(payload[:24]); err != nil {
+		return "", err
+	}
+	expires := now.Add(agentChallengeLifetime).Unix()
+	binary.BigEndian.PutUint64(payload[24:], uint64(expires))
+	mac := hmac.New(sha256.New, s.agentChallengeKey[:])
+	_, _ = mac.Write(agentChallengeMACInput(payload[:], resource, credentialHash))
+	return base64.RawURLEncoding.EncodeToString(payload[:]) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (s *Server) validateAgentChallenge(resource, credentialHash, challenge string, now time.Time) (string, int64, bool) {
+	parts := strings.Split(challenge, ".")
+	if len(parts) != 2 {
+		return "", 0, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || len(payload) != 32 {
+		return "", 0, false
+	}
+	providedMAC, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(providedMAC) != sha256.Size {
+		return "", 0, false
+	}
+	mac := hmac.New(sha256.New, s.agentChallengeKey[:])
+	_, _ = mac.Write(agentChallengeMACInput(payload, resource, credentialHash))
+	if !hmac.Equal(providedMAC, mac.Sum(nil)) {
+		return "", 0, false
+	}
+	expires := int64(binary.BigEndian.Uint64(payload[24:]))
+	if expires <= now.Unix() || expires > now.Add(agentChallengeLifetime+5*time.Second).Unix() {
+		return "", 0, false
+	}
+	sum := sha256.Sum256([]byte(challenge))
+	return hex.EncodeToString(sum[:]), expires, true
+}
+
+func (s *Server) consumeAgentChallengeLocked(device, challengeHash string, expires int64, now time.Time) bool {
+	bucket := s.consumedAgentChallenges[device]
 	if bucket == nil {
 		bucket = make(map[string]int64)
-		s.agentProofNonces[device] = bucket
+		s.consumedAgentChallenges[device] = bucket
 	}
 	nowUnix := now.Unix()
-	for candidate, expires := range bucket {
-		if expires <= nowUnix {
+	for candidate, expiry := range bucket {
+		if expiry <= nowUnix {
 			delete(bucket, candidate)
 		}
 	}
-	if _, replay := bucket[nonce]; replay || len(bucket) >= maxAgentProofNoncesDevice {
+	if _, replay := bucket[challengeHash]; replay || len(bucket) >= maxAgentChallengesConsumedDevice {
 		return false
 	}
-	bucket[nonce] = now.Add(2 * proofClockSkew).Unix()
+	bucket[challengeHash] = expires
 	return true
 }
 
@@ -1807,26 +1862,65 @@ func (s *Server) verifyAgentDeviceProof(r *http.Request, resource, credentialHas
 	if err != nil {
 		return false
 	}
-	timestamp, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get(deviceidentity.HeaderTimestamp)), 10, 64)
-	if err != nil {
-		return false
-	}
-	now := time.Now().UTC()
-	proofTime := time.Unix(timestamp, 0)
-	if proofTime.Before(now.Add(-proofClockSkew)) || proofTime.After(now.Add(proofClockSkew)) {
-		return false
-	}
-	nonce := strings.TrimSpace(r.Header.Get(deviceidentity.HeaderNonce))
-	if len(nonce) < 16 || len(nonce) > 128 {
+	challenge := strings.TrimSpace(r.Header.Get(deviceidentity.HeaderChallenge))
+	challengeHash, expires, ok := s.validateAgentChallenge(resource, credentialHash, challenge, time.Now().UTC())
+	if !ok {
 		return false
 	}
 	proof := strings.TrimSpace(r.Header.Get(deviceidentity.HeaderProof))
-	if !deviceidentity.VerifyProof(pub, resource, credentialHash, timestamp, nonce, proof) {
+	if !deviceidentity.VerifyProof(pub, resource, credentialHash, challenge, proof) {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.consumeAgentProofNonceLocked(device, nonce, now)
+	return s.consumeAgentChallengeLocked(device, challengeHash, expires, time.Now().UTC())
+}
+
+func (s *Server) AgentChallengeHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		basePath := strings.TrimSuffix(r.URL.EscapedPath(), "/challenge")
+		resource, ok := s.validateResource(s.absolute(basePath))
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		kind, device, _, ok := s.resourceParts(resource)
+		if !ok || kind != "agent" {
+			http.NotFound(w, r)
+			return
+		}
+		s.mu.Lock()
+		enabled := s.resourceEnabledLocked(resource, "agent:connect")
+		record := s.deviceRecords[device]
+		s.mu.Unlock()
+		if !enabled {
+			http.Error(w, "capability disabled", http.StatusServiceUnavailable)
+			return
+		}
+		token := bearerValue(r.Header.Get("Authorization"))
+		if !s.VerifyAccessScope(token, resource, "agent:connect") {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if record.DevicePublicKey == "" {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "legacy device has no cryptographic identity", http.StatusConflict)
+			return
+		}
+		challenge, err := s.issueAgentChallenge(resource, tokenKey(token), time.Now().UTC())
+		if err != nil {
+			http.Error(w, "failed to issue challenge", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, map[string]any{"challenge": challenge, "expires_in": int(agentChallengeLifetime.Seconds())})
+	})
 }
 
 func (s *Server) ProtectResource(next http.Handler) http.Handler {

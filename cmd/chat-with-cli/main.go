@@ -685,6 +685,8 @@ func runRelay(args []string) error {
 		oauth.RegisterRoutes(mux)
 		mux.Handle("/mcp/{device}", oauth.ProtectScopedResource("mcp", pathHandler))
 		mux.Handle("/mcp/id/{id}", oauth.ProtectScopedResource("mcp", pathHandler))
+		mux.Handle("/agent/{device}/challenge", oauth.AgentChallengeHandler())
+		mux.Handle("/agent/id/{id}/challenge", oauth.AgentChallengeHandler())
 		mux.Handle("/agent/{device}", oauth.ProtectScopedResource("agent:connect", broker.AgentHandler()))
 		mux.Handle("/agent/id/{id}", oauth.ProtectScopedResource("agent:connect", broker.AgentHandler()))
 		log.Printf("%s OAuth instance; MCP endpoint: %s/mcp/<device>", strings.ToLower(*mode), strings.TrimRight(*publicURL, "/"))

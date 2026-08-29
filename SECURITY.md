@@ -96,10 +96,14 @@ New deployments use an Ed25519 device identity created by `agent setup`. The
 immutable 128-bit route ID is derived from the public key; the human-readable
 name remains only a label. Public instances require this cryptographic identity
 for new device claims. During Agent DCR the client proves possession of the
-matching private key, and every later Agent WebSocket carries a fresh signed
-proof bound to the exact resource, bearer-token fingerprint, timestamp, and
-nonce. Relay replay state is isolated per device. Knowing the ID, public key,
-or Agent bearer alone is insufficient to impersonate a PoP-bound device.
+matching private key. Before every later Agent WebSocket, the authenticated
+Agent obtains a short-lived one-time challenge from the Relay and signs it with
+the device key. The challenge is bound to the exact Agent resource and bearer
+fingerprint, is consumed after one valid handshake, and is authenticated by a
+per-process Relay key so every outstanding challenge becomes invalid after a
+Relay restart. Consumed-challenge replay state is isolated per device. Knowing
+the ID, public key, Agent bearer, or a previously captured handshake alone is
+insufficient to impersonate a PoP-bound device.
 
 Legacy already-owned alpha devices without a bound key remain compatibility
 routes until migrated. They are shown as unbound in the admin UI and should be

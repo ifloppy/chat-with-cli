@@ -892,6 +892,10 @@ func desktopBusDoctorCheck(name, service, objectPath string) doctorCheck {
 func doctorAgentConnectionCheck(ctx context.Context, base, route, token string, identity *deviceidentity.Identity) doctorCheck {
 	resource := strings.TrimRight(base, "/") + "/agent/" + route
 	target := resource + "?probe=1"
+	client := &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
@@ -900,22 +904,39 @@ func doctorAgentConnectionCheck(ctx context.Context, base, route, token string, 
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	if identity != nil {
-		nonce, err := deviceidentity.NewNonce()
+		challengeReq, err := http.NewRequestWithContext(probeCtx, http.MethodGet, resource+"/challenge", nil)
 		if err != nil {
-			return doctorCheck{Name: "Agent connection", Detail: ": failed to generate device proof nonce"}
+			return doctorCheck{Name: "Agent connection", Detail: ": build device challenge request failed"}
 		}
-		now := time.Now().UTC()
-		proof, err := identity.SignProof(resource, token, now, nonce)
+		challengeReq.Header.Set("Authorization", "Bearer "+token)
+		challengeResp, err := client.Do(challengeReq)
 		if err != nil {
-			return doctorCheck{Name: "Agent connection", Detail: ": failed to sign device proof"}
+			return doctorCheck{Name: "Agent connection", Detail: ": device challenge failed: " + redactDiagnosticError(err)}
 		}
-		req.Header.Set(deviceidentity.HeaderTimestamp, fmt.Sprintf("%d", now.Unix()))
-		req.Header.Set(deviceidentity.HeaderNonce, nonce)
+		if challengeResp.Header.Get("cf-mitigated") == "challenge" {
+			challengeResp.Body.Close()
+			return doctorCheck{Name: "Agent connection", Detail: ": Cloudflare Managed Challenge"}
+		}
+		if challengeResp.StatusCode != http.StatusOK {
+			_, _ = io.Copy(io.Discard, io.LimitReader(challengeResp.Body, 64<<10))
+			challengeResp.Body.Close()
+			return doctorCheck{Name: "Agent connection", Detail: fmt.Sprintf(": device challenge returned HTTP %d", challengeResp.StatusCode)}
+		}
+		var challengePayload struct {
+			Challenge string `json:"challenge"`
+			ExpiresIn int    `json:"expires_in"`
+		}
+		err = json.NewDecoder(io.LimitReader(challengeResp.Body, 4096)).Decode(&challengePayload)
+		challengeResp.Body.Close()
+		if err != nil || challengePayload.Challenge == "" {
+			return doctorCheck{Name: "Agent connection", Detail: ": invalid device challenge response"}
+		}
+		proof, err := identity.SignProof(resource, token, challengePayload.Challenge)
+		if err != nil {
+			return doctorCheck{Name: "Agent connection", Detail: ": failed to sign device challenge"}
+		}
+		req.Header.Set(deviceidentity.HeaderChallenge, challengePayload.Challenge)
 		req.Header.Set(deviceidentity.HeaderProof, proof)
-	}
-	client := &http.Client{
-		Timeout:       10 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -932,7 +953,7 @@ func doctorAgentConnectionCheck(ctx context.Context, base, route, token string, 
 	case http.StatusServiceUnavailable:
 		return doctorCheck{Name: "Agent connection", Detail: ": credential accepted but device is offline or disabled"}
 	case http.StatusUnauthorized:
-		return doctorCheck{Name: "Agent connection", Detail: ": saved Agent credential is not authorized"}
+		return doctorCheck{Name: "Agent connection", Detail: ": saved Agent credential or device proof is not authorized"}
 	default:
 		return doctorCheck{Name: "Agent connection", Detail: fmt.Sprintf(": unexpected HTTP %d", resp.StatusCode)}
 	}
