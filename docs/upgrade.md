@@ -42,3 +42,14 @@ The backup checksum is verified before restoration. The command changes only
 the binary and never restarts a service. If a newer release migrated persistent
 state, follow that release's rollback instructions rather than restoring an old
 binary against incompatible state.
+
+## Migrating alpha.4 Agent identities
+
+Alpha.4 Agents are bearer-only and current Relays reject them by default. Keep
+the old Agent stopped while preparing the upgrade. If a live transition is
+strictly necessary, temporarily set `relay.allow_legacy_unbound_agents = true`;
+treat that period as reduced security. Run current `agent setup` to generate a
+new Ed25519 identity and derived immutable ID, complete `login`, connect and
+verify the new device as **PoP bound** in `/admin`, then **Revoke permanently**
+the old device. Remove the migration flag immediately afterward. Permanent
+revocation retires the old identity; reconnecting requires a new key and ID.

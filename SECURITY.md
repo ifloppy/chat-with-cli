@@ -105,11 +105,15 @@ Relay restart. Consumed-challenge replay state is isolated per device. Knowing
 the ID, public key, Agent bearer, or a previously captured handshake alone is
 insufficient to impersonate a PoP-bound device.
 
-Legacy already-owned alpha devices without a bound key remain compatibility
-routes until migrated. They are shown as unbound in the admin UI and should be
-replaced by a newly generated cryptographic identity, verified online, and then
-revoked. MCP OAuth bearer tokens are still bearer credentials and are not
-sender-constrained by the Agent device key.
+Legacy already-owned alpha devices without a bound key are **denied by default**
+because a bearer-only Agent token cannot resist device impersonation. The
+`--allow-legacy-unbound-agents` / `relay.allow_legacy_unbound_agents` switch is
+a migration-only escape hatch and produces a critical admin warning. Use it
+only long enough to create a new Ed25519 identity/ID, verify that device online,
+permanently revoke the old route, and disable migration mode again. Permanent
+revocation writes a durable tombstone: the old immutable ID can never be
+reclaimed even by someone holding its private key. MCP OAuth bearer tokens are
+still bearer credentials and are not sender-constrained by the Agent device key.
 
 The admin control plane can rename labels without changing routes, disable or
 unlink devices, revoke device token families, and permanently disable Agent or

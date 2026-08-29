@@ -56,6 +56,10 @@ type Config struct {
 	// TrustedProxyCIDRs controls whether X-Forwarded-For/X-Real-IP are used for
 	// abuse limits. No proxy headers are trusted when it is empty.
 	TrustedProxyCIDRs []string
+	// AllowLegacyUnboundAgents is an explicit migration-only escape hatch.
+	// New deployments must keep it false so Agent bearer tokens are always
+	// sender-constrained by an Ed25519 device identity.
+	AllowLegacyUnboundAgents bool
 	// SetupToken enables the local first-run setup endpoint. It is intentionally
 	// supplied out-of-band and is never persisted in OAuth state.
 	SetupToken     string
@@ -94,6 +98,7 @@ type diskState struct {
 	Users           map[string]User          `json:"users"`
 	Devices         map[string]string        `json:"devices"`
 	DisabledDevices map[string]bool          `json:"disabled_devices,omitempty"`
+	RetiredDevices  map[string]bool          `json:"retired_devices,omitempty"`
 	DeviceRecords   map[string]DeviceRecord  `json:"device_records,omitempty"`
 	Sessions        map[string]sessionRecord `json:"sessions"`
 	Settings        *settingsState           `json:"settings,omitempty"`
@@ -160,6 +165,7 @@ type Server struct {
 	usernames               map[string]string
 	devices                 map[string]string
 	disabledDevices         map[string]bool
+	retiredDevices          map[string]bool
 	deviceRecords           map[string]DeviceRecord
 	sessions                map[string]sessionRecord
 	passwordSlots           chan struct{}
@@ -207,6 +213,7 @@ type mutableStateSnapshot struct {
 	usernames           map[string]string
 	devices             map[string]string
 	disabledDevices     map[string]bool
+	retiredDevices      map[string]bool
 	deviceRecords       map[string]DeviceRecord
 	sessions            map[string]sessionRecord
 	registrationEnabled bool
@@ -240,7 +247,7 @@ func (s *Server) snapshotMutableStateLocked() mutableStateSnapshot {
 	return mutableStateSnapshot{
 		clients: cloneClients(s.clients), access: cloneMap(s.access), refresh: cloneMap(s.refresh), refreshUsed: cloneMap(s.refreshUsed),
 		pending: cloneMap(s.pending), codes: cloneMap(s.codes), users: cloneMap(s.users), usernames: cloneMap(s.usernames),
-		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions),
+		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), retiredDevices: cloneMap(s.retiredDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions),
 		registrationEnabled: s.registrationEnabled, dcrEnabled: s.dcrEnabled, mcpEnabled: s.mcpEnabled, agentEnabled: s.agentEnabled,
 		killSwitch: s.killSwitch, setupTokenHash: s.setupTokenHash, securityEvents: append([]SecurityEvent(nil), s.securityEvents...), mode: s.cfg.Mode,
 	}
@@ -249,7 +256,7 @@ func (s *Server) snapshotMutableStateLocked() mutableStateSnapshot {
 func (s *Server) restoreMutableStateLocked(snapshot mutableStateSnapshot) {
 	s.clients, s.access, s.refresh, s.refreshUsed = snapshot.clients, snapshot.access, snapshot.refresh, snapshot.refreshUsed
 	s.pending, s.codes, s.users, s.usernames = snapshot.pending, snapshot.codes, snapshot.users, snapshot.usernames
-	s.devices, s.disabledDevices, s.deviceRecords, s.sessions = snapshot.devices, snapshot.disabledDevices, snapshot.deviceRecords, snapshot.sessions
+	s.devices, s.disabledDevices, s.retiredDevices, s.deviceRecords, s.sessions = snapshot.devices, snapshot.disabledDevices, snapshot.retiredDevices, snapshot.deviceRecords, snapshot.sessions
 	s.registrationEnabled, s.dcrEnabled, s.mcpEnabled, s.agentEnabled = snapshot.registrationEnabled, snapshot.dcrEnabled, snapshot.mcpEnabled, snapshot.agentEnabled
 	s.killSwitch, s.setupTokenHash, s.securityEvents, s.cfg.Mode = snapshot.killSwitch, snapshot.setupTokenHash, snapshot.securityEvents, snapshot.mode
 }
@@ -306,7 +313,7 @@ func New(cfg Config) (*Server, error) {
 		clients: make(map[string]Client), access: make(map[string]tokenRecord),
 		refresh: make(map[string]tokenRecord), refreshUsed: make(map[string]tokenRecord), pending: make(map[string]pendingAuth),
 		codes: make(map[string]authCode), users: make(map[string]User), usernames: make(map[string]string),
-		devices: make(map[string]string), disabledDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), passwordSlots: make(chan struct{}, 4),
+		devices: make(map[string]string), disabledDevices: make(map[string]bool), retiredDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), passwordSlots: make(chan struct{}, 4),
 		stateFile:           filepath.Join(cfg.StateDir, "oauth-state.json"),
 		registrationEnabled: mode == ModePublic && !cfg.RegistrationDisabled,
 		dcrEnabled:          true,
@@ -460,6 +467,19 @@ func (s *Server) canonicalizeDiskState(state *diskState) error {
 	if err != nil {
 		return err
 	}
+	state.RetiredDevices, err = canonicalizeRouteMap(state.RetiredDevices)
+	if err != nil {
+		return err
+	}
+	for route, retired := range state.RetiredDevices {
+		if !retired {
+			delete(state.RetiredDevices, route)
+			continue
+		}
+		if _, active := state.Devices[route]; active {
+			return fmt.Errorf("persisted device route %q is both active and permanently retired", route)
+		}
+	}
 	state.DeviceRecords, err = canonicalizeRouteMap(state.DeviceRecords)
 	if err != nil {
 		return err
@@ -555,6 +575,9 @@ func (s *Server) load() error {
 		if state.DisabledDevices != nil {
 			s.disabledDevices = state.DisabledDevices
 		}
+		if state.RetiredDevices != nil {
+			s.retiredDevices = state.RetiredDevices
+		}
 		if state.DeviceRecords != nil {
 			s.deviceRecords = state.DeviceRecords
 		}
@@ -603,7 +626,7 @@ func (s *Server) saveLockedUnlocked() error {
 	registrationEnabled := s.registrationEnabled && s.cfg.Mode == ModePublic
 	state := diskState{
 		Clients: s.clients, Access: s.access, Refresh: s.refresh, RefreshUsed: s.refreshUsed,
-		Users: s.users, Devices: s.devices, DisabledDevices: s.disabledDevices, DeviceRecords: s.deviceRecords, Sessions: s.sessions,
+		Users: s.users, Devices: s.devices, DisabledDevices: s.disabledDevices, RetiredDevices: s.retiredDevices, DeviceRecords: s.deviceRecords, Sessions: s.sessions,
 		Settings:       &settingsState{Mode: s.cfg.Mode, RegistrationEnabled: registrationEnabled, DCREnabled: s.dcrEnabled, MCPEnabled: s.mcpEnabled, AgentEnabled: s.agentEnabled, KillSwitch: s.killSwitch},
 		SecurityEvents: append([]SecurityEvent(nil), s.securityEvents...),
 	}
@@ -1351,6 +1374,9 @@ func (s *Server) authorizeResourceLocked(userID, clientID, resource string) erro
 	if s.killSwitch || (kind == "mcp" && !s.mcpEnabled) || (kind == "agent" && !s.agentEnabled) {
 		return errors.New("this capability is temporarily disabled by the administrator")
 	}
+	if s.retiredDevices[device] {
+		return errors.New("this device identity was permanently revoked; generate a new device identity")
+	}
 	if s.disabledDevices[device] {
 		return errors.New("this device is disabled")
 	}
@@ -1749,7 +1775,7 @@ func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
 		return false
 	}
 	_, device, _, ok := s.resourceParts(resource)
-	if !ok || s.disabledDevices[device] {
+	if !ok || s.disabledDevices[device] || s.retiredDevices[device] {
 		return false
 	}
 	if record, exists := s.deviceRecords[device]; exists && record.Disabled {
@@ -1854,9 +1880,10 @@ func (s *Server) verifyAgentDeviceProof(r *http.Request, resource, credentialHas
 	encodedPublicKey := record.DevicePublicKey
 	s.mu.Unlock()
 	if encodedPublicKey == "" {
-		// Compatibility-only path for an already-owned alpha device that has not
-		// yet been reauthorized with a cryptographic device identity.
-		return true
+		// Bearer-only Agent connections are unsafe against token theft and are
+		// therefore disabled by default. This flag exists only to migrate old
+		// alpha devices onto a newly generated cryptographic identity.
+		return s.cfg.AllowLegacyUnboundAgents
 	}
 	pub, err := deviceidentity.DecodePublicKey(encodedPublicKey)
 	if err != nil {

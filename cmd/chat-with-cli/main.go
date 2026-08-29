@@ -531,6 +531,7 @@ func runRelay(args []string) error {
 	trustedProxies := new(stringList)
 	fs.Var(trustedProxies, "trusted-proxy", "trusted reverse-proxy IP/CIDR (repeatable; never trust proxy headers by default)")
 	disableRegistration := fs.Bool("disable-registration", false, "disable public account registration")
+	allowLegacyUnboundAgents := fs.Bool("allow-legacy-unbound-agents", false, "MIGRATION ONLY: allow bearer-only legacy Agent connections without Ed25519 proof")
 	githubURL := fs.String("github-url", "https://github.com/ifloppy/chat-with-cli", "GitHub project URL shown on the landing page")
 	configPath := fs.String("config", defaultRelayConfigPath(), "relay TOML configuration file")
 	if err := fs.Parse(args); err != nil {
@@ -567,6 +568,9 @@ func runRelay(args []string) error {
 	if !flagWasSet(fs, "disable-registration") {
 		*disableRegistration = values.Bool(*disableRegistration, "relay.disable_registration")
 	}
+	if !flagWasSet(fs, "allow-legacy-unbound-agents") {
+		*allowLegacyUnboundAgents = values.Bool(*allowLegacyUnboundAgents, "relay.allow_legacy_unbound_agents")
+	}
 	if !flagWasSet(fs, "github-url") {
 		*githubURL = values.String(*githubURL, "relay.github_url")
 	}
@@ -600,6 +604,9 @@ func runRelay(args []string) error {
 	}
 	if !flagWasSet(fs, "disable-registration") && envBool("CHAT_WITH_CLI_DISABLE_REGISTRATION") {
 		*disableRegistration = true
+	}
+	if !flagWasSet(fs, "allow-legacy-unbound-agents") && envBool("CHAT_WITH_CLI_ALLOW_LEGACY_UNBOUND_AGENTS") {
+		*allowLegacyUnboundAgents = true
 	}
 	if !flagWasSet(fs, "github-url") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_GITHUB_URL")) != "" {
 		*githubURL = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_GITHUB_URL"))
@@ -664,7 +671,7 @@ func runRelay(args []string) error {
 	mux := http.NewServeMux()
 	var oauthHealth *oauthserver.Server
 	if oauthEnabled {
-		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL}
+		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), AllowLegacyUnboundAgents: *allowLegacyUnboundAgents, SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL}
 		oauth, err := oauthserver.New(cfg)
 		if err != nil {
 			return err

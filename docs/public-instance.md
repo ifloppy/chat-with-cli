@@ -37,6 +37,12 @@ current bearer-token fingerprint, can be consumed only once, and is invalid
 after a Relay restart. A stolen Agent bearer, public key, or previously
 captured handshake therefore cannot impersonate a bound workstation.
 
+Legacy unbound Agent connections are disabled by default, including on public
+instances. The migration-only `relay.allow_legacy_unbound_agents` option should
+never be left enabled on an Internet-facing Relay after old devices have been
+moved to new Ed25519 identities. Permanently revoked identities are tombstoned
+and cannot be reclaimed with the old private key.
+
 MCP authorization remains restricted to the same account and exact MCP
 resource. MCP bearer tokens are not sender-constrained by the device key and
 remain high-value credentials. Use `/admin` to rename labels, disable,

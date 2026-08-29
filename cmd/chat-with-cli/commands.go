@@ -390,12 +390,13 @@ func runRelaySetup(args []string) error {
 		}
 	}
 	values := map[string]any{
-		"relay.public_url":           *publicURL,
-		"relay.listen":               strings.TrimSpace(*listen),
-		"relay.instance_mode":        strings.TrimSpace(*mode),
-		"relay.state_dir":            *stateDir,
-		"relay.setup_token_file":     *setupTokenFile,
-		"relay.disable_registration": false,
+		"relay.public_url":                  *publicURL,
+		"relay.listen":                      strings.TrimSpace(*listen),
+		"relay.instance_mode":               strings.TrimSpace(*mode),
+		"relay.state_dir":                   *stateDir,
+		"relay.setup_token_file":            *setupTokenFile,
+		"relay.disable_registration":        false,
+		"relay.allow_legacy_unbound_agents": false,
 	}
 	if err := writeConfigFile(*configPath, values, *force); err != nil {
 		return fmt.Errorf("write relay config: %w", err)

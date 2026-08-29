@@ -1187,7 +1187,7 @@ func TestAuthorizationGrantRollsBackDeviceClaimWhenPersistenceFails(t *testing.T
 }
 
 func TestCrossUserTokensCannotCrossDeviceOrScope(t *testing.T) {
-	s, err := New(Config{PublicURL: "http://127.0.0.1:19020", StateDir: t.TempDir(), Mode: ModePublic})
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19020", StateDir: t.TempDir(), Mode: ModePublic, AllowLegacyUnboundAgents: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1375,7 +1375,7 @@ func TestSharedOAuthClientStillIsolatesUsersAndDevices(t *testing.T) {
 }
 
 func TestCrossUserAgentCannotReplaceVictimConnection(t *testing.T) {
-	s, err := New(Config{PublicURL: "http://127.0.0.1:19021", StateDir: t.TempDir(), Mode: ModePublic})
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19021", StateDir: t.TempDir(), Mode: ModePublic, AllowLegacyUnboundAgents: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1583,7 +1583,7 @@ func TestOAuthPersistenceFailureFreezesExistingCrossUserAccess(t *testing.T) {
 }
 
 func TestDisabledDeviceOldAgentTokenCannotReconnectOrRevive(t *testing.T) {
-	s, err := New(Config{PublicURL: "http://127.0.0.1:19025", StateDir: t.TempDir(), Mode: ModePublic})
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19025", StateDir: t.TempDir(), Mode: ModePublic, AllowLegacyUnboundAgents: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2337,4 +2337,159 @@ func TestProofReplayCapacityIsIsolatedPerDevice(t *testing.T) {
 	if !s.consumeAgentChallengeLocked("bob", "fresh", expires, now) {
 		t.Fatal("alice Agent replay bucket blocked bob")
 	}
+}
+
+func TestRevokedCryptographicDeviceCannotBeReclaimedAndPersists(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := Config{PublicURL: "http://127.0.0.1:19130", Password: "retired-device-password-12345", StateDir: stateDir}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := "id/" + identity.ID()
+	resource := s.absolute("/agent/" + route)
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.clients["retire-client"] = Client{ID: "retire-client", DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	if err := s.authorizeResourceLocked(ownerID, "retire-client", resource); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+	owner := s.users[ownerID]
+	if err := s.applyAdminAction("revoke-device", route, "", owner, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	if !s.retiredDevices[route] {
+		s.mu.Unlock()
+		t.Fatal("revoked device was not permanently retired")
+	}
+	attacker, err := s.createUserLocked("attacker", "attacker-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.clients["stolen-key-client"] = Client{ID: "stolen-key-client", DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	err = s.authorizeResourceLocked(attacker.ID, "stolen-key-client", resource)
+	s.mu.Unlock()
+	if err == nil {
+		t.Fatal("holder of revoked device private key reclaimed the retired identity")
+	}
+
+	s2, err := New(Config{PublicURL: cfg.PublicURL, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.mu.Lock()
+	retired := s2.retiredDevices[route]
+	err = s2.authorizeResourceLocked(s2.usernames["owner"], "retire-client", resource)
+	s2.mu.Unlock()
+	if !retired || err == nil {
+		t.Fatalf("retired device did not survive restart: retired=%v authorizeErr=%v", retired, err)
+	}
+}
+
+func TestDeletingUserRetiresOwnedCryptographicDevices(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19131", Password: "delete-user-retire-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := "id/" + identity.ID()
+	resource := s.absolute("/agent/" + route)
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	victim, err := s.createUserLocked("victim", "victim-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.clients["victim-device-client"] = Client{ID: "victim-device-client", DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	if err := s.authorizeResourceLocked(victim.ID, "victim-device-client", resource); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+	owner := s.users[ownerID]
+	if err := s.applyAdminAction("delete-user", victim.ID, "", owner, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	retired := s.retiredDevices[route]
+	_, stillOwned := s.devices[route]
+	s.clients["reclaim-client"] = Client{ID: "reclaim-client", DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	err = s.authorizeResourceLocked(ownerID, "reclaim-client", resource)
+	s.mu.Unlock()
+	if !retired || stillOwned {
+		t.Fatalf("deleted user's device retirement state wrong: retired=%v stillOwned=%v", retired, stillOwned)
+	}
+	if err == nil {
+		t.Fatal("deleted user's retired device identity was reclaimable")
+	}
+}
+
+func TestPersistedActiveAndRetiredDeviceConflictFailsClosed(t *testing.T) {
+	stateDir := t.TempDir()
+	state := diskState{
+		Users:          map[string]User{"owner-id": {ID: "owner-id", Username: "owner", PasswordHash: "irrelevant", Admin: true}},
+		Devices:        map[string]string{"id/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "owner-id"},
+		RetiredDevices: map[string]bool{"id/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": true},
+		Clients:        map[string]Client{}, Access: map[string]tokenRecord{}, Refresh: map[string]tokenRecord{},
+		RefreshUsed: map[string]tokenRecord{}, DisabledDevices: map[string]bool{}, DeviceRecords: map[string]DeviceRecord{}, Sessions: map[string]sessionRecord{},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "oauth-state.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = New(Config{PublicURL: "http://127.0.0.1:19132", StateDir: stateDir})
+	if err == nil || !strings.Contains(err.Error(), "both active and permanently retired") {
+		t.Fatalf("conflicting active/retired state did not fail closed: %v", err)
+	}
+}
+
+func TestLegacyUnboundAgentDeniedByDefaultAndAllowedOnlyForMigration(t *testing.T) {
+	test := func(t *testing.T, allowLegacy bool, want int) {
+		t.Helper()
+		s, err := New(Config{PublicURL: "http://127.0.0.1:19133", Password: "legacy-migration-password-12345", StateDir: t.TempDir(), AllowLegacyUnboundAgents: allowLegacy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		const route = "legacy-alpha-agent"
+		resource := s.absolute("/agent/" + route)
+		s.mu.Lock()
+		ownerID := s.usernames["owner"]
+		s.devices[route] = ownerID
+		s.deviceRecords[route] = DeviceRecord{DisplayName: route, OwnerID: ownerID, CreatedAt: time.Now().Unix()}
+		s.clients["legacy-agent-client"] = Client{ID: "legacy-agent-client", Approved: true}
+		access, _, _, err := s.issueTokensLocked("legacy-agent-client", ownerID, resource, "agent:connect offline_access")
+		s.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := s.ProtectScopedResource("agent:connect", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+		req := httptest.NewRequest(http.MethodGet, resource, nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Fatalf("legacy Agent status=%d want=%d body=%s", rr.Code, want, rr.Body.String())
+		}
+	}
+	t.Run("default-deny", func(t *testing.T) {
+		test(t, false, http.StatusUnauthorized)
+	})
+	t.Run("explicit-migration-mode", func(t *testing.T) {
+		test(t, true, http.StatusNoContent)
+	})
 }

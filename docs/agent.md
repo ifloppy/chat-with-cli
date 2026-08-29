@@ -67,6 +67,15 @@ identity private key and credential file. `chat-with-cli status` and `doctor`
 check identity-file permissions and ID/key consistency without printing key
 material.
 
+Legacy alpha Agents that have no Ed25519 identity are rejected by a current
+Relay by default. For a controlled migration only, a Relay operator may enable
+`relay.allow_legacy_unbound_agents = true` (or
+`--allow-legacy-unbound-agents`). While enabled, the admin page shows a critical
+warning because possession of an old Agent bearer is sufficient to impersonate
+an unbound device. Create a new identity with `agent setup`, authorize and verify
+the new immutable ID, permanently revoke the old route, then disable migration
+mode. Do not reuse the retired ID.
+
 When the authenticated Relay session is revoked or disconnected, the Agent
 ends that remote session: in-flight calls are canceled, detached PTY tasks are
 terminated, and the active Desktop Portal control session is closed. This is a
