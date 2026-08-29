@@ -232,6 +232,13 @@ func TestDefaultStreamableHandlerStillRejectsPublicHostOnLoopback(t *testing.T) 
 	}
 }
 
+func TestRelayStreamableOptionsUseJSONResponses(t *testing.T) {
+	opts := relayStreamableHTTPOptions("127.0.0.1:18776", "https://chat-with-cli.example")
+	if !opts.Stateless || !opts.JSONResponse {
+		t.Fatalf("relay streamable options = %+v, want stateless JSON responses", opts)
+	}
+}
+
 func TestRelayStreamableOptionsOnlyRelaxExplicitReverseProxyTopology(t *testing.T) {
 	if !relayStreamableHTTPOptions("127.0.0.1:18776", "https://chat-with-cli.example").DisableLocalhostProtection {
 		t.Fatal("loopback Relay behind public reverse proxy did not relax SDK localhost protection")

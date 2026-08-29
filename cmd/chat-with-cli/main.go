@@ -357,7 +357,7 @@ func envBool(name string) bool {
 }
 
 func relayStreamableHTTPOptions(listen, publicURL string) *mcp.StreamableHTTPOptions {
-	opts := &mcp.StreamableHTTPOptions{Stateless: true}
+	opts := &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true}
 	listenHost, _, err := net.SplitHostPort(strings.TrimSpace(listen))
 	if err != nil {
 		return opts
