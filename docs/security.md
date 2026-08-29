@@ -37,6 +37,4 @@ At runtime:
   output by design.
 - Run `doctor` after proxy, OAuth, desktop, or binary changes.
 
-Known residual risks include same-user shell authority, inherited environment
-secrets, filesystem TOCTOU races, JSON state's single-writer design, and the
-raw local credential fallback. See the full policy for mitigations and scope.
+Known residual risks include same-user shell authority, inherited environment secrets, filesystem TOCTOU races, the single-process JSON state model (protected by an exclusive Relay writer lease), and the raw local credential fallback. See the full policy for mitigations and scope.

@@ -149,8 +149,7 @@ Portal persistence defaults to the Agent process lifetime. See
 
 ## Known limitations
 
-- The current Relay state is a JSON file designed for one Relay process. It is
-  locked and atomically replaced with fsync; it is not a multi-writer database.
+- The Relay state remains a single-process JSON store, locked and atomically replaced with fsync. Production startup now takes an exclusive process-lifetime lease, so a stale second Relay cannot run against the same state directory.
 - Headless credential fallback stores raw OAuth access/refresh tokens in a
   0600 file. Account passwords are never stored there. Native Secret Service,
   KWallet, Keychain, and Credential Manager integrations remain future work.

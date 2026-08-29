@@ -39,9 +39,7 @@ static tokens.
 ## Operations
 
 - Keep `/var/lib/chat-with-cli` owned by the Relay user with mode 0700.
-- Use one Relay process per state directory. The JSON state is lock-protected,
-  atomically replaced, fsynced, and backward-compatible with alpha.4 state;
-  it is not a multi-writer database.
+- The JSON state is lock-protected, atomically replaced, fsynced, and backward-compatible with alpha.4 state. Production Relay startup also takes an exclusive process-lifetime lease, so a concurrent writer for the same state directory is rejected.
 - Configure `--trusted-proxy` only with the actual proxy address/CIDR. Proxy
   headers are ignored by default.
 - Keep MCP and Agent enabled only while needed. `/admin` can disable either

@@ -2593,6 +2593,9 @@ func TestRegistrationChallengeBindsMetadataAndExpires(t *testing.T) {
 		t.Fatal("registration challenge was accepted for another redirect")
 	}
 	otherKey := deviceidentity.EncodePublicKey(other.PublicKey())
+	if _, _, ok := s.validateRegistrationChallenge(identity.ID(), otherKey, clientName, redirect, challenge, now); ok {
+		t.Fatal("registration challenge was accepted after changing only the public key")
+	}
 	if _, _, ok := s.validateRegistrationChallenge(other.ID(), otherKey, clientName, redirect, challenge, now); ok {
 		t.Fatal("registration challenge was accepted for another device identity")
 	}
@@ -2657,5 +2660,231 @@ func TestDeviceBoundOAuthClientCannotRequestMCPOrAnotherAgent(t *testing.T) {
 	}
 	if rr := authorize(s.absolute("/agent/id/"+other.ID()), "agent:connect offline_access"); rr.Code != http.StatusForbidden {
 		t.Fatalf("device-bound client targeted another Agent: status=%d want 403 body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestGenericOAuthClientCannotGainAgentScopeWithoutLegacyMigration(t *testing.T) {
+	const redirect = "http://127.0.0.1:45127/callback"
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resourcePath := "/agent/id/" + identity.ID()
+
+	test := func(t *testing.T, allowLegacy bool, want int) {
+		t.Helper()
+		s, err := New(Config{
+			PublicURL:                "http://127.0.0.1:19143",
+			Password:                 "generic-client-password-12345",
+			StateDir:                 t.TempDir(),
+			AllowLegacyUnboundAgents: allowLegacy,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		s.clients["generic-mcp-client"] = Client{ID: "generic-mcp-client", Name: "generic MCP client", RedirectURIs: []string{redirect}, IssuedAt: time.Now().Unix()}
+		// Model an already-owned legacy/unbound device. Without the explicit
+		// migration flag, a generic DCR client must still be unable to request
+		// agent:connect merely by choosing an Agent resource and scope.
+		s.devices["id/"+identity.ID()] = s.usernames["owner"]
+		s.deviceRecords["id/"+identity.ID()] = DeviceRecord{ID: identity.ID(), OwnerID: s.usernames["owner"], CreatedAt: time.Now().Unix()}
+		s.mu.Unlock()
+
+		q := url.Values{
+			"response_type": {"code"}, "client_id": {"generic-mcp-client"}, "redirect_uri": {redirect},
+			"code_challenge": {strings.Repeat("a", 43)}, "code_challenge_method": {"S256"},
+			"resource": {s.absolute(resourcePath)}, "scope": {"agent:connect offline_access"}, "state": {"state"},
+		}
+		req := httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize")+"?"+q.Encode(), nil)
+		rr := httptest.NewRecorder()
+		s.handleAuthorizeGET(rr, req)
+		if rr.Code != want {
+			t.Fatalf("generic client Agent authorization status=%d want %d body=%s", rr.Code, want, rr.Body.String())
+		}
+	}
+
+	t.Run("secure-default-deny", func(t *testing.T) { test(t, false, http.StatusForbidden) })
+	t.Run("explicit-legacy-migration", func(t *testing.T) { test(t, true, http.StatusOK) })
+}
+
+func TestProductionStateLeaseRejectsSecondRelayWriter(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := Config{PublicURL: "http://127.0.0.1:19160", Password: "single-writer-password-12345", StateDir: stateDir, EnforceSingleWriter: true}
+	first, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if second, err := New(cfg); err == nil {
+		_ = second.Close()
+		t.Fatal("second Relay writer acquired the same OAuth state directory")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	third, err := New(cfg)
+	if err != nil {
+		t.Fatalf("state lease was not released on close: %v", err)
+	}
+	defer third.Close()
+}
+
+func TestProductionStateLeaseRejectsSymlink(t *testing.T) {
+	stateDir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "lease-target")
+	if err := os.WriteFile(target, []byte("not-a-lease\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(stateDir, "oauth-state.lease")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(Config{PublicURL: "http://127.0.0.1:19161", Password: "lease-symlink-password-12345", StateDir: stateDir, EnforceSingleWriter: true})
+	if err == nil {
+		t.Fatal("symlinked OAuth state lease was accepted")
+	}
+}
+
+func TestExplicitInstanceModeCannotBeOverriddenByPersistedState(t *testing.T) {
+	stateDir := t.TempDir()
+	public, err := New(Config{PublicURL: "http://127.0.0.1:19162", Password: "mode-state-password-12345", StateDir: stateDir, Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public.mu.Lock()
+	public.registrationEnabled = true
+	if err := public.saveLocked(); err != nil {
+		public.mu.Unlock()
+		t.Fatal(err)
+	}
+	public.mu.Unlock()
+
+	private, err := New(Config{PublicURL: "http://127.0.0.1:19162", StateDir: stateDir, Mode: ModePrivate, ModeConfigured: true, OwnerPassword: "explicit-private-owner-password-12345"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if private.cfg.Mode != ModePrivate || private.registrationEnabled {
+		t.Fatalf("persisted public state overrode explicit private mode: mode=%q registration=%v", private.cfg.Mode, private.registrationEnabled)
+	}
+}
+
+func TestConfiguredPrivateModeCannotBeReexpandedByPersistedPublicState(t *testing.T) {
+	stateDir := t.TempDir()
+	first, err := New(Config{PublicURL: "http://127.0.0.1:19144", Password: "mode-authority-password-12345", StateDir: stateDir, Mode: ModePrivate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.mu.Lock()
+	first.cfg.Mode = ModePublic
+	first.registrationEnabled = true
+	err = first.saveLocked()
+	first.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(Config{PublicURL: "http://127.0.0.1:19144", StateDir: stateDir, Mode: ModePrivate, ModeConfigured: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.mu.Lock()
+	mode := restarted.cfg.Mode
+	registrationEnabled := restarted.registrationEnabled
+	restarted.mu.Unlock()
+	if mode != ModePrivate || registrationEnabled {
+		t.Fatalf("persisted public state overrode configured private mode: mode=%q registration=%v", mode, registrationEnabled)
+	}
+}
+
+func TestPersistedSetupModeStillRestoresWhenModeIsNotConfigured(t *testing.T) {
+	stateDir := t.TempDir()
+	first, err := New(Config{PublicURL: "http://127.0.0.1:19145", Password: "mode-persist-password-12345", StateDir: stateDir, Mode: ModePrivate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.mu.Lock()
+	first.cfg.Mode = ModePublic
+	first.registrationEnabled = true
+	err = first.saveLocked()
+	first.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(Config{PublicURL: "http://127.0.0.1:19145", StateDir: stateDir, Mode: ModePrivate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.mu.Lock()
+	mode := restarted.cfg.Mode
+	registrationEnabled := restarted.registrationEnabled
+	restarted.mu.Unlock()
+	if mode != ModePublic || !registrationEnabled {
+		t.Fatalf("persisted first-run mode was not restored: mode=%q registration=%v", mode, registrationEnabled)
+	}
+}
+
+func TestRetiringDeviceAfterChallengeIssuanceBlocksRegistration(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19146", Password: "retire-after-challenge-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientName = "chat-with-cli agent retirement-race"
+	const redirect = "http://127.0.0.1:45128/callback"
+	publicKey := deviceidentity.EncodePublicKey(identity.PublicKey())
+	challenge, err := s.issueRegistrationChallenge(identity.ID(), publicKey, clientName, redirect, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := identity.SignRegistrationProof(clientName, redirect, challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	s.retiredDevices["id/"+identity.ID()] = true
+	s.mu.Unlock()
+	body, _ := json.Marshal(map[string]any{
+		"redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none",
+		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
+		"client_name": clientName, "scope": "agent:connect offline_access",
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": publicKey,
+		"chat_with_cli_device_challenge": challenge, "chat_with_cli_device_proof": proof,
+	})
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleRegister(rr, req)
+	if rr.Code != http.StatusGone {
+		t.Fatalf("retired device used a pre-issued valid DCR challenge: status=%d want 410 body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSetupCannotOverrideExplicitOperatorMode(t *testing.T) {
+	stateDir := t.TempDir()
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19163", StateDir: stateDir, Mode: ModePrivate, ModeConfigured: true, SetupToken: "fixed-mode-setup-token-123456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	get := httptest.NewRecorder()
+	mux.ServeHTTP(get, httptest.NewRequest(http.MethodGet, s.absolute("/setup"), nil))
+	csrf := csrfTokenPattern.FindSubmatch(get.Body.Bytes())
+	cookies := get.Result().Cookies()
+	if len(csrf) != 2 || len(cookies) != 1 {
+		t.Fatalf("setup bootstrap missing csrf/cookie: status=%d body=%s", get.Code, get.Body.String())
+	}
+	form := url.Values{"csrf_token": {string(csrf[1])}, "setup_token": {"fixed-mode-setup-token-123456"}, "username": {"owner"}, "password": {"fixed-mode-password-12345"}, "mode": {"public"}}
+	post := httptest.NewRequest(http.MethodPost, s.absolute("/setup"), strings.NewReader(form.Encode()))
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	post.AddCookie(cookies[0])
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, post)
+	if rr.Code != http.StatusBadRequest || s.cfg.Mode != ModePrivate || len(s.users) != 0 {
+		t.Fatalf("setup overrode explicit mode: status=%d mode=%q users=%d body=%s", rr.Code, s.cfg.Mode, len(s.users), rr.Body.String())
 	}
 }

@@ -537,6 +537,7 @@ func runRelay(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	modeConfigured := flagWasSet(fs, "instance-mode")
 	values, err := config.LoadOptional(*configPath)
 	if err != nil {
 		return fmt.Errorf("load relay config: %w", err)
@@ -545,6 +546,9 @@ func runRelay(args []string) error {
 		*listen = values.String(*listen, "relay.listen")
 	}
 	if !flagWasSet(fs, "instance-mode") {
+		if _, ok := values.Raw("relay.instance_mode"); ok {
+			modeConfigured = true
+		}
 		*mode = values.String(*mode, "relay.instance_mode")
 	}
 	if !flagWasSet(fs, "public-url") {
@@ -582,6 +586,7 @@ func runRelay(args []string) error {
 	}
 	if !flagWasSet(fs, "instance-mode") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_INSTANCE_MODE")) != "" {
 		*mode = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_INSTANCE_MODE"))
+		modeConfigured = true
 	}
 	if !flagWasSet(fs, "owner-username") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_OWNER_USERNAME")) != "" {
 		*ownerUsername = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_OWNER_USERNAME"))
@@ -671,11 +676,12 @@ func runRelay(args []string) error {
 	mux := http.NewServeMux()
 	var oauthHealth *oauthserver.Server
 	if oauthEnabled {
-		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), AllowLegacyUnboundAgents: *allowLegacyUnboundAgents, SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL}
+		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, ModeConfigured: modeConfigured, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), EnforceSingleWriter: true, AllowLegacyUnboundAgents: *allowLegacyUnboundAgents, SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL}
 		oauth, err := oauthserver.New(cfg)
 		if err != nil {
 			return err
 		}
+		defer oauth.Close()
 		oauthHealth = oauth
 		broker.SetAgentConnectionAuthorizer(func(device, credentialHash string) bool {
 			return oauth.VerifyAgentConnection(credentialHash, device)

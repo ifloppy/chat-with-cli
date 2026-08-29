@@ -49,8 +49,7 @@ capacity. Names remain labels and legacy compatibility routes.
   process, container, or secret-isolation boundary.
 - Path-based root checks can encounter TOCTOU races against a malicious local
   same-user process. Use a dedicated OS account/container for hostile tenants.
-- The JSON state design assumes one Relay writer. The lock prevents concurrent
-  partial writes but does not merge independent process memories.
+- The JSON state remains intentionally single-process. Production startup enforces an exclusive process-lifetime lease, so a second Relay targeting the same state directory fails instead of running with a stale authorization snapshot.
 - The fallback credential file contains raw OAuth tokens. Protect it as a
   login secret; native OS credential stores are future work.
 - Computer Use can expose secrets from other visible applications and can

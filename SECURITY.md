@@ -179,7 +179,7 @@ quotas for public instances.
 - Inspect Cloudflare/WAF challenge services rather than logging credentials or
   broadly bypassing protection. See [docs/cloudflare.md](docs/cloudflare.md).
 - Back up the Relay state separately from the local Agent credential file, and
-  test restore with one Relay writer. See [docs/backup-restore.md](docs/backup-restore.md).
+  test restore while the production process-lifetime state lease is active. See [docs/backup-restore.md](docs/backup-restore.md).
 - Review `/admin` regularly and keep the local Agent service disabled until its
   generated unit and capability profile have been audited.
 

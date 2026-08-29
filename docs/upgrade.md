@@ -1,8 +1,6 @@
 # Upgrade and rollback
 
-Upgrade the Relay and Agent independently only after checking compatibility and
-keeping existing configuration/state backups. Do not run two Relay writers
-against the same JSON state directory.
+Upgrade the Relay and Agent independently only after checking compatibility and keeping existing configuration/state backups. The Relay enforces a process-lifetime state lease, so the replacement process can take over the state directory only after the old writer exits.
 
 ## Binary update
 

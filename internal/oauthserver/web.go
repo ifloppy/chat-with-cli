@@ -157,6 +157,10 @@ func (s *Server) handleSetupPOST(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if s.cfg.ModeConfigured && mode != s.cfg.Mode {
+		http.Error(w, "instance mode is fixed by the Relay configuration; update the configured instance mode before setup", http.StatusBadRequest)
+		return
+	}
 	if len(provided) < 16 || len(provided) > 256 {
 		http.Error(w, "invalid setup token", http.StatusForbidden)
 		return

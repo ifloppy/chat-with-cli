@@ -45,17 +45,25 @@ const (
 )
 
 type Config struct {
-	PublicURL     string
-	StateDir      string
-	Mode          string
-	OwnerUsername string
-	OwnerPassword string
+	PublicURL string
+	StateDir  string
+	Mode      string
+	// ModeConfigured marks Mode as an explicit operator choice (CLI/config/env).
+	// When false, first-run /setup may choose and persist the mode. When true,
+	// persisted state must never override the operator's current mode.
+	ModeConfigured bool
+	OwnerUsername  string
+	OwnerPassword  string
 	// RegistrationDisabled closes public account registration. Private mode is
 	// always closed regardless of this value.
 	RegistrationDisabled bool
 	// TrustedProxyCIDRs controls whether X-Forwarded-For/X-Real-IP are used for
 	// abuse limits. No proxy headers are trusted when it is empty.
 	TrustedProxyCIDRs []string
+	// EnforceSingleWriter acquires a process-lifetime lease for StateDir.
+	// Production Relays must enable it so a stale second process cannot
+	// overwrite newer authorization/revocation state.
+	EnforceSingleWriter bool
 	// AllowLegacyUnboundAgents is an explicit migration-only escape hatch.
 	// New deployments must keep it false so Agent bearer tokens are always
 	// sender-constrained by an Ed25519 device identity.
@@ -187,6 +195,7 @@ type Server struct {
 	securityEvents                 []SecurityEvent
 	statusProvider                 func() map[string]DeviceStatus
 	agentSessionResetter           func(device string)
+	stateLease                     *stateLease
 	startedAt                      time.Time
 	// persistenceFault is a fail-closed latch. Once authorization state cannot
 	// be durably written, MCP/Agent access remains frozen until process restart
@@ -305,6 +314,19 @@ func New(cfg Config) (*Server, error) {
 	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure OAuth state directory: %w", err)
 	}
+	var lease *stateLease
+	if cfg.EnforceSingleWriter {
+		lease, err = acquireStateLease(cfg.StateDir)
+		if err != nil {
+			return nil, fmt.Errorf("acquire OAuth state lease: %w", err)
+		}
+	}
+	keepLease := false
+	defer func() {
+		if !keepLease && lease != nil {
+			_ = lease.Close()
+		}
+	}()
 	var registrationChallengeKey [32]byte
 	if _, err := rand.Read(registrationChallengeKey[:]); err != nil {
 		return nil, fmt.Errorf("generate registration challenge key: %w", err)
@@ -324,7 +346,8 @@ func New(cfg Config) (*Server, error) {
 		dcrEnabled:          true,
 		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
 		rates: make(map[string]rateWindow), consumedRegistrationChallenges: make(map[string]map[string]int64), registrationChallengeKey: registrationChallengeKey, consumedAgentChallenges: make(map[string]map[string]int64), agentChallengeKey: agentChallengeKey, setupTokenPath: cfg.SetupTokenPath,
-		startedAt: time.Now(),
+		stateLease: lease,
+		startedAt:  time.Now(),
 	}
 	if cfg.SetupToken != "" {
 		s.setupTokenHash = tokenKey(cfg.SetupToken)
@@ -357,7 +380,20 @@ func New(cfg Config) (*Server, error) {
 			}
 		}
 	}
+	keepLease = true
 	return s, nil
+}
+
+// Close releases the production single-writer state lease. It does not alter
+// OAuth state or revoke credentials; normal process shutdown simply relinquishes
+// the exclusive writer authority for the next Relay process.
+func (s *Server) Close() error {
+	if s == nil || s.stateLease == nil {
+		return nil
+	}
+	err := s.stateLease.Close()
+	s.stateLease = nil
+	return err
 }
 
 func validatePublicURL(raw string) (*url.URL, error) {
@@ -590,8 +626,10 @@ func (s *Server) load() error {
 			s.sessions = state.Sessions
 		}
 		if state.Settings != nil {
-			if persistedMode, err := normalizeMode(state.Settings.Mode); err == nil && state.Settings.Mode != "" {
-				s.cfg.Mode = persistedMode
+			if !s.cfg.ModeConfigured {
+				if persistedMode, err := normalizeMode(state.Settings.Mode); err == nil && state.Settings.Mode != "" {
+					s.cfg.Mode = persistedMode
+				}
 			}
 			s.registrationEnabled = state.Settings.RegistrationEnabled && s.cfg.Mode == ModePublic
 			s.dcrEnabled = state.Settings.DCREnabled
@@ -1182,13 +1220,18 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		s.oauthPageError(w, http.StatusBadRequest, "unknown client or redirect URI")
 		return
 	}
-	if client.DeviceKeyVerified || client.DeviceID != "" || client.DevicePublicKey != "" {
+	hasDeviceIdentity := client.DeviceKeyVerified || client.DeviceID != "" || client.DevicePublicKey != ""
+	if hasDeviceIdentity {
 		expected := "id/" + client.DeviceID
 		if !client.DeviceKeyVerified || client.DeviceID == "" || client.DevicePublicKey == "" || kind != "agent" || device != expected {
 			s.mu.Unlock()
 			s.oauthPageError(w, http.StatusForbidden, "this device-bound OAuth client may only authorize its exact Agent resource")
 			return
 		}
+	} else if kind == "agent" && !s.cfg.AllowLegacyUnboundAgents {
+		s.mu.Unlock()
+		s.oauthPageError(w, http.StatusForbidden, "unbound OAuth clients cannot authorize Agent resources; run current agent setup with a cryptographic device identity")
+		return
 	}
 	if len(s.pending) >= maxPendingAuth {
 		s.mu.Unlock()

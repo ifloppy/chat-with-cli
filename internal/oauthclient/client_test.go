@@ -102,9 +102,13 @@ func TestAgentBrowserOAuthPersistsAndRefreshes(t *testing.T) {
 	oauth, base, cleanup := startTestOAuthServer(t, oauthserver.ModePrivate)
 	defer cleanup()
 	path := filepath.Join(t.TempDir(), "credentials.json")
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
 	calls := 0
 	manager := &Manager{
-		RelayURL: base, Device: "laptop-a", CredentialsPath: path,
+		RelayURL: base, Device: "laptop-a", DeviceID: identity.ID(), DeviceIdentity: identity, CredentialsPath: path,
 		OpenBrowser: loginBrowser(t, "owner", "owner-password-123456", "login", &calls),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
