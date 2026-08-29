@@ -109,12 +109,12 @@ loopback `serve` HTTP mode are available when no Relay is needed.
 
 ```text
 chat-with-cli relay setup       create config and one-time setup token
-chat-with-cli relay install     print a checksum-first install checklist
+chat-with-cli relay install     review or apply a checksum-verified binary install
 chat-with-cli agent setup       create config and optional inactive user unit
 chat-with-cli doctor            inspect local and Relay prerequisites
 chat-with-cli status            show local config and user-unit state
-chat-with-cli update            print a review-first update procedure
-chat-with-cli rollback          print a state-preserving rollback procedure
+chat-with-cli update            review or apply a verified atomic binary update
+chat-with-cli rollback          review or restore the verified local previous binary
 ```
 
 `agent setup --install-systemd` writes a hardened user unit but never enables
@@ -130,7 +130,7 @@ security audit and first browser login are complete.
 - [Security](docs/security.md) · [Threat model](docs/threat-model.md)
 - [Reverse proxy](docs/reverse-proxy.md) · [Cloudflare](docs/cloudflare.md)
 - [Administration](docs/admin.md)
-- [Upgrade](docs/upgrade.md) · [Backup/restore](docs/backup-restore.md)
+- [Install](docs/install.md) · [Upgrade](docs/upgrade.md) · [Backup/restore](docs/backup-restore.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
 The MCP server currently advertises 31 tools. Read-only/destructive/open-world

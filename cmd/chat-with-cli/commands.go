@@ -22,6 +22,7 @@ import (
 	"github.com/ifloppy/chat-with-cli/internal/oauthclient"
 	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
+	"github.com/ifloppy/chat-with-cli/internal/releaseinstall"
 )
 
 func runAgentSetup(args []string) error {
@@ -410,40 +411,216 @@ func runRelaySetup(args []string) error {
 	return nil
 }
 
+func relaySystemdUnit(binary, configPath string) string {
+	return fmt.Sprintf(`[Unit]
+Description=chat-with-cli OAuth relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%s relay --config %s
+Restart=on-failure
+RestartSec=2s
+DynamicUser=yes
+StateDirectory=chat-with-cli
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
+`, systemdQuote(binary), systemdQuote(configPath))
+}
+
 func runRelayInstall(args []string) error {
 	fs := flag.NewFlagSet("relay install", flag.ContinueOnError)
-	version := fs.String("version", "latest", "release version to install")
+	version := fs.String("version", "latest", "GitHub release tag or latest")
 	prefix := fs.String("prefix", "/usr/local", "binary installation prefix")
+	apply := fs.Bool("apply", false, "download, verify, and atomically install the release")
+	writeSystemd := fs.Bool("write-systemd", false, "write a hardened relay systemd unit; never starts or enables it")
+	forceSystemd := fs.Bool("force-systemd", false, "replace an existing relay systemd unit")
+	unitPath := fs.String("unit", "/etc/systemd/system/chat-with-cli-relay.service", "systemd unit path")
+	configPath := fs.String("config", "/etc/chat-with-cli/config.toml", "relay config path referenced by the unit")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	arch := runtime.GOARCH
-	if arch != "amd64" && arch != "arm64" {
-		return fmt.Errorf("release installer currently supports amd64 and arm64; detected %s", arch)
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("relay installer supports Linux; detected %s", runtime.GOOS)
 	}
-	fmt.Printf("installation checklist for %s on linux/%s (no files changed):\n", *version, arch)
-	fmt.Printf("1. Download chat-with-cli_%s_linux_%s.tar.gz and SHA256SUMS from the GitHub release.\n", *version, arch)
-	fmt.Println("2. Inspect the archive and checksum before extraction (never pipe an unverified response to a shell).")
-	fmt.Printf("3. Install the binary as %s/bin/chat-with-cli, then run `chat-with-cli relay setup`.\n", strings.TrimRight(*prefix, "/"))
-	fmt.Println("4. Create a dedicated system user/state directory and review the hardened systemd unit before starting.")
+	asset, err := releaseinstall.AssetName(runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	prefixPath, err := normalizeUserPath(*prefix)
+	if err != nil {
+		return err
+	}
+	destination := filepath.Join(prefixPath, "bin", "chat-with-cli")
+	backup := destination + ".previous"
+	if err := releaseinstall.Preflight(destination, backup); err != nil {
+		return err
+	}
+	var unit, configFile string
+	if *writeSystemd {
+		unit, err = normalizeUserPath(*unitPath)
+		if err != nil {
+			return err
+		}
+		configFile, err = normalizeUserPath(*configPath)
+		if err != nil {
+			return err
+		}
+		if err := preflightTextFile(unit, *forceSystemd); err != nil {
+			return fmt.Errorf("systemd unit preflight: %w", err)
+		}
+	}
+	fmt.Printf("Release: %s\nRelease asset: %s\nDestination: %s\nRollback backup: %s\n", *version, asset, destination, backup)
+	if !*apply {
+		if strings.TrimSpace(*version) == "" || *version == "latest" {
+			fmt.Println("Latest means the newest non-draft GitHub release, including prereleases; the exact tag is resolved only with --apply.")
+		} else if _, sumsURL, assetURL, err := releaseinstall.GitHubReleaseURLs(*version, runtime.GOARCH); err == nil {
+			fmt.Printf("SHA256SUMS: %s\nBinary URL: %s\n", sumsURL, assetURL)
+		}
+		fmt.Println("Review only: no network request or file change was made. Re-run with --apply to install.")
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	client := releaseinstall.SecureHTTPClient()
+	client.Timeout = 90 * time.Second
+	resolvedVersion, err := releaseinstall.ResolveGitHubVersion(ctx, client, *version)
+	if err != nil {
+		return err
+	}
+	asset, sumsURL, assetURL, err := releaseinstall.GitHubReleaseURLs(resolvedVersion, runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Resolved release: %s\n", resolvedVersion)
+	binary, digest, err := releaseinstall.FetchVerified(ctx, client, sumsURL, assetURL, asset)
+	if err != nil {
+		return err
+	}
+	if err := releaseinstall.Install(destination, backup, binary); err != nil {
+		return err
+	}
+	fmt.Printf("Installed %s (SHA256 %s).\n", destination, digest)
+	if *writeSystemd {
+		if err := writeTextFile(unit, relaySystemdUnit(destination, configFile), 0o644, *forceSystemd); err != nil {
+			return fmt.Errorf("write relay systemd unit: %w", err)
+		}
+		fmt.Printf("Wrote %s. It was not enabled or started.\n", unit)
+	}
+	fmt.Println("Next: run `chat-with-cli relay setup`, review config/unit, then explicitly enable the service when ready.")
 	return nil
+}
+
+func resolveUpdateBinary(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		path, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		value = path
+	}
+	return normalizeExistingFile(value)
 }
 
 func runUpdate(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	version := fs.String("version", "latest", "GitHub release tag or latest")
+	binaryFlag := fs.String("binary", "", "installed binary to replace; defaults to the current executable")
+	apply := fs.Bool("apply", false, "download, verify, and atomically replace the binary")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	fmt.Println("No update was applied. Download a signed release, verify its published SHA256 checksum, retain the previous binary, and restart only after review.")
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("update supports Linux; detected %s", runtime.GOOS)
+	}
+	binaryPath, err := resolveUpdateBinary(*binaryFlag)
+	if err != nil {
+		return err
+	}
+	asset, err := releaseinstall.AssetName(runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	backup := binaryPath + ".previous"
+	fmt.Printf("Update target: %s\nRelease: %s\nVerified asset: %s\nRollback backup: %s\n", binaryPath, *version, asset, backup)
+	if !*apply {
+		if strings.TrimSpace(*version) == "" || *version == "latest" {
+			fmt.Println("Latest is resolved through the GitHub Releases API only when --apply is used.")
+		} else if _, sumsURL, assetURL, err := releaseinstall.GitHubReleaseURLs(*version, runtime.GOARCH); err == nil {
+			fmt.Printf("SHA256SUMS: %s\nBinary URL: %s\n", sumsURL, assetURL)
+		}
+		fmt.Println("Review only: no network request or file change was made. Re-run with --apply to update; services are never restarted automatically.")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	client := releaseinstall.SecureHTTPClient()
+	client.Timeout = 90 * time.Second
+	resolvedVersion, err := releaseinstall.ResolveGitHubVersion(ctx, client, *version)
+	if err != nil {
+		return err
+	}
+	asset, sumsURL, assetURL, err := releaseinstall.GitHubReleaseURLs(resolvedVersion, runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Resolved release: %s\n", resolvedVersion)
+	data, digest, err := releaseinstall.FetchVerified(ctx, client, sumsURL, assetURL, asset)
+	if err != nil {
+		return err
+	}
+	if err := releaseinstall.Install(binaryPath, backup, data); err != nil {
+		return err
+	}
+	fmt.Printf("Updated %s (SHA256 %s). Existing services were not restarted.\n", binaryPath, digest)
 	return nil
 }
 
 func runRollback(args []string) error {
 	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	binaryFlag := fs.String("binary", "", "installed binary to restore; defaults to the current executable")
+	backupFlag := fs.String("backup", "", "verified local backup; defaults to <binary>.previous")
+	apply := fs.Bool("apply", false, "restore the verified local backup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	fmt.Println("No rollback was applied. Restore the previous checksum-verified binary, keep the state directory unchanged, and validate with `chat-with-cli doctor` before starting.")
+	binaryPath, err := resolveUpdateBinary(*binaryFlag)
+	if err != nil {
+		return err
+	}
+	backup := strings.TrimSpace(*backupFlag)
+	if backup == "" {
+		backup = binaryPath + ".previous"
+	} else if backup, err = normalizeUserPath(backup); err != nil {
+		return err
+	}
+	fmt.Printf("Rollback target: %s\nVerified backup: %s\n", binaryPath, backup)
+	if !*apply {
+		fmt.Println("Review only: no files changed. Re-run with --apply to restore; services are never restarted automatically.")
+		return nil
+	}
+	if err := releaseinstall.RestoreVerifiedBackup(binaryPath, backup); err != nil {
+		return err
+	}
+	fmt.Printf("Restored %s from checksum-verified backup. Existing services were not restarted.\n", binaryPath)
 	return nil
 }
 
@@ -886,7 +1063,7 @@ func writeConfigFile(path string, values map[string]any, force bool) error {
 	return config.Write(path, values)
 }
 
-func writeTextFile(path, content string, mode os.FileMode, force bool) error {
+func preflightTextFile(path string, force bool) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("refusing to write through symlink")
@@ -898,6 +1075,13 @@ func writeTextFile(path, content string, mode os.FileMode, force bool) error {
 			return fmt.Errorf("file already exists: %s", path)
 		}
 	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func writeTextFile(path, content string, mode os.FileMode, force bool) error {
+	if err := preflightTextFile(path, force); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

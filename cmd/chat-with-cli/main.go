@@ -102,14 +102,14 @@ Usage:
   chat-with-cli serve [flags]   Run direct Streamable HTTP MCP on this machine
   chat-with-cli relay [flags]   Run the public relay/MCP gateway
   chat-with-cli relay setup     Create relay config and one-time setup token
-  chat-with-cli relay install   Print a verified installation plan
+  chat-with-cli relay install   Review or apply a checksum-verified binary install
   chat-with-cli agent [flags]   Connect this machine outbound to a relay
   chat-with-cli agent setup     Create agent config and optional user unit
   chat-with-cli login [flags]   Browser OAuth login for an Agent profile
   chat-with-cli doctor [flags]  Check relay, OAuth, MCP, and local prerequisites
   chat-with-cli status          Show local configuration/service status
-  chat-with-cli update          Show a checksum-verified update plan
-  chat-with-cli rollback        Show a safe rollback plan
+  chat-with-cli update          Review or apply a verified atomic binary update
+  chat-with-cli rollback        Review or restore the verified previous binary
   chat-with-cli token           Generate a strong random token
   chat-with-cli version         Print version
 
