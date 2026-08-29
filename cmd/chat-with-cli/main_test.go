@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
 func TestDiagnosticErrorRedactionDoesNotEchoSecrets(t *testing.T) {
@@ -107,6 +111,68 @@ func TestAgentPathMuxAvoidsServeMuxPatternConflicts(t *testing.T) {
 		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+path, nil))
 		if rr.Code != http.StatusNoContent || rr.Header().Get("X-Route") != want {
 			t.Fatalf("path %s routed to %q status=%d, want %q", path, rr.Header().Get("X-Route"), rr.Code, want)
+		}
+	}
+}
+
+func TestRequestApproverCanGrantCapabilityForSession(t *testing.T) {
+	var out bytes.Buffer
+	a := &requestApprover{
+		reader:     bufio.NewReader(strings.NewReader("s\n")),
+		writer:     &out,
+		allowedCap: map[string]bool{},
+	}
+	req := protocol.Request{ID: "1", Method: "fs_read"}
+	if err := a.authorize(context.Background(), req); err != nil {
+		t.Fatalf("first approval failed: %v", err)
+	}
+	if !a.allowedCap["filesystem-read"] {
+		t.Fatal("session capability was not remembered")
+	}
+	out.Reset()
+	if err := a.authorize(context.Background(), protocol.Request{ID: "2", Method: "fs_list"}); err != nil {
+		t.Fatalf("remembered approval failed: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("remembered capability prompted again: %q", out.String())
+	}
+}
+
+func TestRequestApproverAllowAllAndDeny(t *testing.T) {
+	var out bytes.Buffer
+	allow := &requestApprover{reader: bufio.NewReader(strings.NewReader("a\n")), writer: &out, allowedCap: map[string]bool{}}
+	if err := allow.authorize(context.Background(), protocol.Request{ID: "1", Method: "task_start"}); err != nil {
+		t.Fatalf("allow-all failed: %v", err)
+	}
+	if !allow.allowAll {
+		t.Fatal("allow-all was not remembered")
+	}
+	out.Reset()
+	if err := allow.authorize(context.Background(), protocol.Request{ID: "2", Method: "computer_click"}); err != nil {
+		t.Fatalf("allow-all did not cover later capability: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("allow-all prompted again: %q", out.String())
+	}
+
+	deny := &requestApprover{reader: bufio.NewReader(strings.NewReader("n\n")), writer: &out, allowedCap: map[string]bool{}}
+	if err := deny.authorize(context.Background(), protocol.Request{ID: "3", Method: "fs_write"}); err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("deny returned %v", err)
+	}
+}
+
+func TestApprovalCategoryCoversSensitiveMethods(t *testing.T) {
+	cases := map[string]string{
+		"fs_read":             "filesystem-read",
+		"fs_write":            "filesystem-write",
+		"task_start":          "shell-exec",
+		"computer_screenshot": "screen-read",
+		"computer_ui_tree":    "desktop-read",
+		"computer_click":      "computer-input",
+	}
+	for method, want := range cases {
+		if got := approvalCategory(method); got != want {
+			t.Fatalf("%s category=%q want %q", method, got, want)
 		}
 	}
 }

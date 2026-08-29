@@ -192,7 +192,7 @@ func runAgentSetup(args []string) error {
 			fmt.Fprintln(os.Stderr, "WARNING: this root exposes a broad filesystem area. Prefer a dedicated workspace directory unless broad read access is intentional.")
 		}
 	}
-	fmt.Printf("\nNext steps:\n  1. Authorize this workstation in your browser:\n     chat-with-cli login --config %s\n", *configPath)
+	fmt.Printf("\nNext step:\n  Connect this workstation (OAuth opens automatically when needed):\n     chat-with-cli connect --config %s\n", *configPath)
 	if *installSystemd {
 		if *unitPath == "" {
 			*unitPath = filepath.Join(userConfigDir(), "systemd", "user", "chat-with-cli-agent.service")
@@ -256,7 +256,7 @@ WantedBy=default.target
 		fmt.Println("  3. After OAuth and review, start it explicitly:")
 		fmt.Println("     systemctl --user daemon-reload && systemctl --user enable --now chat-with-cli-agent.service")
 	} else {
-		fmt.Printf("  2. After OAuth and review, start manually:\n     chat-with-cli agent --config %s\n", *configPath)
+		fmt.Printf("  The interactive connect command runs in the foreground; Ctrl+C disconnects it.\n")
 	}
 	fmt.Println("\nRun `chat-with-cli doctor` after the Agent is connected. Setup never starts the Agent automatically.")
 	return nil
@@ -731,7 +731,7 @@ func runDoctor(args []string) error {
 		if credentialErr != nil {
 			checks = append(checks, doctorCheck{Name: "saved Agent credential", Detail: ": " + credentialErr.Error()})
 		} else if !found {
-			checks = append(checks, doctorCheck{Name: "saved Agent credential", Skip: true, Detail: ": no saved credential for this device; run login first"})
+			checks = append(checks, doctorCheck{Name: "saved Agent credential", Skip: true, Detail: ": no saved credential for this device; run `chat-with-cli connect` and OAuth will open automatically"})
 		} else if credential.AccessToken == "" || credential.ExpiresAt <= time.Now().Unix() {
 			checks = append(checks, doctorCheck{Name: "saved Agent credential", Detail: ": access token is missing or expired"})
 		} else {

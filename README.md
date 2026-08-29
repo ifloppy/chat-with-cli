@@ -43,8 +43,10 @@ Read the one-time setup token from the local file path printed by `relay
 setup`, open `https://cli.example.com/setup`, and create the owner account.
 The setup page is disabled after the first administrator is created.
 
-On the workstation, create a default read-only Agent profile, authorize it in
-the browser, and run it:
+On the workstation, create a default read-only Agent profile and connect it.
+`connect` automatically opens browser OAuth when needed. In a foreground terminal
+it then asks whether to use interactive local approvals, allow all capabilities
+for this process only, or stay with the configured profile:
 
 ```bash
 ./chat-with-cli agent setup \
@@ -53,7 +55,7 @@ the browser, and run it:
   --device workstation \
   --profile read-only \
   --install-systemd
-./chat-with-cli login
+./chat-with-cli connect
 # Review config/unit before starting anything.
 systemctl --user daemon-reload
 systemctl --user enable --now chat-with-cli-agent.service

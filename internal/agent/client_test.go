@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/engine"
+	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
 func TestAgentURLForRouteRequiresSecureRemoteOrigin(t *testing.T) {
@@ -172,5 +174,20 @@ func TestAgentRunSendsRelayChallengeProofOfPossession(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Agent did not stop after test cancellation")
+	}
+}
+
+func TestRequestAuthorizerRunsBeforeEngineInvocation(t *testing.T) {
+	called := false
+	c := &Client{AuthorizeRequest: func(context.Context, protocol.Request) error {
+		called = true
+		return errors.New("local approval denied")
+	}}
+	resp := c.handle(context.Background(), protocol.Request{ID: "approval-test", Method: "system_info"})
+	if !called {
+		t.Fatal("request authorizer was not called")
+	}
+	if !strings.Contains(resp.Error, "local approval denied") {
+		t.Fatalf("unexpected response error: %q", resp.Error)
 	}
 }

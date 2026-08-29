@@ -19,13 +19,14 @@ import (
 )
 
 type Client struct {
-	Engine        *engine.Engine
-	URL           string
-	Device        string
-	DeviceID      string
-	Token         string
-	TokenProvider func(context.Context) (string, error)
-	Identity      *deviceidentity.Identity
+	Engine           *engine.Engine
+	URL              string
+	Device           string
+	DeviceID         string
+	Token            string
+	TokenProvider    func(context.Context) (string, error)
+	AuthorizeRequest func(context.Context, protocol.Request) error
+	Identity         *deviceidentity.Identity
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -273,6 +274,11 @@ func (c *Client) sendCapabilities(ctx context.Context, conn *websocket.Conn) err
 }
 
 func (c *Client) handle(ctx context.Context, request protocol.Request) protocol.Response {
+	if c.AuthorizeRequest != nil {
+		if err := c.AuthorizeRequest(ctx, request); err != nil {
+			return protocol.Response{ID: request.ID, Error: err.Error()}
+		}
+	}
 	value, err := c.Engine.Invoke(ctx, request.Method, request.Args)
 	if err != nil {
 		return protocol.Response{ID: request.ID, Error: err.Error()}

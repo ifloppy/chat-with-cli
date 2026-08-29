@@ -55,7 +55,7 @@ credential before every brokered RPC.
 
 `agent setup` also creates a 0600 Ed25519 identity file and stores its path in
 the config. The immutable device ID is derived from that public key rather than
-chosen independently. A normal first login is simply `chat-with-cli login`.
+chosen independently. For normal foreground use, run `chat-with-cli connect`; it performs browser OAuth automatically when credentials are missing or expired. `chat-with-cli login` remains available for explicit pre-authorization.
 Before DCR, the CLI obtains a short-lived one-time registration challenge from
 the Relay, signs it with the device private key, and submits that proof with
 the DCR request. Device-bound Agent DCR accepts only loopback HTTP callbacks;

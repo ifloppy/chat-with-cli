@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -68,6 +70,8 @@ func main() {
 		} else {
 			err = runAgent(os.Args[2:])
 		}
+	case "connect":
+		err = runConnect(os.Args[2:])
 	case "doctor":
 		err = runDoctor(os.Args[2:])
 	case "status":
@@ -104,9 +108,10 @@ Usage:
   chat-with-cli relay [flags]   Run the public relay/MCP gateway
   chat-with-cli relay setup     Create relay config and one-time setup token
   chat-with-cli relay install   Review or apply a checksum-verified binary install
+  chat-with-cli connect         Recommended interactive connect; OAuth is automatic
   chat-with-cli agent [flags]   Connect this machine outbound to a relay
   chat-with-cli agent setup     Create agent config and optional user unit
-  chat-with-cli login [flags]   Browser OAuth login for an Agent profile
+  chat-with-cli login [flags]   Explicit browser OAuth login (normally unnecessary)
   chat-with-cli doctor [flags]  Check relay, OAuth, MCP, and local prerequisites
   chat-with-cli status          Show local configuration/service status
   chat-with-cli update          Review or apply a verified atomic binary update
@@ -748,8 +753,130 @@ func runRelay(args []string) error {
 	return serveHTTP(ctx, *listen, oauthserver.SecurityHeaders(mux))
 }
 
+const (
+	approvalConfigured = "configured"
+	approvalAsk        = "ask"
+	approvalAllowAll   = "allow-all"
+)
+
+func runConnect(args []string) error {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" || arg == "--approval-mode" || strings.HasPrefix(arg, "--approval-mode=") {
+			return runAgentCommand("connect", args)
+		}
+	}
+	mode, err := chooseConnectApprovalMode()
+	if err != nil {
+		return err
+	}
+	return runAgentCommand("connect", append([]string{"--approval-mode=" + mode}, args...))
+}
+
+func chooseConnectApprovalMode() (string, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "No interactive terminal detected; using the configured capability profile.")
+		return approvalConfigured, nil
+	}
+	defer tty.Close()
+	fmt.Fprintln(tty, "Chat with CLI permission mode for this session:")
+	fmt.Fprintln(tty, "  1. Interactive approvals (recommended; temporary access, confirm locally)")
+	fmt.Fprintln(tty, "  2. Allow all operations this session (dangerous)")
+	fmt.Fprintln(tty, "  3. Configured profile only (no temporary capability expansion)")
+	fmt.Fprint(tty, "Choose [1]: ")
+	line, err := bufio.NewReader(tty).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	switch strings.TrimSpace(line) {
+	case "", "1":
+		return approvalAsk, nil
+	case "2":
+		return approvalAllowAll, nil
+	case "3":
+		return approvalConfigured, nil
+	default:
+		return "", fmt.Errorf("invalid permission choice %q", strings.TrimSpace(line))
+	}
+}
+
+type requestApprover struct {
+	mu         sync.Mutex
+	reader     *bufio.Reader
+	writer     io.Writer
+	allowAll   bool
+	allowedCap map[string]bool
+}
+
+func newTTYRequestApprover() (*requestApprover, io.Closer, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return nil, nil, errors.New("interactive approval mode requires a local terminal; use --approval-mode=configured or --approval-mode=allow-all for non-interactive starts")
+	}
+	return &requestApprover{reader: bufio.NewReader(tty), writer: tty, allowedCap: map[string]bool{}}, tty, nil
+}
+
+func approvalCategory(method string) string {
+	switch method {
+	case "system_info", "computer_info", "audit_recent":
+		return "status"
+	case "fs_read", "fs_list", "fs_search", "checkpoint_read":
+		return "filesystem-read"
+	case "fs_write", "fs_patch", "checkpoint_write":
+		return "filesystem-write"
+	case "task_start", "task_read", "task_wait", "task_list", "task_send", "task_stop":
+		return "shell-exec"
+	case "computer_screenshot":
+		return "screen-read"
+	case "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "computer_ui_get_text":
+		return "desktop-read"
+	case "computer_ui_focus", "computer_ui_action", "computer_ui_invoke", "computer_ui_set_text", "computer_move", "computer_click", "computer_scroll", "computer_type", "computer_key":
+		return "computer-input"
+	default:
+		return "other"
+	}
+}
+
+func (a *requestApprover) authorize(ctx context.Context, request protocol.Request) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	category := approvalCategory(request.Method)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.allowAll || a.allowedCap[category] {
+		return nil
+	}
+	for {
+		fmt.Fprintf(a.writer, "\nChat with CLI request: %s [%s]\n", request.Method, category)
+		fmt.Fprint(a.writer, "Approve? [y] once  [s] this capability for session  [a] all for session  [n] deny: ")
+		line, err := a.reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes", "":
+			return nil
+		case "s", "session":
+			a.allowedCap[category] = true
+			return nil
+		case "a", "all":
+			a.allowAll = true
+			return nil
+		case "n", "no":
+			return errors.New("request denied by local user")
+		default:
+			fmt.Fprintln(a.writer, "Please enter y, s, a, or n.")
+		}
+	}
+}
+
 func runAgent(args []string) error {
-	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
+	return runAgentCommand("agent", args)
+}
+
+func runAgentCommand(command string, args []string) error {
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowAccessibility, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks := addEngineFlags(fs)
 	relayURL := fs.String("relay", "", "relay base URL, for example https://cli.example.com")
 	deviceDefault, _ := os.Hostname()
@@ -759,6 +886,7 @@ func runAgent(args []string) error {
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration file")
 	identityPath := fs.String("identity", "", "Ed25519 device identity path")
+	approvalMode := fs.String("approval-mode", approvalConfigured, "configured, ask, or allow-all; ask/allow-all temporarily expose all capabilities for this process")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -820,6 +948,17 @@ func runAgent(args []string) error {
 	}
 	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
+	}
+	*approvalMode = strings.ToLower(strings.TrimSpace(*approvalMode))
+	switch *approvalMode {
+	case approvalConfigured:
+	case approvalAsk, approvalAllowAll:
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, true, true, true
+		if runtime.GOOS == "linux" && strings.EqualFold(strings.TrimSpace(*execSandbox), "none") {
+			*execSandbox = "landlock"
+		}
+	default:
+		return fmt.Errorf("invalid --approval-mode %q; use configured, ask, or allow-all", *approvalMode)
 	}
 	*token = envOr(*token, "CHAT_WITH_CLI_AGENT_TOKEN")
 	if !flagWasSet(fs, "credentials") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS")) != "" {
@@ -886,6 +1025,17 @@ func runAgent(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 	client := &agent.Client{Engine: eng, URL: *relayURL, Device: *device, DeviceID: *deviceID, Token: *token, Identity: deviceIdentity}
+	if *approvalMode == approvalAsk {
+		approver, closer, err := newTTYRequestApprover()
+		if err != nil {
+			return err
+		}
+		defer closer.Close()
+		client.AuthorizeRequest = approver.authorize
+		log.Printf("local approval mode: interactive; temporary capabilities require terminal confirmation")
+	} else if *approvalMode == approvalAllowAll {
+		log.Printf("WARNING: local approval mode allows all capabilities for this process")
+	}
 	if *token == "" {
 		if deviceIdentity == nil && *deviceID != "" {
 			log.Printf("WARNING: immutable device %s has no local Ed25519 identity; this is legacy bearer-only compatibility and should be migrated with `agent setup`", *deviceID)

@@ -53,7 +53,7 @@ passes WebSockets; see [reverse-proxy.md](reverse-proxy.md).
   --device workstation \
   --profile read-only \
   --install-systemd
-./chat-with-cli login
+./chat-with-cli connect
 # Review the generated config and unit before starting the Agent.
 systemctl --user daemon-reload
 systemctl --user enable --now chat-with-cli-agent.service
