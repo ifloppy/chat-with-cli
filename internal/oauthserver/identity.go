@@ -166,15 +166,19 @@ func (s *Server) authenticate(username, password string) (User, bool, bool) {
 		return User{}, false, false
 	}
 	ok = verifyPassword(user.PasswordHash, password)
-	if ok {
-		s.mu.Lock()
-		if current := s.users[user.ID]; current.ID != "" && !current.Disabled {
-			current.LastLoginAt = time.Now().Unix()
-			s.users[user.ID] = current
-		}
-		s.mu.Unlock()
+	if !ok {
+		return User{}, false, false
 	}
-	return user, ok, false
+	s.mu.Lock()
+	current, exists := s.users[user.ID]
+	if !exists || current.ID == "" || current.Disabled || current.PasswordHash != user.PasswordHash {
+		s.mu.Unlock()
+		return User{}, false, false
+	}
+	current.LastLoginAt = time.Now().Unix()
+	s.users[user.ID] = current
+	s.mu.Unlock()
+	return current, true, false
 }
 
 func (s *Server) register(username, password string) (User, error, bool) {
@@ -252,12 +256,21 @@ func (s *Server) sessionUser(r *http.Request) (User, bool) {
 	return user, true
 }
 
-func (s *Server) createSession(userID string) (string, error) {
+func (s *Server) createSession(authenticated User) (string, error) {
 	token := randomToken(32)
 	s.mu.Lock()
+	current, exists := s.users[authenticated.ID]
+	if !exists || current.ID == "" || current.Disabled {
+		s.mu.Unlock()
+		return "", errors.New("authenticated user is disabled or no longer exists")
+	}
+	if authenticated.PasswordHash == "" || current.PasswordHash != authenticated.PasswordHash {
+		s.mu.Unlock()
+		return "", errors.New("authenticated credentials changed before session creation")
+	}
 	now := time.Now().Unix()
 	snapshot := s.snapshotMutableStateLocked()
-	s.sessions[tokenKey(token)] = sessionRecord{UserID: userID, CreatedAt: now, LastSeenAt: now, LastReauthAt: now, Expires: time.Now().Add(sessionLifetime).Unix()}
+	s.sessions[tokenKey(token)] = sessionRecord{UserID: current.ID, CreatedAt: now, LastSeenAt: now, LastReauthAt: now, Expires: time.Now().Add(sessionLifetime).Unix()}
 	if s.persistenceFault {
 		// Recovery sessions are process-local. Browser login must remain
 		// possible without consuming a dirty authorization-state guard.

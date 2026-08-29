@@ -377,6 +377,43 @@ func TestPublicModeStartsWithoutOwnerAndShowsRegistration(t *testing.T) {
 	}
 }
 
+func TestAuthorizationPageShowsUnverifiedClientCallbackOrigin(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18912", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := Client{ID: "unverified-client-id", Name: "ChatGPT", RedirectURIs: []string{"https://benign.example/callback", "https://attacker.example/oauth/callback?ignored=1"}}
+	rr := httptest.NewRecorder()
+	s.renderAuthorizationWithCSRF(rr, "request", client, s.absolute("/mcp/device-a"), "mcp offline_access", client.RedirectURIs[1], "", User{}, false)
+	body := rr.Body.String()
+	if !strings.Contains(body, "Unverified dynamic OAuth client") || !strings.Contains(body, "https://attacker.example") || !strings.Contains(body, "unverified-client-id") {
+		t.Fatalf("authorization page hid dynamic-client trust context: %s", body)
+	}
+	if strings.Contains(body, "https://benign.example") || strings.Contains(body, "/oauth/callback") || strings.Contains(body, "ignored=1") {
+		t.Fatalf("authorization page should show the exact requested callback origin only, not another registered redirect or callback path/query: %s", body)
+	}
+}
+
+func TestDCRRejectsClientNameControlAndFormatCharacters(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:18913", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"trusted\nclient", "ChatGPT\u202Eevil"} {
+		body, _ := json.Marshal(map[string]any{
+			"redirect_uris": []string{"https://client.example/callback"}, "client_name": name,
+			"token_endpoint_auth_method": "none", "grant_types": []string{"authorization_code"}, "response_types": []string{"code"},
+		})
+		req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.handleRegister(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("DCR accepted deceptive client name %q: status=%d body=%s", name, rr.Code, rr.Body.String())
+		}
+	}
+}
+
 func TestPublicDeviceOwnershipIsIsolated(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:18903", StateDir: t.TempDir(), Mode: ModePublic})
 	if err != nil {
@@ -762,7 +799,7 @@ func TestAdminReauthenticationRotatesAndRefreshesOnlyCurrentSession(t *testing.T
 	ownerID := s.usernames["owner"]
 	s.mcpEnabled = false
 	s.mu.Unlock()
-	session, err := s.createSession(ownerID)
+	session, err := s.createSession(s.users[ownerID])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,7 +901,7 @@ func TestAdminReauthRotationRollsBackOnPersistenceFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	ownerID := s.usernames["owner"]
-	session, err := s.createSession(ownerID)
+	session, err := s.createSession(s.users[ownerID])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -920,7 +957,7 @@ func TestAdminCanRevokeDeviceAndDisableMCP(t *testing.T) {
 	s.mu.Unlock()
 	mux := http.NewServeMux()
 	s.RegisterRoutes(mux)
-	session, err := s.createSession(ownerID)
+	session, err := s.createSession(s.users[ownerID])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -986,11 +1023,11 @@ func TestAdminCanRevokeIndividualTokensAndSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstSession, err := s.createSession(ownerID)
+	firstSession, err := s.createSession(s.users[ownerID])
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondSession, err := s.createSession(ownerID)
+	secondSession, err := s.createSession(s.users[ownerID])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3364,7 +3401,16 @@ func TestDirtyRecoveryGuardCannotBeConsumedByOrdinaryPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
-	ownerID := s.usernames["owner"]
+	owner, err := s.createUserLocked("recovery-owner", "recovery-owner-password-12345", true)
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	ownerID := owner.ID
+	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
 	s.registrationEnabled = true
 	s.persistenceFault = true
 	if err := writeStateGuard(s.stateGuard, stateGuardDirty); err != nil {
@@ -3387,7 +3433,7 @@ func TestDirtyRecoveryGuardCannotBeConsumedByOrdinaryPersistence(t *testing.T) {
 		t.Fatalf("ordinary registration consumed dirty guard: guard=%q err=%v", guard, err)
 	}
 
-	session, err := s.createSession(ownerID)
+	session, err := s.createSession(s.users[ownerID])
 	if err != nil || session == "" {
 		t.Fatalf("recovery administrator could not obtain an ephemeral session: token=%q err=%v", session, err)
 	}
@@ -3396,7 +3442,7 @@ func TestDirtyRecoveryGuardCannotBeConsumedByOrdinaryPersistence(t *testing.T) {
 		t.Fatalf("recovery login session consumed dirty guard: guard=%q err=%v", guard, err)
 	}
 
-	owner := s.users[ownerID]
+	owner = s.users[ownerID]
 	if err := s.applyAdminAction("set-agent", "", "off", owner, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
 		t.Fatalf("explicit authority-reducing recovery transaction failed: %v", err)
 	}
@@ -3513,5 +3559,43 @@ func TestReplayedRegistrationChallengeCannotEvictOtherClient(t *testing.T) {
 	s.mu.Unlock()
 	if !otherStillPresent || clientCount != maxClients {
 		t.Fatalf("replayed challenge changed other client state: other_present=%v clients=%d want=%d", otherStillPresent, clientCount, maxClients)
+	}
+}
+
+func TestSessionCreationRejectsRevokedAuthenticationSnapshot(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19171", Password: "session-race-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	authenticated := s.users[ownerID]
+	current := authenticated
+	current.Disabled = true
+	s.users[ownerID] = current
+	s.mu.Unlock()
+	if token, err := s.createSession(authenticated); err == nil || token != "" {
+		t.Fatalf("disabled user received a post-revocation session: token=%q err=%v", token, err)
+	}
+
+	rotatedHash, err := hashPassword("rotated-session-race-password-12345")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	current = s.users[ownerID]
+	current.Disabled = false
+	current.PasswordHash = rotatedHash
+	s.users[ownerID] = current
+	s.mu.Unlock()
+	if token, err := s.createSession(authenticated); err == nil || token != "" {
+		t.Fatalf("old password snapshot received a session after password rotation: token=%q err=%v", token, err)
+	}
+
+	s.mu.Lock()
+	delete(s.users, ownerID)
+	s.mu.Unlock()
+	if token, err := s.createSession(current); err == nil || token != "" {
+		t.Fatalf("deleted user received a session: token=%q err=%v", token, err)
 	}
 }

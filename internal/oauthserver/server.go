@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ifloppy/chat-with-cli/internal/authzctx"
 	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
@@ -976,6 +978,26 @@ func validAgentRedirectURI(raw string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func validOAuthClientName(name string) bool {
+	if len(name) > 256 || !utf8.ValidString(name) {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false
+		}
+	}
+	return true
+}
+
+func callbackOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 type registrationRequest struct {
 	RedirectURIs            []string `json:"redirect_uris"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
@@ -1027,7 +1049,7 @@ func (s *Server) handleRegistrationChallenge(w http.ResponseWriter, r *http.Requ
 	clientName := strings.TrimSpace(req.ClientName)
 	redirectURI := strings.TrimSpace(req.RedirectURI)
 	deviceID, ok := protocol.NormalizeDeviceID(strings.TrimSpace(req.DeviceID))
-	if !ok || clientName == "" || len(clientName) > 256 || !validAgentRedirectURI(redirectURI) {
+	if !ok || clientName == "" || !validOAuthClientName(clientName) || !validAgentRedirectURI(redirectURI) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent registration challenge redirect must use loopback HTTP"})
 		return
 	}
@@ -1080,8 +1102,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_redirect_uri"})
 		return
 	}
-	if len(req.ClientName) > 256 || len(req.Scope) > 512 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "client metadata is too large"})
+	if !validOAuthClientName(req.ClientName) || len(req.Scope) > 512 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "client metadata is invalid or too large"})
 		return
 	}
 	for _, redirect := range req.RedirectURIs {
@@ -1387,13 +1409,14 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	s.setCSRFCookie(w, csrfToken)
 	user, loggedIn := s.sessionUser(r)
-	s.renderAuthorizationWithCSRF(w, requestID, client, resource, scope, csrfToken, user, loggedIn)
+	s.renderAuthorizationWithCSRF(w, requestID, client, resource, scope, redirectURI, csrfToken, user, loggedIn)
 }
 
 var authorizationTemplate = template.Must(template.New("authorization").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Authorize chat-with-cli</title><style>:root{color-scheme:light dark}body{font:16px system-ui;max-width:620px;margin:6vh auto;padding:24px;line-height:1.5}input,button{font:inherit;padding:10px;width:100%;box-sizing:border-box}button{margin-top:12px}.meta,form,.identity{border:1px solid #8885;background:#8881;padding:14px;border-radius:10px;margin-top:14px}.secondary{background:#8881}.verified{border-color:#18803888;background:#18803814}.warning{border-color:#b8860b88;background:#b8860b14}.muted{color:#777}code{overflow-wrap:anywhere}</style></head><body>
-<h1>Authorize chat-with-cli</h1><div class="meta"><b>Client:</b> {{.Client}}<br><b>Resource:</b> <code>{{.Resource}}</code><br><b>Scope:</b> {{.Scope}}</div>
+<h1>Authorize chat-with-cli</h1><div class="meta"><b>Client name:</b> {{.Client}}<br><b>Client ID:</b> <code>{{.ClientID}}</code><br><b>Callback:</b> <code>{{.Callback}}</code><br><b>Resource:</b> <code>{{.Resource}}</code><br><b>Scope:</b> {{.Scope}}</div>
+{{if .UnverifiedClient}}<div class="identity warning"><b>Unverified dynamic OAuth client</b><br>The client name above is self-asserted. Only authorize if the callback origin matches the application you intended to connect.</div>{{end}}
 {{if .VerifiedDevice}}<div class="identity verified"><b>Verified device identity</b><br>This Agent proved possession of the Ed25519 private key for device <code>{{.DeviceID}}</code>. The Relay will require a fresh signed proof on every Agent connection.</div>{{else if .AgentDevice}}<div class="identity warning"><b>Legacy unbound Agent</b><br>This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.</div>{{end}}
 {{if .LoggedIn}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><p>Signed in as <b>{{.Username}}</b>.</p><button name="decision" value="allow" type="submit">Authorize</button><button name="decision" value="deny" type="submit">Deny</button><button name="decision" value="logout" type="submit">Sign out</button></form>
 {{else}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Sign in</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="current-password" placeholder="Password" required><button name="decision" value="login" type="submit">Sign in and authorize</button></form>
@@ -1401,10 +1424,14 @@ var authorizationTemplate = template.Must(template.New("authorization").Parse(`<
 </body></html>`))
 
 func (s *Server) renderAuthorization(w http.ResponseWriter, requestID string, client Client, resource, scope string, user User, loggedIn bool) {
-	s.renderAuthorizationWithCSRF(w, requestID, client, resource, scope, "", user, loggedIn)
+	redirectURI := ""
+	if len(client.RedirectURIs) == 1 {
+		redirectURI = client.RedirectURIs[0]
+	}
+	s.renderAuthorizationWithCSRF(w, requestID, client, resource, scope, redirectURI, "", user, loggedIn)
 }
 
-func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID string, client Client, resource, scope, csrfToken string, user User, loggedIn bool) {
+func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID string, client Client, resource, scope, redirectURI, csrfToken string, user User, loggedIn bool) {
 	name := strings.TrimSpace(client.Name)
 	if name == "" {
 		name = client.ID
@@ -1421,10 +1448,14 @@ func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID st
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	callback := "unknown"
+	if origin := callbackOrigin(redirectURI); origin != "" {
+		callback = origin
+	}
 	_ = authorizationTemplate.Execute(w, map[string]any{
-		"RequestID": requestID, "Client": name, "Resource": resource, "Scope": scope,
+		"RequestID": requestID, "Client": name, "ClientID": client.ID, "Callback": callback, "Resource": resource, "Scope": scope,
 		"CSRFToken": csrfToken, "LoggedIn": loggedIn, "Username": user.Username, "Public": publicRegistration,
-		"AgentDevice": agentDevice, "VerifiedDevice": verifiedDevice, "DeviceID": deviceID,
+		"AgentDevice": agentDevice, "VerifiedDevice": verifiedDevice, "UnverifiedClient": !verifiedDevice, "DeviceID": deviceID,
 	})
 }
 
@@ -1501,7 +1532,7 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		s.setCSRFCookie(w, csrfToken)
-		s.renderAuthorizationWithCSRF(w, requestID, client, pending.Resource, pending.Scope, csrfToken, User{}, false)
+		s.renderAuthorizationWithCSRF(w, requestID, client, pending.Resource, pending.Scope, pending.RedirectURI, csrfToken, User{}, false)
 		return
 	}
 	if decision == "deny" {
@@ -1560,7 +1591,7 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if decision == "login" || decision == "register" {
-		session, err := s.createSession(user.ID)
+		session, err := s.createSession(user)
 		if err != nil {
 			s.oauthPageError(w, http.StatusInternalServerError, "failed to persist login session")
 			return

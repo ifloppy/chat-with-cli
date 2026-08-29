@@ -253,7 +253,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid administrator credentials", http.StatusUnauthorized)
 		return
 	}
-	session, err := s.createSession(user.ID)
+	session, err := s.createSession(user)
 	if err != nil {
 		http.Error(w, "failed to persist login session", http.StatusInternalServerError)
 		return
