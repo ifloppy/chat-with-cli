@@ -235,6 +235,21 @@ func TestToolDescriptorsMeetChatGPTRequirements(t *testing.T) {
 	}
 }
 
+func TestToolCatalogIsDeterministicAndComplete(t *testing.T) {
+	catalog := ToolCatalog()
+	if len(catalog) != 31 {
+		t.Fatalf("catalog count=%d want=31", len(catalog))
+	}
+	for i, tool := range catalog {
+		if tool.Name == "" || tool.Title == "" {
+			t.Fatalf("catalog entry %d is incomplete: %#v", i, tool)
+		}
+		if i > 0 && catalog[i-1].Name >= tool.Name {
+			t.Fatalf("catalog is not sorted or has duplicate %q", tool.Name)
+		}
+	}
+}
+
 func TestRawStreamableHTTPToolsListAdvertisesAllTools(t *testing.T) {
 	server := New(fakeCaller{})
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{

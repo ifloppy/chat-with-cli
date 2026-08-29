@@ -30,6 +30,8 @@ chat-with-cli connect
 
 浏览器会自动打开 OAuth 页面。前台连接时可以选择每次请求审批、当前进程全部允许，或仅使用配置文件中的权限。需要后台运行前，请先审阅生成的 unit：
 
+前台 `connect`/`agent` 启动时会打印完整的 31 项 MCP 工具清单和本地能力摘要；每次入站工具调用也会按名称显示，即使选择“全部允许”（`--approval-mode=allow-all`）也不会关闭这条审计输出。参数、文件内容、命令和结果不会打印。
+
 ```bash
 chat-with-cli doctor
 systemctl --user daemon-reload

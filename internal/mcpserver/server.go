@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/ifloppy/chat-with-cli/internal/engine"
 	"github.com/ifloppy/chat-with-cli/internal/version"
@@ -14,6 +15,47 @@ var Version = version.Value
 
 type Caller interface {
 	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)
+}
+
+// ToolDescriptor is the security-relevant portion of an MCP tool descriptor.
+// It is shared with the Agent CLI audit display so that the displayed list
+// cannot drift from the names and annotations exposed by this package.
+type ToolDescriptor struct {
+	Name        string
+	Title       string
+	ReadOnly    bool
+	Destructive bool
+	OpenWorld   bool
+}
+
+// ToolCatalog returns the tools exposed by New in deterministic order. The
+// catalog intentionally omits schemas and descriptions because it is also
+// used in local audit output, where request data and large descriptors are not
+// useful.
+func ToolCatalog() []ToolDescriptor {
+	names := make([]string, 0, len(toolTitles))
+	for name := range toolTitles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	catalog := make([]ToolDescriptor, 0, len(names))
+	for _, name := range names {
+		annotations := toolAnnotations(name)
+		descriptor := ToolDescriptor{
+			Name:     name,
+			Title:    toolTitle(name),
+			ReadOnly: annotations != nil && annotations.ReadOnlyHint,
+		}
+		if annotations != nil && annotations.DestructiveHint != nil {
+			descriptor.Destructive = *annotations.DestructiveHint
+		}
+		if annotations != nil && annotations.OpenWorldHint != nil {
+			descriptor.OpenWorld = *annotations.OpenWorldHint
+		}
+		catalog = append(catalog, descriptor)
+	}
+	return catalog
 }
 
 type LocalCaller struct{ Engine *engine.Engine }

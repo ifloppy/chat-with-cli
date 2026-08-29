@@ -86,6 +86,16 @@ ends that remote session: in-flight calls are canceled, detached PTY tasks are
 terminated, and the active Desktop Portal control session is closed. This is a
 security-first default; do not rely on remote PTY tasks surviving disconnects.
 
+## MCP tool audit output
+
+Foreground `agent` and `connect` sessions print the complete 31-tool MCP
+inventory when they start. Each entry includes its read-only/mutating and
+open-world classification, plus the local capability summary. Every inbound
+MCP call is then printed by tool name before authorization and execution. This
+line is still emitted in `--approval-mode=allow-all`; the mode changes
+authorization, not audit visibility. Arguments, file contents, commands,
+screenshots, and results are intentionally omitted from this display.
+
 ## systemd user unit
 
 `agent setup --install-systemd` writes a unit with `NoNewPrivileges`,

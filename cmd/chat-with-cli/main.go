@@ -1131,7 +1131,10 @@ func runAgentCommand(command string, args []string) error {
 	defer eng.Close()
 	ctx, cancel := signalContext()
 	defer cancel()
+	audit := newToolAudit(os.Stderr)
+	audit.printInventory(*approvalMode, eng.Config())
 	client := &agent.Client{Engine: eng, URL: *relayURL, Device: *device, DeviceID: *deviceID, Token: *token, Identity: deviceIdentity}
+	client.OnToolCall = audit.observe
 	if *approvalMode == approvalAsk {
 		approver, closer, err := newTTYRequestApprover()
 		if err != nil {

@@ -179,15 +179,48 @@ func TestAgentRunSendsRelayChallengeProofOfPossession(t *testing.T) {
 
 func TestRequestAuthorizerRunsBeforeEngineInvocation(t *testing.T) {
 	called := false
-	c := &Client{AuthorizeRequest: func(context.Context, protocol.Request) error {
-		called = true
-		return errors.New("local approval denied")
-	}}
+	var observed ToolCall
+	var events []string
+	c := &Client{
+		OnToolCall: func(call ToolCall) {
+			observed = call
+			events = append(events, "observe")
+		},
+		AuthorizeRequest: func(context.Context, protocol.Request) error {
+			called = true
+			events = append(events, "authorize")
+			return errors.New("local approval denied")
+		},
+	}
 	resp := c.handle(context.Background(), protocol.Request{ID: "approval-test", Method: "system_info"})
+	if observed.Method != "system_info" {
+		t.Fatalf("tool observer saw %#v", observed)
+	}
 	if !called {
 		t.Fatal("request authorizer was not called")
 	}
+	if got := strings.Join(events, ","); got != "observe,authorize" {
+		t.Fatalf("unexpected request handling order: %q", got)
+	}
 	if !strings.Contains(resp.Error, "local approval denied") {
 		t.Fatalf("unexpected response error: %q", resp.Error)
+	}
+}
+
+func TestToolCallObserverRunsWithoutAuthorization(t *testing.T) {
+	eng, err := engine.New(engine.Config{Roots: []string{t.TempDir()}, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	observed := make(chan ToolCall, 1)
+	c := &Client{Engine: eng, OnToolCall: func(call ToolCall) { observed <- call }}
+	resp := c.handle(context.Background(), protocol.Request{ID: "observer-test", Method: "system_info"})
+	call := <-observed
+	if call.Method != "system_info" {
+		t.Fatalf("tool observer saw %#v", call)
+	}
+	if resp.Error != "" {
+		t.Fatalf("unexpected engine error: %q", resp.Error)
 	}
 }
