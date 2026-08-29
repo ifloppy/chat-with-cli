@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/engine"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
@@ -23,6 +24,7 @@ type Client struct {
 	DeviceID      string
 	Token         string
 	TokenProvider func(context.Context) (string, error)
+	Identity      *deviceidentity.Identity
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -34,6 +36,12 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	if c.Token == "" && c.TokenProvider == nil {
 		return errors.New("agent OAuth token provider or legacy token is required")
+	}
+	if c.Identity != nil && strings.TrimSpace(c.DeviceID) != "" {
+		canonicalID, ok := protocol.NormalizeDeviceID(c.DeviceID)
+		if !ok || canonicalID != c.Identity.ID() {
+			return errors.New("immutable device ID does not match the loaded Ed25519 device identity")
+		}
 	}
 	endpoint, err := agentURLForRoute(c.URL, c.Device, c.DeviceID)
 	if err != nil {
@@ -53,6 +61,24 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		header := http.Header{}
 		header.Set("Authorization", "Bearer "+token)
+		if c.Identity != nil {
+			resource, proofErr := agentResourceForEndpoint(endpoint)
+			if proofErr != nil {
+				return proofErr
+			}
+			nonce, proofErr := deviceidentity.NewNonce()
+			if proofErr != nil {
+				return fmt.Errorf("generate device proof nonce: %w", proofErr)
+			}
+			now := time.Now().UTC()
+			proof, proofErr := c.Identity.SignProof(resource, token, now, nonce)
+			if proofErr != nil {
+				return fmt.Errorf("sign Agent device proof: %w", proofErr)
+			}
+			header.Set(deviceidentity.HeaderTimestamp, fmt.Sprintf("%d", now.Unix()))
+			header.Set(deviceidentity.HeaderNonce, nonce)
+			header.Set(deviceidentity.HeaderProof, proof)
+		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
 		conn, _, err := websocket.Dial(dialCtx, endpoint, &websocket.DialOptions{HTTPHeader: header})
 		cancelDial()
@@ -80,6 +106,24 @@ func (c *Client) Run(ctx context.Context) error {
 			backoff *= 2
 		}
 	}
+}
+
+func agentResourceForEndpoint(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "", errors.New("invalid Agent WebSocket endpoint")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss":
+		u.Scheme = "https"
+	case "ws":
+		u.Scheme = "http"
+	default:
+		return "", errors.New("Agent endpoint is not WebSocket")
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 func agentURL(base, device string) (string, error) {

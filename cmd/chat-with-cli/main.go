@@ -23,6 +23,7 @@ import (
 
 	"github.com/ifloppy/chat-with-cli/internal/agent"
 	"github.com/ifloppy/chat-with-cli/internal/config"
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/engine"
 	"github.com/ifloppy/chat-with-cli/internal/execsandbox"
 	"github.com/ifloppy/chat-with-cli/internal/mcpserver"
@@ -726,6 +727,7 @@ func runAgent(args []string) error {
 	token := fs.String("token", "", "legacy private Agent token; omit to use browser OAuth")
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration file")
+	identityPath := fs.String("identity", "", "Ed25519 device identity path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -782,6 +784,9 @@ func runAgent(args []string) error {
 	if !flagWasSet(fs, "credentials") {
 		*credentials = values.String(*credentials, "agent.credentials")
 	}
+	if !flagWasSet(fs, "identity") {
+		*identityPath = values.String(*identityPath, "agent.identity")
+	}
 	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
 	}
@@ -799,6 +804,23 @@ func runAgent(args []string) error {
 			return fmt.Errorf("--device-id must be 32 hexadecimal characters")
 		}
 		*deviceID = canonicalID
+	}
+	var deviceIdentity *deviceidentity.Identity
+	if strings.TrimSpace(*identityPath) != "" {
+		*identityPath, err = normalizeUserPath(*identityPath)
+		if err != nil {
+			return fmt.Errorf("invalid --identity: %w", err)
+		}
+		deviceIdentity, err = deviceidentity.Load(*identityPath)
+		if err != nil {
+			return fmt.Errorf("load device identity: %w", err)
+		}
+		derivedID := deviceIdentity.ID()
+		if *deviceID == "" {
+			*deviceID = derivedID
+		} else if *deviceID != derivedID {
+			return fmt.Errorf("configured device ID %s does not match Ed25519 identity %s", *deviceID, derivedID)
+		}
 	}
 	if strings.TrimSpace(*relayURL) == "" && *token == "" {
 		saved, ok, err := "", false, error(nil)
@@ -821,16 +843,23 @@ func runAgent(args []string) error {
 	if _, configuredInFile := values.Raw("agent.exec_sandbox"); !configuredInFile {
 		applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
 	}
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, []string{*credentials, *configPath}, *maxActiveTasks)
+	protectedPaths := []string{*credentials, *configPath}
+	if *identityPath != "" {
+		protectedPaths = append(protectedPaths, *identityPath)
+	}
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, protectedPaths, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
 	defer eng.Close()
 	ctx, cancel := signalContext()
 	defer cancel()
-	client := &agent.Client{Engine: eng, URL: *relayURL, Device: *device, DeviceID: *deviceID, Token: *token}
+	client := &agent.Client{Engine: eng, URL: *relayURL, Device: *device, DeviceID: *deviceID, Token: *token, Identity: deviceIdentity}
 	if *token == "" {
-		manager := &oauthclient.Manager{RelayURL: *relayURL, Device: *device, DeviceID: *deviceID, CredentialsPath: *credentials}
+		if deviceIdentity == nil && *deviceID != "" {
+			log.Printf("WARNING: immutable device %s has no local Ed25519 identity; this is legacy bearer-only compatibility and should be migrated with `agent setup`", *deviceID)
+		}
+		manager := &oauthclient.Manager{RelayURL: *relayURL, Device: *device, DeviceID: *deviceID, DeviceIdentity: deviceIdentity, CredentialsPath: *credentials}
 		client.TokenProvider = manager.Token
 		log.Printf("Agent authentication: browser OAuth (credentials: %s)", *credentials)
 	}
@@ -851,6 +880,7 @@ func runLogin(args []string) error {
 	deviceID := fs.String("device-id", "", "immutable 128-bit device ID to authorize")
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration file")
+	identityPath := fs.String("identity", "", "Ed25519 device identity path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -873,6 +903,9 @@ func runLogin(args []string) error {
 			*credentials = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS"))
 		}
 	}
+	if !flagWasSet(fs, "identity") {
+		*identityPath = values.String(*identityPath, "agent.identity")
+	}
 	if strings.TrimSpace(*relayURL) == "" {
 		return fmt.Errorf("Relay URL is missing; run `chat-with-cli agent setup --relay https://...` or provide --relay")
 	}
@@ -886,7 +919,24 @@ func runLogin(args []string) error {
 		}
 		*deviceID = canonicalID
 	}
-	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, CredentialsPath: *credentials}
+	var deviceIdentity *deviceidentity.Identity
+	if strings.TrimSpace(*identityPath) != "" {
+		*identityPath, err = normalizeUserPath(*identityPath)
+		if err != nil {
+			return fmt.Errorf("invalid --identity: %w", err)
+		}
+		deviceIdentity, err = deviceidentity.Load(*identityPath)
+		if err != nil {
+			return fmt.Errorf("load device identity: %w", err)
+		}
+		derivedID := deviceIdentity.ID()
+		if *deviceID == "" {
+			*deviceID = derivedID
+		} else if *deviceID != derivedID {
+			return fmt.Errorf("configured device ID %s does not match Ed25519 identity %s", *deviceID, derivedID)
+		}
+	}
+	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, DeviceIdentity: deviceIdentity, CredentialsPath: *credentials}
 	resource, err := manager.Resource()
 	if err != nil {
 		return err

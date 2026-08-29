@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ifloppy/chat-with-cli/internal/config"
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/mcpserver"
 	"github.com/ifloppy/chat-with-cli/internal/oauthclient"
 	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
@@ -34,6 +35,7 @@ func runAgentSetup(args []string) error {
 	roots := new(stringList)
 	fs.Var(roots, "root", "allowed filesystem root (repeatable)")
 	stateDir := fs.String("state-dir", defaultAgentStateDir(), "agent state directory")
+	identityPath := fs.String("identity", "", "Ed25519 device identity path; generated under the state directory when omitted")
 	allowFileWrite := fs.Bool("allow-file-write", false, "allow filesystem/checkpoint writes")
 	allowExec := fs.Bool("allow-exec", false, "allow PTY shell execution")
 	execSandbox := fs.String("exec-sandbox", "none", "none or landlock")
@@ -54,20 +56,16 @@ func runAgentSetup(args []string) error {
 	if !protocol.ValidDeviceName(strings.TrimSpace(*device)) {
 		return errors.New("--device must be 1-128 ASCII letters, digits, dot, underscore, or hyphen")
 	}
-	if strings.TrimSpace(*deviceID) == "" {
-		*deviceID = protocol.NewID()
+	requestedDeviceID := strings.TrimSpace(*deviceID)
+	if requestedDeviceID != "" {
+		canonicalID, ok := protocol.NormalizeDeviceID(requestedDeviceID)
+		if !ok {
+			return errors.New("--device-id must be 32 hexadecimal characters")
+		}
+		requestedDeviceID = canonicalID
 	}
-	canonicalID, ok := protocol.NormalizeDeviceID(*deviceID)
-	if !ok {
-		return errors.New("--device-id must be 32 hexadecimal characters")
-	}
-	*deviceID = canonicalID
 	if strings.TrimSpace(*relayURL) == "" {
 		return errors.New("--relay is required, for example https://relay.example.com")
-	}
-	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: strings.TrimSpace(*deviceID)}
-	if _, err := manager.Resource(); err != nil {
-		return fmt.Errorf("invalid --relay: %w", err)
 	}
 	if !validCapabilityProfile(*profile) {
 		return fmt.Errorf("invalid capability profile %q", *profile)
@@ -130,6 +128,26 @@ func runAgentSetup(args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --state-dir: %w", err)
 	}
+	if strings.TrimSpace(*identityPath) == "" {
+		*identityPath = deviceidentity.DefaultPath(*stateDir)
+	}
+	*identityPath, err = normalizeUserPath(*identityPath)
+	if err != nil {
+		return fmt.Errorf("invalid --identity: %w", err)
+	}
+	identity, createdIdentity, err := deviceidentity.LoadOrCreate(*identityPath)
+	if err != nil {
+		return fmt.Errorf("load or create device identity: %w", err)
+	}
+	derivedDeviceID := identity.ID()
+	if requestedDeviceID != "" && requestedDeviceID != derivedDeviceID {
+		return fmt.Errorf("--device-id %s does not match the Ed25519 device identity %s; device IDs are cryptographically derived and cannot be reassigned", requestedDeviceID, derivedDeviceID)
+	}
+	*deviceID = derivedDeviceID
+	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, DeviceIdentity: identity}
+	if _, err := manager.Resource(); err != nil {
+		return fmt.Errorf("invalid --relay: %w", err)
+	}
 	*configPath, err = normalizeUserPath(*configPath)
 	if err != nil {
 		return fmt.Errorf("invalid --config: %w", err)
@@ -147,6 +165,7 @@ func runAgentSetup(args []string) error {
 		"agent.root":                append([]string(nil), *roots...),
 		"agent.profile":             strings.ToLower(strings.TrimSpace(*profile)),
 		"agent.state_dir":           strings.TrimSpace(*stateDir),
+		"agent.identity":            strings.TrimSpace(*identityPath),
 		"agent.allow_file_write":    *allowFileWrite,
 		"agent.allow_exec":          *allowExec,
 		"agent.exec_sandbox":        strings.ToLower(strings.TrimSpace(*execSandbox)),
@@ -163,7 +182,7 @@ func runAgentSetup(args []string) error {
 	}
 	base := strings.TrimRight(*relayURL, "/")
 	fmt.Printf("Agent configuration written to %s\n\n", *configPath)
-	fmt.Printf("Device name: %s\nImmutable device ID: %s\nMCP endpoint: %s/mcp/id/%s\n", *device, *deviceID, base, *deviceID)
+	fmt.Printf("Device name: %s\nImmutable device ID: %s\nDevice identity: %s%s\nMCP endpoint: %s/mcp/id/%s\n", *device, *deviceID, *identityPath, map[bool]string{true: " (created)", false: ""}[createdIdentity], base, *deviceID)
 	fmt.Println("Filesystem roots exposed to MCP read tools:")
 	home, _ := os.UserHomeDir()
 	for _, root := range *roots {
@@ -439,7 +458,20 @@ func runStatus(args []string) error {
 		return err
 	}
 	active, enabled := systemdUserState("chat-with-cli-agent.service")
-	status := map[string]any{"config": *configPath, "relay": values.String("", "agent.relay_url"), "device": values.String("", "agent.device"), "device_id": values.String("", "agent.device_id"), "profile": values.String("read-only", "agent.profile"), "systemd_active": active, "systemd_enabled": enabled}
+	identityPath := values.String("", "agent.identity")
+	identityState := "legacy-unbound"
+	if identityPath != "" {
+		identityState = "unreadable"
+		if identity, err := deviceidentity.Load(identityPath); err == nil {
+			configuredID, ok := protocol.NormalizeDeviceID(values.String("", "agent.device_id"))
+			if ok && configuredID == identity.ID() {
+				identityState = "bound"
+			} else {
+				identityState = "mismatch"
+			}
+		}
+	}
+	status := map[string]any{"config": *configPath, "relay": values.String("", "agent.relay_url"), "device": values.String("", "agent.device"), "device_id": values.String("", "agent.device_id"), "device_identity": identityPath, "device_proof": identityState, "profile": values.String("read-only", "agent.profile"), "systemd_active": active, "systemd_enabled": enabled}
 	data, _ := json.MarshalIndent(status, "", "  ")
 	fmt.Println(string(data))
 	return nil
@@ -476,6 +508,10 @@ func runDoctor(args []string) error {
 	}
 	*mcpToken = envOr(*mcpToken, "CHAT_WITH_CLI_CLIENT_TOKEN")
 	checks := localDoctorChecks(values)
+	var deviceIdentity *deviceidentity.Identity
+	if identityPath := values.String("", "agent.identity"); identityPath != "" {
+		deviceIdentity, _ = deviceidentity.Load(identityPath)
+	}
 	if strings.TrimSpace(*relayURL) == "" {
 		checks = append(checks, doctorCheck{Name: "Relay checks", Skip: true, Detail: ": provide --relay or agent.relay_url for network checks"})
 		return reportDoctorChecks(checks)
@@ -519,7 +555,7 @@ func runDoctor(args []string) error {
 			checks = append(checks, doctorCheck{Name: "saved Agent credential", Detail: ": access token is missing or expired"})
 		} else {
 			checks = append(checks, doctorCheck{Name: "saved Agent credential", OK: true, Detail: ": access token is unexpired (bearer value withheld)"})
-			checks = append(checks, doctorAgentConnectionCheck(context.Background(), base, route, credential.AccessToken))
+			checks = append(checks, doctorAgentConnectionCheck(context.Background(), base, route, credential.AccessToken, deviceIdentity))
 		}
 		if strings.TrimSpace(*mcpToken) != "" {
 			checks = append(checks, doctorMCPCheck(context.Background(), client, base+"/mcp/"+route, *mcpToken, "MCP initialize"))
@@ -577,6 +613,21 @@ func localDoctorChecks(values config.Values) []doctorCheck {
 				continue
 			}
 			checks = append(checks, doctorCheck{Name: fmt.Sprintf("filesystem root %d", i+1), OK: true, Detail: ": " + root})
+		}
+	}
+
+	identityPath := values.String("", "agent.identity")
+	configuredDeviceID := values.String("", "agent.device_id")
+	if identityPath == "" {
+		checks = append(checks, doctorCheck{Name: "device proof identity", Skip: true, Detail: ": legacy Agent has no Ed25519 identity; rerun agent setup/login to migrate"})
+	} else {
+		identity, err := deviceidentity.Load(identityPath)
+		if err != nil {
+			checks = append(checks, doctorCheck{Name: "device proof identity", Detail: ": " + err.Error()})
+		} else if canonicalID, ok := protocol.NormalizeDeviceID(configuredDeviceID); !ok || canonicalID != identity.ID() {
+			checks = append(checks, doctorCheck{Name: "device proof identity", Detail: ": configured immutable device ID does not match the Ed25519 identity"})
+		} else {
+			checks = append(checks, doctorCheck{Name: "device proof identity", OK: true, Detail: ": Ed25519 identity matches immutable device ID"})
 		}
 	}
 
@@ -661,8 +712,9 @@ func desktopBusDoctorCheck(name, service, objectPath string) doctorCheck {
 	return doctorCheck{Name: name, OK: true, Detail: ": session bus service responded"}
 }
 
-func doctorAgentConnectionCheck(ctx context.Context, base, route, token string) doctorCheck {
-	target := strings.TrimRight(base, "/") + "/agent/" + route + "?probe=1"
+func doctorAgentConnectionCheck(ctx context.Context, base, route, token string, identity *deviceidentity.Identity) doctorCheck {
+	resource := strings.TrimRight(base, "/") + "/agent/" + route
+	target := resource + "?probe=1"
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
@@ -670,6 +722,20 @@ func doctorAgentConnectionCheck(ctx context.Context, base, route, token string) 
 		return doctorCheck{Name: "Agent connection", Detail: ": " + err.Error()}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	if identity != nil {
+		nonce, err := deviceidentity.NewNonce()
+		if err != nil {
+			return doctorCheck{Name: "Agent connection", Detail: ": failed to generate device proof nonce"}
+		}
+		now := time.Now().UTC()
+		proof, err := identity.SignProof(resource, token, now, nonce)
+		if err != nil {
+			return doctorCheck{Name: "Agent connection", Detail: ": failed to sign device proof"}
+		}
+		req.Header.Set(deviceidentity.HeaderTimestamp, fmt.Sprintf("%d", now.Unix()))
+		req.Header.Set(deviceidentity.HeaderNonce, nonce)
+		req.Header.Set(deviceidentity.HeaderProof, proof)
+	}
 	client := &http.Client{
 		Timeout:       10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

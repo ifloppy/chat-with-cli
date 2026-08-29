@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
@@ -17,6 +18,7 @@ type Manager struct {
 	RelayURL        string
 	Device          string
 	DeviceID        string
+	DeviceIdentity  *deviceidentity.Identity
 	CredentialsPath string
 	HTTPClient      *http.Client
 	OpenBrowser     func(string) error
@@ -76,6 +78,9 @@ func (m *Manager) Resource() (string, error) {
 		canonicalID, ok := protocol.NormalizeDeviceID(deviceID)
 		if !ok {
 			return "", errors.New("invalid immutable device ID")
+		}
+		if m.DeviceIdentity != nil && m.DeviceIdentity.ID() != canonicalID {
+			return "", errors.New("device identity does not match immutable device ID")
 		}
 		return base + "/agent/id/" + url.PathEscape(canonicalID), nil
 	}

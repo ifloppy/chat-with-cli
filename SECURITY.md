@@ -92,12 +92,20 @@ Keychain, and Credential Manager backends remain future work.
 
 ## Device identity
 
-New deployments should use the random immutable 128-bit device ID and routes
-`/agent/id/<id>` and `/mcp/id/<id>`. The human-readable device name is a label,
-not a security principal. Public instances require an immutable ID for new
-device claims; legacy name routes are compatibility-only for already-owned
-devices. OAuth account ownership still gates MCP authorization; knowing an ID
-is not sufficient to use an already-owned device.
+New deployments use an Ed25519 device identity created by `agent setup`. The
+immutable 128-bit route ID is derived from the public key; the human-readable
+name remains only a label. Public instances require this cryptographic identity
+for new device claims. During Agent DCR the client proves possession of the
+matching private key, and every later Agent WebSocket carries a fresh signed
+proof bound to the exact resource, bearer-token fingerprint, timestamp, and
+nonce. Relay replay state is isolated per device. Knowing the ID, public key,
+or Agent bearer alone is insufficient to impersonate a PoP-bound device.
+
+Legacy already-owned alpha devices without a bound key remain compatibility
+routes until migrated. They are shown as unbound in the admin UI and should be
+replaced by a newly generated cryptographic identity, verified online, and then
+revoked. MCP OAuth bearer tokens are still bearer credentials and are not
+sender-constrained by the Agent device key.
 
 The admin control plane can rename labels without changing routes, disable or
 unlink devices, revoke device token families, and permanently disable Agent or

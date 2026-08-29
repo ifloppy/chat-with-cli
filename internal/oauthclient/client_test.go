@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
 )
 
@@ -162,9 +163,13 @@ func TestAgentBrowserOAuthPersistsAndRefreshes(t *testing.T) {
 func TestPublicAgentOAuthCanRegisterAndClaimDevice(t *testing.T) {
 	oauth, base, cleanup := startTestOAuthServer(t, oauthserver.ModePublic)
 	defer cleanup()
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
 	calls := 0
 	manager := &Manager{
-		RelayURL: base, Device: "new-user-laptop", DeviceID: "99999999999999999999999999999999", CredentialsPath: filepath.Join(t.TempDir(), "credentials.json"),
+		RelayURL: base, Device: "new-user-laptop", DeviceID: identity.ID(), DeviceIdentity: identity, CredentialsPath: filepath.Join(t.TempDir(), "credentials.json"),
 		OpenBrowser: loginBrowser(t, "newuser", "new-user-password-123", "register", &calls),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -177,7 +182,7 @@ func TestPublicAgentOAuthCanRegisterAndClaimDevice(t *testing.T) {
 	if !oauth.VerifyAccessScope(access, resource, "agent:connect") {
 		t.Fatal("registered user did not receive Agent access")
 	}
-	owner, ok := oauth.DeviceOwner("id/99999999999999999999999999999999")
+	owner, ok := oauth.DeviceOwner("id/" + identity.ID())
 	if !ok || strings.ToLower(owner.Username) != "newuser" {
 		t.Fatalf("unexpected device owner: %+v ok=%v", owner, ok)
 	}

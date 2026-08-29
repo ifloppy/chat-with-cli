@@ -29,10 +29,13 @@ replaced, fsynced, and permissioned. Admin actions support explicit
 revocation, logout, device ownership changes, capability kill switches, and a
 bounded operational audit trail.
 
-Device IDs are random immutable 128-bit route identities; names are labels and
-legacy compatibility routes. New public deployments should use ID routes to
-avoid predictable name claims. OAuth account ownership is still required; an
-ID is not a bearer secret.
+New Agent identities use Ed25519. `agent setup` generates a local private key
+and derives the immutable 128-bit route ID from its public key. Initial Agent
+DCR proves possession of that key before an unowned device can be claimed, and
+every authenticated Agent WebSocket uses a fresh proof bound to the exact
+resource, bearer fingerprint, timestamp, and nonce. Proof replay caches are
+bounded per device so one tenant cannot exhaust another device's replay
+capacity. Names remain labels and legacy compatibility routes.
 
 ## Residual risks and assumptions
 

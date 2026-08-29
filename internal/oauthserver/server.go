@@ -17,24 +17,29 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ifloppy/chat-with-cli/internal/authzctx"
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
 const (
-	accessLifetime  = time.Hour
-	refreshLifetime = 30 * 24 * time.Hour
-	codeLifetime    = 5 * time.Minute
-	pendingLifetime = 10 * time.Minute
-	maxClients      = 2048
-	maxPendingAuth  = 1024
-	maxPendingIP    = 8
-	maxDevicesUser  = 16
-	maxRateEntries  = 8192
+	accessLifetime                   = time.Hour
+	refreshLifetime                  = 30 * 24 * time.Hour
+	codeLifetime                     = 5 * time.Minute
+	pendingLifetime                  = 10 * time.Minute
+	maxClients                       = 2048
+	maxPendingAuth                   = 1024
+	maxPendingIP                     = 8
+	maxDevicesUser                   = 16
+	maxRateEntries                   = 8192
+	maxRegistrationProofNoncesDevice = 64
+	maxAgentProofNoncesDevice        = 64
+	proofClockSkew                   = 90 * time.Second
 )
 
 type Config struct {
@@ -60,11 +65,14 @@ type Config struct {
 }
 
 type Client struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name,omitempty"`
-	RedirectURIs []string `json:"redirect_uris"`
-	IssuedAt     int64    `json:"issued_at"`
-	Approved     bool     `json:"approved,omitempty"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name,omitempty"`
+	RedirectURIs      []string `json:"redirect_uris"`
+	DeviceID          string   `json:"device_id,omitempty"`
+	DevicePublicKey   string   `json:"device_public_key,omitempty"`
+	DeviceKeyVerified bool     `json:"device_key_verified,omitempty"`
+	IssuedAt          int64    `json:"issued_at"`
+	Approved          bool     `json:"approved,omitempty"`
 }
 
 type tokenRecord struct {
@@ -109,12 +117,13 @@ type SecurityEvent struct {
 }
 
 type DeviceRecord struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
-	OwnerID     string `json:"owner_id"`
-	CreatedAt   int64  `json:"created_at"`
-	LastSeenAt  int64  `json:"last_seen_at,omitempty"`
-	Disabled    bool   `json:"disabled,omitempty"`
+	ID              string `json:"id"`
+	DisplayName     string `json:"display_name"`
+	OwnerID         string `json:"owner_id"`
+	DevicePublicKey string `json:"device_public_key,omitempty"`
+	CreatedAt       int64  `json:"created_at"`
+	LastSeenAt      int64  `json:"last_seen_at,omitempty"`
+	Disabled        bool   `json:"disabled,omitempty"`
 }
 type pendingAuth struct {
 	ClientID      string
@@ -136,37 +145,39 @@ type authCode struct {
 }
 
 type Server struct {
-	cfg                  Config
-	base                 *url.URL
-	mu                   sync.Mutex
-	clients              map[string]Client
-	access               map[string]tokenRecord
-	refresh              map[string]tokenRecord
-	refreshUsed          map[string]tokenRecord
-	pending              map[string]pendingAuth
-	codes                map[string]authCode
-	users                map[string]User
-	usernames            map[string]string
-	devices              map[string]string
-	disabledDevices      map[string]bool
-	deviceRecords        map[string]DeviceRecord
-	sessions             map[string]sessionRecord
-	passwordSlots        chan struct{}
-	stateFile            string
-	registrationEnabled  bool
-	dcrEnabled           bool
-	mcpEnabled           bool
-	agentEnabled         bool
-	killSwitch           bool
-	trustedProxies       []*net.IPNet
-	rateMu               sync.Mutex
-	rates                map[string]rateWindow
-	setupTokenHash       string
-	setupTokenPath       string
-	securityEvents       []SecurityEvent
-	statusProvider       func() map[string]DeviceStatus
-	agentSessionResetter func(device string)
-	startedAt            time.Time
+	cfg                     Config
+	base                    *url.URL
+	mu                      sync.Mutex
+	clients                 map[string]Client
+	access                  map[string]tokenRecord
+	refresh                 map[string]tokenRecord
+	refreshUsed             map[string]tokenRecord
+	pending                 map[string]pendingAuth
+	codes                   map[string]authCode
+	users                   map[string]User
+	usernames               map[string]string
+	devices                 map[string]string
+	disabledDevices         map[string]bool
+	deviceRecords           map[string]DeviceRecord
+	sessions                map[string]sessionRecord
+	passwordSlots           chan struct{}
+	stateFile               string
+	registrationEnabled     bool
+	dcrEnabled              bool
+	mcpEnabled              bool
+	agentEnabled            bool
+	killSwitch              bool
+	trustedProxies          []*net.IPNet
+	rateMu                  sync.Mutex
+	rates                   map[string]rateWindow
+	registrationProofNonces map[string]map[string]int64
+	agentProofNonces        map[string]map[string]int64
+	setupTokenHash          string
+	setupTokenPath          string
+	securityEvents          []SecurityEvent
+	statusProvider          func() map[string]DeviceStatus
+	agentSessionResetter    func(device string)
+	startedAt               time.Time
 	// persistenceFault is a fail-closed latch. Once authorization state cannot
 	// be durably written, MCP/Agent access remains frozen until process restart
 	// and a clean state load. Availability is preferred over stale authorization.
@@ -293,7 +304,7 @@ func New(cfg Config) (*Server, error) {
 		registrationEnabled: mode == ModePublic && !cfg.RegistrationDisabled,
 		dcrEnabled:          true,
 		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
-		rates: make(map[string]rateWindow), setupTokenPath: cfg.SetupTokenPath,
+		rates: make(map[string]rateWindow), registrationProofNonces: make(map[string]map[string]int64), agentProofNonces: make(map[string]map[string]int64), setupTokenPath: cfg.SetupTokenPath,
 		startedAt: time.Now(),
 	}
 	if cfg.SetupToken != "" {
@@ -413,6 +424,27 @@ func canonicalizeRouteMap[V any](values map[string]V) (map[string]V, error) {
 
 func (s *Server) canonicalizeDiskState(state *diskState) error {
 	var err error
+	for clientID, client := range state.Clients {
+		hasDeviceIdentity := client.DeviceID != "" || client.DevicePublicKey != "" || client.DeviceKeyVerified
+		if !hasDeviceIdentity {
+			continue
+		}
+		canonicalID, ok := protocol.NormalizeDeviceID(client.DeviceID)
+		if !ok || client.DevicePublicKey == "" || !client.DeviceKeyVerified {
+			return fmt.Errorf("persisted OAuth client %s has incomplete device proof state", shortHandle(clientID))
+		}
+		pub, err := deviceidentity.DecodePublicKey(client.DevicePublicKey)
+		if err != nil {
+			return fmt.Errorf("persisted OAuth client %s has invalid device public key", shortHandle(clientID))
+		}
+		derivedID, _ := deviceidentity.IDFromPublicKey(pub)
+		if derivedID != canonicalID {
+			return fmt.Errorf("persisted OAuth client %s device key does not match device ID", shortHandle(clientID))
+		}
+		client.DeviceID = canonicalID
+		client.DevicePublicKey = deviceidentity.EncodePublicKey(pub)
+		state.Clients[clientID] = client
+	}
 	state.Devices, err = canonicalizeRouteMap(state.Devices)
 	if err != nil {
 		return err
@@ -428,7 +460,21 @@ func (s *Server) canonicalizeDiskState(state *diskState) error {
 	for route, record := range state.DeviceRecords {
 		if strings.HasPrefix(route, "id/") {
 			record.ID = strings.TrimPrefix(route, "id/")
+			if record.DevicePublicKey != "" {
+				pub, err := deviceidentity.DecodePublicKey(record.DevicePublicKey)
+				if err != nil {
+					return fmt.Errorf("persisted device %q has invalid public key", route)
+				}
+				derivedID, _ := deviceidentity.IDFromPublicKey(pub)
+				if derivedID != record.ID {
+					return fmt.Errorf("persisted device %q public key does not match immutable ID", route)
+				}
+				record.DevicePublicKey = deviceidentity.EncodePublicKey(pub)
+			}
 		} else if record.ID != "" {
+			if record.DevicePublicKey != "" {
+				return fmt.Errorf("legacy device route %q must not carry an immutable device public key", route)
+			}
 			id, ok := protocol.NormalizeDeviceID(record.ID)
 			if !ok {
 				return fmt.Errorf("invalid persisted immutable device ID %q for route %q", record.ID, route)
@@ -744,6 +790,11 @@ type registrationRequest struct {
 	ResponseTypes           []string `json:"response_types,omitempty"`
 	ClientName              string   `json:"client_name,omitempty"`
 	Scope                   string   `json:"scope,omitempty"`
+	DeviceID                string   `json:"chat_with_cli_device_id,omitempty"`
+	DevicePublicKey         string   `json:"chat_with_cli_device_public_key,omitempty"`
+	DeviceProofTimestamp    int64    `json:"chat_with_cli_device_proof_timestamp,omitempty"`
+	DeviceProofNonce        string   `json:"chat_with_cli_device_proof_nonce,omitempty"`
+	DeviceProof             string   `json:"chat_with_cli_device_proof,omitempty"`
 }
 
 func contains(values []string, want string) bool {
@@ -792,6 +843,38 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "only token_endpoint_auth_method=none is supported"})
 		return
 	}
+	deviceID := strings.TrimSpace(req.DeviceID)
+	devicePublicKey := strings.TrimSpace(req.DevicePublicKey)
+	deviceProofNonce := strings.TrimSpace(req.DeviceProofNonce)
+	deviceProof := strings.TrimSpace(req.DeviceProof)
+	deviceKeyVerified := false
+	hasDeviceProofFields := deviceID != "" || devicePublicKey != "" || req.DeviceProofTimestamp != 0 || deviceProofNonce != "" || deviceProof != ""
+	if hasDeviceProofFields {
+		if deviceID == "" || devicePublicKey == "" || req.DeviceProofTimestamp == 0 || len(deviceProofNonce) < 16 || len(deviceProofNonce) > 128 || deviceProof == "" || len(req.RedirectURIs) != 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "incomplete Agent device proof metadata"})
+			return
+		}
+		canonicalID, ok := protocol.NormalizeDeviceID(deviceID)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "invalid Agent device ID"})
+			return
+		}
+		pub, err := deviceidentity.DecodePublicKey(devicePublicKey)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "chat_with_cli_device_public_key must be an Ed25519 public key"})
+			return
+		}
+		derivedID, _ := deviceidentity.IDFromPublicKey(pub)
+		now := time.Now().UTC()
+		proofTime := time.Unix(req.DeviceProofTimestamp, 0)
+		if canonicalID != derivedID || proofTime.Before(now.Add(-proofClockSkew)) || proofTime.After(now.Add(proofClockSkew)) || !deviceidentity.VerifyRegistrationProof(pub, canonicalID, strings.TrimSpace(req.ClientName), req.RedirectURIs[0], req.DeviceProofTimestamp, deviceProofNonce, deviceProof) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "invalid Agent device proof"})
+			return
+		}
+		deviceID = canonicalID
+		devicePublicKey = deviceidentity.EncodePublicKey(pub)
+		deviceKeyVerified = true
+	}
 	if len(req.ResponseTypes) > 0 && !contains(req.ResponseTypes, "code") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "response_types must include code"})
 		return
@@ -818,8 +901,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(s.clients, oldestID)
 	}
+	if deviceKeyVerified {
+		if !s.consumeRegistrationProofNonceLocked(deviceID, deviceProofNonce, time.Now().UTC()) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "Agent device proof was already used"})
+			return
+		}
+	}
 	clientID := randomToken(24)
-	client := Client{ID: clientID, Name: strings.TrimSpace(req.ClientName), RedirectURIs: append([]string(nil), req.RedirectURIs...), IssuedAt: time.Now().Unix()}
+	client := Client{ID: clientID, Name: strings.TrimSpace(req.ClientName), RedirectURIs: append([]string(nil), req.RedirectURIs...), DeviceID: deviceID, DevicePublicKey: devicePublicKey, DeviceKeyVerified: deviceKeyVerified, IssuedAt: time.Now().Unix()}
 	s.clients[clientID] = client
 	if err := s.saveLocked(); err != nil {
 		delete(s.clients, clientID)
@@ -829,7 +918,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id": clientID, "client_id_issued_at": client.IssuedAt, "client_name": client.Name,
 		"redirect_uris": client.RedirectURIs, "token_endpoint_auth_method": "none",
-		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
+		"chat_with_cli_device_id":           client.DeviceID,
+		"chat_with_cli_device_public_key":   client.DevicePublicKey,
+		"chat_with_cli_device_key_verified": client.DeviceKeyVerified,
+		"grant_types":                       []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
 		"scope": "mcp agent:connect offline_access",
 	})
 }
@@ -1012,8 +1104,9 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 
 var authorizationTemplate = template.Must(template.New("authorization").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authorize chat-with-cli</title><style>body{font:16px system-ui;max-width:620px;margin:6vh auto;padding:24px}input,button{font:inherit;padding:10px;width:100%;box-sizing:border-box}button{margin-top:12px}.meta,form{background:#f3f3f3;padding:14px;border-radius:8px;margin-top:14px}.secondary{background:#fafafa}</style></head><body>
-<h1>Authorize chat-with-cli</h1><div class="meta"><b>Client:</b> {{.Client}}<br><b>Resource:</b> {{.Resource}}<br><b>Scope:</b> {{.Scope}}</div>
+<title>Authorize chat-with-cli</title><style>:root{color-scheme:light dark}body{font:16px system-ui;max-width:620px;margin:6vh auto;padding:24px;line-height:1.5}input,button{font:inherit;padding:10px;width:100%;box-sizing:border-box}button{margin-top:12px}.meta,form,.identity{border:1px solid #8885;background:#8881;padding:14px;border-radius:10px;margin-top:14px}.secondary{background:#8881}.verified{border-color:#18803888;background:#18803814}.warning{border-color:#b8860b88;background:#b8860b14}.muted{color:#777}code{overflow-wrap:anywhere}</style></head><body>
+<h1>Authorize chat-with-cli</h1><div class="meta"><b>Client:</b> {{.Client}}<br><b>Resource:</b> <code>{{.Resource}}</code><br><b>Scope:</b> {{.Scope}}</div>
+{{if .VerifiedDevice}}<div class="identity verified"><b>Verified device identity</b><br>This Agent proved possession of the Ed25519 private key for device <code>{{.DeviceID}}</code>. The Relay will require a fresh signed proof on every Agent connection.</div>{{else if .AgentDevice}}<div class="identity warning"><b>Legacy unbound Agent</b><br>This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.</div>{{end}}
 {{if .LoggedIn}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><p>Signed in as <b>{{.Username}}</b>.</p><button name="decision" value="allow" type="submit">Authorize</button><button name="decision" value="deny" type="submit">Deny</button><button name="decision" value="logout" type="submit">Sign out</button></form>
 {{else}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Sign in</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="current-password" placeholder="Password" required><button name="decision" value="login" type="submit">Sign in and authorize</button></form>
 {{if .Public}}<form class="secondary" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Create account</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="new-password" placeholder="Password (12+ characters)" minlength="12" required><button name="decision" value="register" type="submit">Register and authorize</button></form>{{end}}{{end}}
@@ -1028,6 +1121,13 @@ func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID st
 	if name == "" {
 		name = client.ID
 	}
+	kind, route, _, resourceOK := s.resourceParts(resource)
+	agentDevice := resourceOK && kind == "agent" && strings.HasPrefix(route, "id/")
+	verifiedDevice := agentDevice && client.DeviceKeyVerified && client.DeviceID == strings.TrimPrefix(route, "id/") && client.DevicePublicKey != ""
+	deviceID := ""
+	if agentDevice {
+		deviceID = strings.TrimPrefix(route, "id/")
+	}
 	s.mu.Lock()
 	publicRegistration := s.cfg.Mode == ModePublic && s.registrationEnabled
 	s.mu.Unlock()
@@ -1036,6 +1136,7 @@ func (s *Server) renderAuthorizationWithCSRF(w http.ResponseWriter, requestID st
 	_ = authorizationTemplate.Execute(w, map[string]any{
 		"RequestID": requestID, "Client": name, "Resource": resource, "Scope": scope,
 		"CSRFToken": csrfToken, "LoggedIn": loggedIn, "Username": user.Username, "Public": publicRegistration,
+		"AgentDevice": agentDevice, "VerifiedDevice": verifiedDevice, "DeviceID": deviceID,
 	})
 }
 
@@ -1183,10 +1284,56 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) authorizeResourceLocked(userID, resource string) error {
+func (s *Server) validateAgentDeviceKeyLocked(clientID, resource string) (string, error) {
+	kind, device, _, ok := s.resourceParts(resource)
+	if !ok || kind != "agent" || !strings.HasPrefix(device, "id/") {
+		return "", nil
+	}
+	id, ok := protocol.NormalizeDeviceID(strings.TrimPrefix(device, "id/"))
+	if !ok {
+		return "", errors.New("invalid immutable device ID")
+	}
+	client := s.clients[clientID]
+	record := s.deviceRecords[device]
+	owner := s.devices[device]
+	encoded := strings.TrimSpace(client.DevicePublicKey)
+	if encoded != "" && (!client.DeviceKeyVerified || client.DeviceID != id) {
+		return "", errors.New("Agent OAuth client did not prove possession of the device identity during registration")
+	}
+	if encoded == "" {
+		if owner == "" {
+			return "", errors.New("new immutable devices require an Ed25519 device identity; rerun agent setup/login with a current client")
+		}
+		if record.DevicePublicKey != "" {
+			return "", errors.New("this device is bound to an Ed25519 identity; the authorizing Agent client did not prove that identity")
+		}
+		// Compatibility for already-owned alpha devices. They remain visibly
+		// unbound until the owner reauthorizes with a current Agent client.
+		return "", nil
+	}
+	pub, err := deviceidentity.DecodePublicKey(encoded)
+	if err != nil {
+		return "", errors.New("invalid Agent device public key")
+	}
+	derived, err := deviceidentity.IDFromPublicKey(pub)
+	if err != nil || derived != id {
+		return "", errors.New("Agent device public key does not match the immutable device ID")
+	}
+	normalized := deviceidentity.EncodePublicKey(pub)
+	if record.DevicePublicKey != "" && record.DevicePublicKey != normalized {
+		return "", errors.New("this device is already bound to a different cryptographic identity")
+	}
+	return normalized, nil
+}
+
+func (s *Server) authorizeResourceLocked(userID, clientID, resource string) error {
 	kind, device, _, ok := s.resourceParts(resource)
 	if !ok {
 		return errors.New("invalid authorization resource")
+	}
+	devicePublicKey, err := s.validateAgentDeviceKeyLocked(clientID, resource)
+	if err != nil {
+		return err
 	}
 	if s.users[userID].ID == "" {
 		return errors.New("unknown authorization user")
@@ -1222,11 +1369,19 @@ func (s *Server) authorizeResourceLocked(userID, resource string) error {
 			s.devices[device] = userID
 			record = s.ensureDeviceRecordLocked(device, userID)
 			record.OwnerID = userID
+			if devicePublicKey != "" {
+				record.DevicePublicKey = devicePublicKey
+			}
 			s.deviceRecords[device] = record
 			return nil
 		}
 		if owner != userID {
 			return errors.New("this device name belongs to another account")
+		}
+		if devicePublicKey != "" {
+			record := s.ensureDeviceRecordLocked(device, userID)
+			record.DevicePublicKey = devicePublicKey
+			s.deviceRecords[device] = record
 		}
 		return nil
 	}
@@ -1256,7 +1411,7 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 		return errors.New("authorization request expired")
 	}
 	snapshot := s.snapshotMutableStateLocked()
-	if err := s.authorizeResourceLocked(userID, pending.Resource); err != nil {
+	if err := s.authorizeResourceLocked(userID, pending.ClientID, pending.Resource); err != nil {
 		return err
 	}
 	if kind, device, _, ok := s.resourceParts(pending.Resource); ok && kind == "agent" {
@@ -1596,6 +1751,84 @@ func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
 	return true
 }
 
+func (s *Server) consumeRegistrationProofNonceLocked(device, nonce string, now time.Time) bool {
+	bucket := s.registrationProofNonces[device]
+	if bucket == nil {
+		bucket = make(map[string]int64)
+		s.registrationProofNonces[device] = bucket
+	}
+	nowUnix := now.Unix()
+	for candidate, expires := range bucket {
+		if expires <= nowUnix {
+			delete(bucket, candidate)
+		}
+	}
+	if _, replay := bucket[nonce]; replay || len(bucket) >= maxRegistrationProofNoncesDevice {
+		return false
+	}
+	bucket[nonce] = now.Add(2 * proofClockSkew).Unix()
+	return true
+}
+
+func (s *Server) consumeAgentProofNonceLocked(device, nonce string, now time.Time) bool {
+	bucket := s.agentProofNonces[device]
+	if bucket == nil {
+		bucket = make(map[string]int64)
+		s.agentProofNonces[device] = bucket
+	}
+	nowUnix := now.Unix()
+	for candidate, expires := range bucket {
+		if expires <= nowUnix {
+			delete(bucket, candidate)
+		}
+	}
+	if _, replay := bucket[nonce]; replay || len(bucket) >= maxAgentProofNoncesDevice {
+		return false
+	}
+	bucket[nonce] = now.Add(2 * proofClockSkew).Unix()
+	return true
+}
+
+func (s *Server) verifyAgentDeviceProof(r *http.Request, resource, credentialHash string) bool {
+	_, device, _, ok := s.resourceParts(resource)
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	record := s.deviceRecords[device]
+	encodedPublicKey := record.DevicePublicKey
+	s.mu.Unlock()
+	if encodedPublicKey == "" {
+		// Compatibility-only path for an already-owned alpha device that has not
+		// yet been reauthorized with a cryptographic device identity.
+		return true
+	}
+	pub, err := deviceidentity.DecodePublicKey(encodedPublicKey)
+	if err != nil {
+		return false
+	}
+	timestamp, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get(deviceidentity.HeaderTimestamp)), 10, 64)
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	proofTime := time.Unix(timestamp, 0)
+	if proofTime.Before(now.Add(-proofClockSkew)) || proofTime.After(now.Add(proofClockSkew)) {
+		return false
+	}
+	nonce := strings.TrimSpace(r.Header.Get(deviceidentity.HeaderNonce))
+	if len(nonce) < 16 || len(nonce) > 128 {
+		return false
+	}
+	proof := strings.TrimSpace(r.Header.Get(deviceidentity.HeaderProof))
+	if !deviceidentity.VerifyProof(pub, resource, credentialHash, timestamp, nonce, proof) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.consumeAgentProofNonceLocked(device, nonce, now)
+}
+
 func (s *Server) ProtectResource(next http.Handler) http.Handler {
 	return s.ProtectScopedResource("mcp", next)
 }
@@ -1617,6 +1850,11 @@ func (s *Server) ProtectScopedResource(requiredScope string, next http.Handler) 
 		token := bearerValue(r.Header.Get("Authorization"))
 		if s.VerifyAccessScope(token, resource, requiredScope) {
 			credentialHash := tokenKey(token)
+			if requiredScope == "agent:connect" && !s.verifyAgentDeviceProof(r, resource, credentialHash) {
+				w.Header().Set("Cache-Control", "no-store")
+				http.Error(w, "device proof required or invalid", http.StatusUnauthorized)
+				return
+			}
 			checker := func() bool { return s.verifyAccessKey(credentialHash, resource, requiredScope) }
 			ctx, cancel := context.WithCancel(authzctx.WithChecker(r.Context(), checker))
 			defer cancel()

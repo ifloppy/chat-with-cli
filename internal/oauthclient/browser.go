@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 )
 
 type callbackResult struct {
@@ -56,13 +58,30 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 	}
 	defer ln.Close()
 	redirect := "http://" + ln.Addr().String() + "/callback"
+	clientName := "chat-with-cli agent " + m.Device
 	regBody := map[string]any{
 		"redirect_uris":              []string{redirect},
 		"token_endpoint_auth_method": "none",
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
-		"client_name":                "chat-with-cli agent " + m.Device,
+		"client_name":                clientName,
 		"scope":                      "agent:connect offline_access",
+	}
+	if m.DeviceIdentity != nil {
+		nonce, err := deviceidentity.NewNonce()
+		if err != nil {
+			return Credential{}, fmt.Errorf("generate device registration nonce: %w", err)
+		}
+		now := time.Now().UTC()
+		proof, err := m.DeviceIdentity.SignRegistrationProof(clientName, redirect, now, nonce)
+		if err != nil {
+			return Credential{}, fmt.Errorf("sign device registration proof: %w", err)
+		}
+		regBody["chat_with_cli_device_id"] = m.DeviceIdentity.ID()
+		regBody["chat_with_cli_device_public_key"] = deviceidentity.EncodePublicKey(m.DeviceIdentity.PublicKey())
+		regBody["chat_with_cli_device_proof_timestamp"] = now.Unix()
+		regBody["chat_with_cli_device_proof_nonce"] = nonce
+		regBody["chat_with_cli_device_proof"] = proof
 	}
 	var reg registrationResponse
 	if err := postJSON(ctx, client, registrationEndpoint, regBody, &reg); err != nil {

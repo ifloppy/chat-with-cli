@@ -53,12 +53,19 @@ advisory lock. Remote Relay origins must use HTTPS/WSS (loopback HTTP is
 allowed for local development), and active Agent WebSockets revalidate their
 credential before every brokered RPC.
 
-`agent setup` stores the immutable device ID and Relay URL in the config, so a
-normal first login is simply `chat-with-cli login`. Explicit CLI overrides are
-still supported. Immutable IDs are normalized to one lowercase canonical form
-across OAuth, Relay routes, Agent WebSockets, and the credential store. Keep the
-credential file private even though the human-readable device name is only a
-label.
+`agent setup` also creates a 0600 Ed25519 identity file and stores its path in
+the config. The immutable device ID is derived from that public key rather than
+chosen independently. A normal first login is simply `chat-with-cli login`;
+the Agent proves possession of the private key during DCR and on every later
+WebSocket connection. The Relay binds the verified public key to the device.
+A stolen Agent OAuth bearer alone is insufficient to impersonate a PoP-bound
+device.
+
+Immutable IDs are normalized to one lowercase canonical form across OAuth,
+Relay routes, Agent WebSockets, and the credential store. Protect both the
+identity private key and credential file. `chat-with-cli status` and `doctor`
+check identity-file permissions and ID/key consistency without printing key
+material.
 
 When the authenticated Relay session is revoked or disconnected, the Agent
 ends that remote session: in-flight calls are canceled, detached PTY tasks are

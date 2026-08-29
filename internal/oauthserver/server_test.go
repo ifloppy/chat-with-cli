@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/relay"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -390,33 +392,40 @@ func TestPublicDeviceOwnershipIsIsolated(t *testing.T) {
 		s.mu.Unlock()
 		t.Fatal(err)
 	}
-	if err := s.authorizeResourceLocked(alice.ID, s.absolute("/agent/id/33333333333333333333333333333333")); err != nil {
+	identity, err := deviceidentity.Generate()
+	if err != nil {
 		s.mu.Unlock()
 		t.Fatal(err)
 	}
-	if err := s.authorizeResourceLocked(alice.ID, s.absolute("/mcp/id/33333333333333333333333333333333")); err != nil {
+	id := identity.ID()
+	resourceAgent := s.absolute("/agent/id/" + id)
+	resourceMCP := s.absolute("/mcp/id/" + id)
+	s.clients["client-a"] = Client{ID: "client-a", DeviceID: id, DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true, Approved: true}
+	if err := s.authorizeResourceLocked(alice.ID, "client-a", resourceAgent); err != nil {
 		s.mu.Unlock()
 		t.Fatal(err)
 	}
-	if err := s.authorizeResourceLocked(bob.ID, s.absolute("/agent/id/33333333333333333333333333333333")); err == nil {
+	if err := s.authorizeResourceLocked(alice.ID, "client-a", resourceMCP); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	if err := s.authorizeResourceLocked(bob.ID, "client-a", resourceAgent); err == nil {
 		s.mu.Unlock()
 		t.Fatal("bob unexpectedly claimed alice device")
 	}
-	if err := s.authorizeResourceLocked(bob.ID, s.absolute("/mcp/id/33333333333333333333333333333333")); err == nil {
+	if err := s.authorizeResourceLocked(bob.ID, "client-a", resourceMCP); err == nil {
 		s.mu.Unlock()
 		t.Fatal("bob unexpectedly authorized alice MCP resource")
 	}
-	s.clients["client-a"] = Client{ID: "client-a", Approved: true}
-	access, _, _, err := s.issueTokensLocked("client-a", alice.ID,
-		s.absolute("/agent/id/33333333333333333333333333333333"), "agent:connect offline_access")
+	access, _, _, err := s.issueTokensLocked("client-a", alice.ID, resourceAgent, "agent:connect offline_access")
 	s.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.VerifyAccessScope(access, s.absolute("/agent/id/33333333333333333333333333333333"), "agent:connect") {
+	if !s.VerifyAccessScope(access, resourceAgent, "agent:connect") {
 		t.Fatal("alice agent token did not authorize its resource")
 	}
-	if s.VerifyAccessScope(access, s.absolute("/agent/id/33333333333333333333333333333333"), "mcp") {
+	if s.VerifyAccessScope(access, resourceAgent, "mcp") {
 		t.Fatal("agent token unexpectedly has MCP scope")
 	}
 }
@@ -537,14 +546,19 @@ func TestImmutableDeviceResourceRouteIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := "0123456789abcdef0123456789abcdef"
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := identity.ID()
 	kind, route, canonical, ok := s.resourceParts(s.absolute("/agent/id/" + id))
 	if !ok || kind != "agent" || route != "id/"+id || canonical != s.absolute("/agent/id/"+id) {
 		t.Fatalf("unexpected immutable resource parts: %q %q %q %v", kind, route, canonical, ok)
 	}
 	s.mu.Lock()
 	ownerID := s.usernames["owner"]
-	if err := s.authorizeResourceLocked(ownerID, canonical); err != nil {
+	s.clients["device-id-client"] = Client{ID: "device-id-client", DeviceID: id, DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	if err := s.authorizeResourceLocked(ownerID, "device-id-client", canonical); err != nil {
 		s.mu.Unlock()
 		t.Fatal(err)
 	}
@@ -560,11 +574,15 @@ func TestAgentAuthorizationUsesSafeClientNameAsInitialDisplayLabel(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const id = "41414141414141414141414141414141"
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := identity.ID()
 	route := "id/" + id
 	s.mu.Lock()
 	ownerID := s.usernames["owner"]
-	s.clients["agent-hint-client"] = Client{ID: "agent-hint-client", Name: "chat-with-cli agent 工作站 · 上海", Approved: false}
+	s.clients["agent-hint-client"] = Client{ID: "agent-hint-client", Name: "chat-with-cli agent 工作站 · 上海", DeviceID: id, DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true, Approved: false}
 	s.pending["agent-hint-request"] = pendingAuth{ClientID: "agent-hint-client", RedirectURI: "http://127.0.0.1:43201/callback", Resource: s.absolute("/agent/id/" + id), Scope: "agent:connect offline_access", Expires: time.Now().Add(time.Minute)}
 	s.mu.Unlock()
 	rr := httptest.NewRecorder()
@@ -1454,18 +1472,24 @@ func TestPublicFirstClaimRequiresImmutableDeviceID(t *testing.T) {
 		s.mu.Unlock()
 		t.Fatal(err)
 	}
-	if err := s.authorizeResourceLocked(alice.ID, s.absolute("/agent/predictable-hostname")); err == nil {
+	if err := s.authorizeResourceLocked(alice.ID, "", s.absolute("/agent/predictable-hostname")); err == nil {
 		s.mu.Unlock()
 		t.Fatal("public user claimed a new predictable legacy device name")
 	}
-	const id = "cccccccccccccccccccccccccccccccc"
-	if err := s.authorizeResourceLocked(alice.ID, s.absolute("/agent/id/"+id)); err != nil {
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	id := identity.ID()
+	s.clients["claim-client"] = Client{ID: "claim-client", DeviceID: id, DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true}
+	if err := s.authorizeResourceLocked(alice.ID, "claim-client", s.absolute("/agent/id/"+id)); err != nil {
 		s.mu.Unlock()
 		t.Fatalf("immutable device ID claim failed: %v", err)
 	}
 	// Existing legacy routes remain usable for migration/compatibility.
 	s.devices["old-alpha-device"] = alice.ID
-	if err := s.authorizeResourceLocked(alice.ID, s.absolute("/agent/old-alpha-device")); err != nil {
+	if err := s.authorizeResourceLocked(alice.ID, "", s.absolute("/agent/old-alpha-device")); err != nil {
 		s.mu.Unlock()
 		t.Fatalf("existing legacy route stopped working: %v", err)
 	}
@@ -1926,5 +1950,309 @@ func TestRefreshRequiresExactResource(t *testing.T) {
 		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_grant") {
 			t.Fatalf("resource=%q status=%d body=%s", badResource, rr.Code, rr.Body.String())
 		}
+	}
+}
+
+func TestImmutableDeviceClaimRequiresMatchingEd25519Key(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19040", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	good, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := s.absolute("/agent/id/" + good.ID())
+	s.mu.Lock()
+	user, err := s.createUserLocked("device-key-user", "device-key-user-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.clients["no-key"] = Client{ID: "no-key"}
+	if err := s.authorizeResourceLocked(user.ID, "no-key", resource); err == nil {
+		s.mu.Unlock()
+		t.Fatal("new immutable device was claimed without a device public key")
+	}
+	s.clients["wrong-key"] = Client{ID: "wrong-key", DeviceID: wrong.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(wrong.PublicKey()), DeviceKeyVerified: true}
+	if err := s.authorizeResourceLocked(user.ID, "wrong-key", resource); err == nil {
+		s.mu.Unlock()
+		t.Fatal("new immutable device was claimed with a mismatched device public key")
+	}
+	s.clients["good-key"] = Client{ID: "good-key", DeviceID: good.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(good.PublicKey()), DeviceKeyVerified: true}
+	if err := s.authorizeResourceLocked(user.ID, "good-key", resource); err != nil {
+		s.mu.Unlock()
+		t.Fatalf("matching device key claim failed: %v", err)
+	}
+	record := s.deviceRecords["id/"+good.ID()]
+	if record.DevicePublicKey != deviceidentity.EncodePublicKey(good.PublicKey()) {
+		s.mu.Unlock()
+		t.Fatalf("device key was not bound: %+v", record)
+	}
+	// Even the same owner cannot silently replace the device cryptographic
+	// identity with another key.
+	if err := s.authorizeResourceLocked(user.ID, "wrong-key", resource); err == nil {
+		s.mu.Unlock()
+		t.Fatal("existing device identity was silently rebound")
+	}
+	s.mu.Unlock()
+}
+
+func TestBoundAgentRequiresProofOfPossessionAndRejectsReplay(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19041", Password: "device-proof-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := s.absolute("/agent/id/" + identity.ID())
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.clients["proof-client"] = Client{ID: "proof-client", DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true, Approved: true}
+	if err := s.authorizeResourceLocked(ownerID, "proof-client", resource); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	access, _, _, err := s.issueTokensLocked("proof-client", ownerID, resource, "agent:connect offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := s.ProtectScopedResource("agent:connect", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := func(id *deviceidentity.Identity, now time.Time, nonce string) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, resource, nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		if id != nil {
+			proof, err := id.SignProof(resource, access, now, nonce)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(deviceidentity.HeaderTimestamp, fmt.Sprintf("%d", now.Unix()))
+			req.Header.Set(deviceidentity.HeaderNonce, nonce)
+			req.Header.Set(deviceidentity.HeaderProof, proof)
+		}
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if got := request(nil, time.Now(), ""); got != http.StatusUnauthorized {
+		t.Fatalf("bearer-only bound Agent status=%d want 401", got)
+	}
+	if got := request(wrong, time.Now(), "wrong-key-nonce-123456"); got != http.StatusUnauthorized {
+		t.Fatalf("wrong-key Agent proof status=%d want 401", got)
+	}
+	if got := request(identity, time.Now().Add(-10*time.Minute), "expired-proof-nonce-1"); got != http.StatusUnauthorized {
+		t.Fatalf("expired Agent proof status=%d want 401", got)
+	}
+	now := time.Now().UTC()
+	const nonce = "valid-proof-nonce-123456"
+	if got := request(identity, now, nonce); got != http.StatusNoContent {
+		t.Fatalf("valid Agent proof status=%d want 204", got)
+	}
+	if got := request(identity, now, nonce); got != http.StatusUnauthorized {
+		t.Fatalf("replayed Agent proof status=%d want 401", got)
+	}
+	if got := request(identity, time.Now().UTC(), "fresh-proof-nonce-654321"); got != http.StatusNoContent {
+		t.Fatalf("fresh Agent proof status=%d want 204", got)
+	}
+}
+
+func TestAgentDCRProofRequiresPrivateKeyAndRejectsReplay(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19042", Password: "dcr-proof-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const redirect = "http://127.0.0.1:43123/callback"
+	const clientName = "chat-with-cli agent proof-workstation"
+	now := time.Now().UTC()
+	nonce := "registration-proof-nonce-123456"
+	proof, err := identity.SignRegistrationProof(clientName, redirect, now, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validBody := map[string]any{
+		"redirect_uris":                        []string{redirect},
+		"token_endpoint_auth_method":           "none",
+		"grant_types":                          []string{"authorization_code", "refresh_token"},
+		"response_types":                       []string{"code"},
+		"client_name":                          clientName,
+		"scope":                                "agent:connect offline_access",
+		"chat_with_cli_device_id":              identity.ID(),
+		"chat_with_cli_device_public_key":      deviceidentity.EncodePublicKey(identity.PublicKey()),
+		"chat_with_cli_device_proof_timestamp": now.Unix(),
+		"chat_with_cli_device_proof_nonce":     nonce,
+		"chat_with_cli_device_proof":           proof,
+	}
+	register := func(body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(encoded))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.handleRegister(rr, req)
+		return rr
+	}
+	if rr := register(validBody); rr.Code != http.StatusCreated {
+		t.Fatalf("valid Agent DCR proof status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := register(validBody); rr.Code != http.StatusBadRequest {
+		t.Fatalf("replayed Agent DCR proof status=%d want 400 body=%s", rr.Code, rr.Body.String())
+	}
+
+	publicOnly := maps.Clone(validBody)
+	publicOnly["chat_with_cli_device_proof_nonce"] = ""
+	publicOnly["chat_with_cli_device_proof"] = ""
+	if rr := register(publicOnly); rr.Code != http.StatusBadRequest {
+		t.Fatalf("public-key-only DCR status=%d want 400 body=%s", rr.Code, rr.Body.String())
+	}
+
+	tamperedNonce := "tampered-proof-nonce-654321"
+	tampered := maps.Clone(validBody)
+	tampered["chat_with_cli_device_proof_nonce"] = tamperedNonce
+	// Reuse the signature from another nonce/client payload: signature must fail.
+	if rr := register(tampered); rr.Code != http.StatusBadRequest {
+		t.Fatalf("tampered Agent DCR proof status=%d want 400 body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPersistedProofStateRejectsMismatchedDeviceKeys(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19043", Password: "persisted-proof-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := diskState{
+		Clients: map[string]Client{
+			"verified-client": {
+				ID: "verified-client", DeviceID: identity.ID(),
+				DevicePublicKey: deviceidentity.EncodePublicKey(wrong.PublicKey()), DeviceKeyVerified: true,
+			},
+		},
+	}
+	if err := s.canonicalizeDiskState(&state); err == nil {
+		t.Fatal("persisted OAuth client with mismatched device key was accepted")
+	}
+
+	state = diskState{
+		DeviceRecords: map[string]DeviceRecord{
+			"id/" + identity.ID(): {
+				ID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(wrong.PublicKey()),
+			},
+		},
+	}
+	if err := s.canonicalizeDiskState(&state); err == nil {
+		t.Fatal("persisted device record with mismatched public key was accepted")
+	}
+}
+
+func TestPersistedProofStateRoundTripsWhenConsistent(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19044", Password: "persisted-proof-ok-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := deviceidentity.EncodePublicKey(identity.PublicKey())
+	state := diskState{
+		Clients: map[string]Client{
+			"verified-client": {
+				ID: "verified-client", DeviceID: strings.ToUpper(identity.ID()), DevicePublicKey: encoded, DeviceKeyVerified: true,
+			},
+		},
+		Devices: map[string]string{"id/" + strings.ToUpper(identity.ID()): "owner-id"},
+		DeviceRecords: map[string]DeviceRecord{
+			"id/" + strings.ToUpper(identity.ID()): {ID: strings.ToUpper(identity.ID()), OwnerID: "owner-id", DevicePublicKey: encoded},
+		},
+	}
+	if err := s.canonicalizeDiskState(&state); err != nil {
+		t.Fatal(err)
+	}
+	client := state.Clients["verified-client"]
+	if client.DeviceID != identity.ID() || client.DevicePublicKey != encoded || !client.DeviceKeyVerified {
+		t.Fatalf("client proof state was not canonicalized: %+v", client)
+	}
+	record, ok := state.DeviceRecords["id/"+identity.ID()]
+	if !ok || record.ID != identity.ID() || record.DevicePublicKey != encoded {
+		t.Fatalf("device proof state was not canonicalized: %+v ok=%v", record, ok)
+	}
+}
+
+func TestAuthorizationPageExplainsVerifiedDeviceIdentity(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19045", Password: "consent-proof-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := Client{
+		ID: "consent-client", Name: "chat-with-cli agent workstation", DeviceID: identity.ID(),
+		DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true,
+	}
+	rr := httptest.NewRecorder()
+	s.renderAuthorization(rr, "request", client, s.absolute("/agent/id/"+identity.ID()), "agent:connect offline_access", User{}, false)
+	body := rr.Body.String()
+	if !strings.Contains(body, "Verified device identity") || !strings.Contains(body, identity.ID()) || strings.Contains(body, client.DevicePublicKey) {
+		t.Fatalf("verified device consent page missing safe identity context or leaked public key: %s", body)
+	}
+}
+
+func TestProofNonceCapacityIsIsolatedPerDevice(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19120", Password: "nonce-isolation-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := 0; i < maxRegistrationProofNoncesDevice; i++ {
+		if !s.consumeRegistrationProofNonceLocked("alice", fmt.Sprintf("reg-%d", i), now) {
+			t.Fatalf("alice registration bucket filled early at %d", i)
+		}
+	}
+	if s.consumeRegistrationProofNonceLocked("alice", "overflow", now) {
+		t.Fatal("alice registration bucket exceeded per-device limit")
+	}
+	if !s.consumeRegistrationProofNonceLocked("bob", "fresh", now) {
+		t.Fatal("alice registration bucket blocked bob")
+	}
+	for i := 0; i < maxAgentProofNoncesDevice; i++ {
+		if !s.consumeAgentProofNonceLocked("alice", fmt.Sprintf("agent-%d", i), now) {
+			t.Fatalf("alice Agent bucket filled early at %d", i)
+		}
+	}
+	if !s.consumeAgentProofNonceLocked("bob", "fresh", now) {
+		t.Fatal("alice Agent bucket blocked bob")
 	}
 }
