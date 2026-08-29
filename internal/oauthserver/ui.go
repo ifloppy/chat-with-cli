@@ -303,7 +303,7 @@ const appJS = `
   const translations = {
     "zh-CN": {
       "Home": "首页", "Docs": "文档", "Documentation": "文档", "GitHub": "GitHub",
-      "Connect": "连接", "Connect a workstation": "连接工作站", "Connect my computer": "连接我的电脑",
+      "Connect": "连接", "Connect a computer": "连接电脑", "Connect a workstation": "连接工作站", "Connect my computer": "连接我的电脑",
       "Manage my account": "管理我的账户", "My account": "我的账户", "Operator admin": "管理员控制台",
       "Open admin console": "打开管理控制台", "Finish first-run setup": "完成首次设置",
       "Back to home": "返回首页", "Sign in": "登录", "Sign out": "退出登录", "Re-authenticate": "重新认证",
@@ -325,29 +325,34 @@ const appJS = `
       "Connect ChatGPT and other MCP clients to bounded filesystem, task, and optional Computer Use tools.": "把 ChatGPT 和其他 MCP 客户端连接到受限的文件系统、任务以及可选的 Computer Use 工具。",
       "The workstation Agent connects outward and reconnects automatically. The Relay never initiates a workstation connection.": "工作站 Agent 主动连接并自动重连；Relay 永远不会主动连接工作站。",
       "Read-only profiles, device-bound OAuth, local approvals, audit metadata, and an emergency kill switch keep authority legible.": "只读 profile、设备绑定 OAuth、本地审批、审计元数据和紧急停止开关，让权限边界清晰可见。",
-      "Relay": "Relay", "Security model": "安全模型", "Add a workstation": "添加工作站",
+      "Relay": "Relay", "Security model": "安全模型", "Add a workstation": "添加工作站", "public": "公共", "private": "私有", "public relay": "公共 Relay", "private relay": "私有 Relay",
       "Setup required": "需要设置", "Relay configured": "Relay 已配置", "authorization frozen": "授权已冻结",
       "ready": "就绪", "Version": "版本", "Instance": "实例", "Status": "状态",
       "Public Relay trust boundary": "公共 Relay 信任边界", "Public Relay warning": "公共 Relay 警告",
       "Do not trust a public Relay with sensitive access": "不要将敏感权限交给公共 Relay",
       "A public Relay isolates normal users from each other, but the operator controls the server code and can observe or alter MCP traffic.": "公共 Relay 可以隔离普通用户，但运营者控制服务器代码，可能观察或修改 MCP 流量。",
+      "A public Relay isolates normal users from each other, but the operator controls the server code and can observe or alter MCP traffic. This includes instances run by the software author. Self-host a private Relay when confidentiality or high-trust computer access matters.": "公共 Relay 可以隔离普通用户，但运营者控制服务器代码，可能观察或修改 MCP 流量。这也包括软件作者运营的实例。需要保密或高信任电脑访问时，请自建私有 Relay。",
       "Health endpoint": "健康检查端点", "Quick start": "快速开始", "Private Relay": "私有 Relay", "Public Relay": "公共 Relay",
       "Agent configuration": "Agent 配置", "Computer Use": "Computer Use", "Threat model": "威胁模型",
       "Reverse proxy": "反向代理", "Cloudflare": "Cloudflare", "User account": "用户账户", "Administration": "管理",
       "Troubleshooting": "故障排查", "Backup and restore": "备份与恢复", "Upgrade and rollback": "升级与回滚",
       "Self-host a private Relay with ChatGPT": "使用 ChatGPT 自建私有 Relay",
       "Get started": "开始使用", "Add a workstation in a few calm steps.": "用几个清晰步骤添加工作站。",
-      "A connection you can understand.": "一条可以理解的连接。", "Advertisement": "广告",
+      "A connection you can understand.": "一条可以理解的连接。", "Advertisement": "广告", "Primary navigation": "主导航", "MCP client connected through an outbound Relay to an Agent": "MCP 客户端通过主动外连 Relay 连接到 Agent", "Chat with CLI · Connect with confidence": "Chat with CLI · 自信连接", "Documentation · Chat with CLI": "文档 · Chat with CLI", "Set up Chat with CLI": "设置 Chat with CLI",
       "outbound · scoped · observable": "主动外连 · 有范围 · 可观测",
       "MCP tools, clearly annotated": "个 MCP 工具，清晰标注", "capabilities enabled by surprise": "项意外启用的能力", "small binary to install": "个小型二进制文件",
       "1. Create a safe local Agent config": "1. 创建安全的本地 Agent 配置", "Read-only is the default profile.": "默认 profile 是只读。",
-      "2. Connect interactively": "2. 交互式连接", "3. Connect your MCP client": "3. 连接 MCP 客户端",
+      "2. Connect interactively": "2. 交互式连接", "3. Connect your MCP client": "3. 连接 MCP 客户端", "Run": "运行", "Browser OAuth opens automatically when needed, then the local terminal asks how to approve temporary capabilities for this session.": "需要时会自动打开浏览器 OAuth，然后本地终端会询问如何批准本次会话的临时能力。",
       "No device inventory or host information is exposed on this public page.": "此公共页面不会暴露设备清单或主机信息。",
       "Keep the public Relay available": "一起保持公共 Relay 可用",
       "A companion app can verify a rewarded AdMob view and issue a short-lived, signed usage entitlement.": "伴侣应用可以验证激励式 AdMob 广告，并签发短期签名使用 entitlement。",
       "Open reward app": "打开奖励应用", "Open releases": "打开发行页", "Install documentation": "安装文档",
       "Self-hosting guide": "自托管指南", "Need a quick path?": "想快速开始？",
       "Start here when you are deploying a Relay, pairing a workstation, or connecting an MCP client.": "部署 Relay、配对工作站或连接 MCP 客户端时，可以从这里开始。",
+      "Connect a computer · Chat with CLI": "连接电脑 · Chat with CLI", "The installer verifies the release binary against SHA256SUMS and installs to": "安装程序会使用 SHA256SUMS 校验发行版二进制，并安装到",
+      "It does not start the Agent or use sudo. Review the script first if you prefer not to pipe network content to a shell.": "它不会启动 Agent，也不会使用 sudo。如果不想将网络内容通过管道传给 shell，请先审阅脚本。",
+      "Replace the root with the smallest workspace you want ChatGPT to read. The generated systemd unit is not started automatically.": "将 root 替换为你希望 ChatGPT 读取的最小工作区。生成的 systemd unit 不会自动启动。",
+      "OAuth opens automatically if needed.": "需要时会自动打开 OAuth。", "On an invite-only public instance, the OAuth page asks for the single-use invite during account creation. The Agent's immutable device ID is derived from its local Ed25519 key.": "在仅限邀请的公共实例上，OAuth 页面会在创建账户时要求单次邀请。Agent 的不可变设备 ID 源自本地 Ed25519 密钥。",
       "The binary ships with this navigation page. The complete, versioned operator documentation is maintained in the open-source project.": "二进制内置此导航页；完整且带版本的运营文档维护在开源项目中。",
       "Start and connect": "开始与连接", "Operate a Relay": "运营 Relay", "Safety and maintenance": "安全与维护",
       "ChatGPT / MCP": "ChatGPT / MCP", "Self-host with ChatGPT": "使用 ChatGPT 自托管", "Deployment": "部署",
@@ -392,8 +397,11 @@ const appJS = `
     return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en-US";
   }
   const legacyOriginals = new WeakMap();
+  const legacyAttributeOriginals = new WeakMap();
+  let legacyPageTitle = null;
   function translate() {
     const language = locale();
+    if (legacyPageTitle === null) legacyPageTitle = document.title;
     root.lang = language;
     const dictionary = translations[language] || {};
     document.querySelectorAll("[data-i18n]").forEach((element) => {
@@ -411,20 +419,72 @@ const appJS = `
       if (!element.dataset.i18nDefaultTitle) element.dataset.i18nDefaultTitle = element.title;
       element.title = dictionary[key] || element.dataset.i18nDefaultTitle;
     });
+    document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
+      const key = element.dataset.i18nAriaLabel;
+      if (!element.dataset.i18nDefaultAriaLabel) element.dataset.i18nDefaultAriaLabel = element.getAttribute("aria-label") || "";
+      element.setAttribute("aria-label", dictionary[key] || element.dataset.i18nDefaultAriaLabel);
+    });
     // Older account/admin/OAuth templates do not carry data attributes yet.
     // Translate only complete, non-code text nodes so commands, URLs, user
     // names, and security values can never be accidentally rewritten.
     const legacy = {
-      "Chat with CLI account": "Chat with CLI 账户", "Chat with CLI admin": "Chat with CLI 管理员",
-      "Sign in to manage devices, users, sessions, and emergency capability switches.": "登录以管理设备、用户、会话和紧急能力开关。",
+      "Account · Chat with CLI": "账户 · Chat with CLI", "Admin sign in · Chat with CLI": "管理员登录 · Chat with CLI",
+      "Admin · Chat with CLI": "管理员 · Chat with CLI", "Invite created · Chat with CLI": "邀请已创建 · Chat with CLI",
+      "Authorize chat-with-cli": "授权 chat-with-cli", "Chat with CLI account": "Chat with CLI 账户", "Chat with CLI admin": "Chat with CLI 管理员",
+      "Sign in to manage devices, users, sessions, and emergency capability switches.": "登录以管理设备、用户、会话和紧急能力开关。", "Sign in": "登录",
+      "Confirm it’s you": "请确认是你本人", "High-risk administration actions require a password check within the last 15 minutes. This refreshes only the current browser session.": "高风险管理操作需要在最近 15 分钟内完成密码验证；这只会刷新当前浏览器会话。",
+      "Password for": "账户密码：",
       "My Chat with CLI": "我的 Chat with CLI", "Signed in as": "当前登录：", "Home": "首页", "Docs": "文档",
       "Sign out": "退出登录", "My devices": "我的设备", "Connected authorizations": "已连接的授权",
       "Browser sessions": "浏览器会话", "Change password": "修改密码", "Rename": "重命名", "Enable": "启用", "Disable": "停用",
       "Revoke permanently": "永久撤销", "Revoke my authorization": "撤销我的授权", "Sign out all other sessions": "退出其他所有会话",
-      "Change password and revoke credentials": "修改密码并撤销凭据", "Authorize chat-with-cli": "授权 chat-with-cli",
+      "Change password and revoke credentials": "修改密码并撤销凭据",
       "Sign in and authorize": "登录并授权", "Invite created": "邀请已创建", "Return to admin": "返回管理控制台",
-      "Back to home": "返回首页", "Re-authenticate": "重新认证", "Cancel and return to admin": "取消并返回管理控制台"
+      "Back to home": "返回首页", "Re-authenticate": "重新认证", "Cancel and return to admin": "取消并返回管理控制台",
+      "Do not trust a public Relay with sensitive access.": "不要将敏感权限交给公共 Relay。",
+      "The operator controls the server code and can observe or alter MCP traffic. This service isolates users from each other, not from its operator. Self-host a private Relay for high-trust use.": "运营者控制服务器代码，可能观察或修改 MCP 流量。此服务只隔离用户之间的访问，不能隔离用户与运营者。需要高信任时，请自建私有 Relay。",
+      "Public Relay operator is trusted by design.": "公共 Relay 运营者属于信任边界。",
+      "This page can prove that other normal users are isolated from your devices. It cannot prove that the operator is harmless: the operator can run modified Relay code and observe or alter MCP traffic. Do not grant sensitive computer access to any public instance, including one operated by the software author; self-host when trust matters.": "此页面可以证明其他普通用户与你的设备相互隔离，但不能证明运营者没有恶意：运营者可以运行修改后的 Relay 代码，观察或修改 MCP 流量。不要把敏感电脑权限交给任何公共实例，包括软件作者运营的实例；信任重要时请自建 Relay。",
+      "Only devices owned by your account are shown. Disabling immediately revokes current device tokens; permanent revocation retires the cryptographic identity.": "这里只显示属于你账户的设备。停用会立即撤销当前设备令牌；永久撤销会废弃该加密身份。",
+      "No devices are owned by this account yet. Pair an Agent first.": "此账户还没有设备，请先配对 Agent。",
+      "These are your token families, not globally shared OAuth client registrations. Revoking one cannot revoke another user's access.": "这些是你的令牌族，不是全局共享的 OAuth 客户端注册。撤销一个令牌族不会影响其他用户的访问。",
+      "No active OAuth token families.": "没有活跃的 OAuth 令牌族。",
+      "Changing your password revokes all OAuth credentials and browser sessions for this account. Reconnect devices and apps afterward.": "修改密码会撤销此账户的所有 OAuth 凭据和浏览器会话；之后请重新连接设备和应用。",
+      "Device": "设备", "Status": "状态", "Capabilities": "能力", "MCP URL": "MCP URL", "Actions": "操作",
+      "Client": "客户端", "Resource": "资源", "Expires": "到期时间", "Action": "操作", "Session": "会话", "Created": "创建时间", "Last seen": "最后活动", "current": "当前",
+      "PoP bound": "已绑定 PoP", "legacy unbound": "旧版未绑定", "online": "在线", "offline": "离线", "disabled": "已停用", "last seen": "最后活动", "not reported": "未报告",
+      "filesystem read": "文件系统读取", "filesystem write": "文件系统写入", "exec": "执行", "screen read": "屏幕读取", "accessibility read": "辅助功能读取", "computer input": "电脑输入",
+      "new name": "新名称", "password to enable": "启用所需密码", "new password": "新密码", "current password": "当前密码", "REVOKE": "输入 REVOKE",
+      "Authorization is frozen": "授权已冻结", "The Relay detected an incomplete authorization-state transaction. MCP and Agent access remain fail-closed across restarts. Repair storage, repeat the intended revoke/disable action, and persist it successfully; recovery writes force the emergency kill switch on. Restart, verify the security state, then explicitly release the kill switch. Do not delete": "Relay 检测到未完成的授权状态事务。MCP 和 Agent 访问在重启后仍保持故障关闭。请修复存储，重新执行原本要做的撤销/停用操作并成功保存；恢复写入会强制开启紧急停止开关。重启并确认安全状态后，再明确释放停止开关。不要删除",
+      "Emergency kill switch is active": "紧急停止开关已开启", "MCP and Agent authorization is globally blocked. Releasing it requires recent administrator authentication.": "MCP 和 Agent 授权已被全局阻断；释放它需要近期的管理员认证。",
+      "Legacy bearer-only Agent migration mode is ENABLED": "旧版仅 bearer Agent 迁移模式已启用", "Unbound alpha Agents can connect using only an Agent bearer token. This weakens device impersonation resistance and must be used only long enough to migrate old devices to new Ed25519 identities, then disabled in the Relay configuration.": "未绑定的 alpha Agent 只凭 Agent bearer token 即可连接。这会降低设备冒充防护，只应使用到旧设备迁移到新的 Ed25519 身份为止，然后在 Relay 配置中关闭。",
+      "Public Relay trust boundary": "公共 Relay 信任边界", "This instance isolates users from each other, not users from the operator. An operator controls the server software and can modify it to observe or alter MCP traffic. Do not promise end-to-end privacy; sensitive users should self-host a private Relay.": "此实例只隔离用户之间的访问，不能隔离用户与运营者。运营者控制服务器软件，可以修改它来观察或修改 MCP 流量。不要承诺端到端隐私；敏感用户应自建私有 Relay。",
+      "online agents": "在线 Agent", "registered devices": "已注册设备", "retired identities": "已废弃身份", "users": "用户", "OAuth clients": "OAuth 客户端", "sessions": "会话",
+      "Security controls": "安全控制", "Registration:": "注册：", "DCR:": "DCR：", "MCP:": "MCP：", "Agent:": "Agent：", "Kill switch:": "停止开关：", "enabled": "已启用", "disabled": "已停用", "ACTIVE": "已开启",
+      "registration": "注册", "Release kill switch": "释放停止开关", "Emergency disable now": "立即紧急停用", "Invites": "邀请", "Single-use invites allow registration while open self-registration is disabled. Invite plaintext is shown once; only a one-way hash is persisted.": "关闭公开自助注册时，单次邀请仍可允许注册。邀请明文只显示一次，持久化的只有单向哈希。",
+      "Create 24-hour invite": "创建 24 小时邀请", "Handle": "句柄", "Uses": "剩余次数", "Created by": "创建者", "No active invites.": "没有活跃邀请。",
+      "Connect your first workstation": "连接你的第一台工作站", "No device is registered yet. Start with the read-only profile; nothing is started automatically.": "还没有注册设备。请从只读 profile 开始；任何服务都不会自动启动。",
+      "On the workstation": "在工作站上", "Connect the immutable device ID": "连接不可变设备 ID", "Review unattended mode separately": "单独审阅无人值守模式",
+      "Run": "运行", "Devices": "设备", "Display name": "显示名称", "Immutable ID / route": "不可变 ID / 路由", "Owner": "所有者", "Connection": "连接", "No devices have been claimed.": "还没有设备被认领。",
+      "Users": "用户", "Create user": "创建用户", "Username": "用户名", "Role / state": "角色 / 状态", "Created / last login": "创建时间 / 最后登录", "admin": "管理员", "active": "活跃", "never": "从未", "device(s)": "台设备", "Logout all": "全部退出", "Rotate password": "轮换密码", "Delete": "删除",
+      "Browser sessions ·": "浏览器会话 ·", "Session handles are one-way identifiers; browser cookie values are never displayed.": "会话句柄是单向标识符；浏览器 Cookie 值永远不会显示。", "Log out": "退出", "No active browser sessions.": "没有活跃的浏览器会话。",
+      "OAuth clients and token metadata ·": "OAuth 客户端和令牌元数据 ·", "Name / redirects": "名称 / 重定向地址", "No approved clients.": "没有已批准的客户端。", "active token records (metadata only; bearer values are never displayed).": "条活跃令牌记录（只有元数据，绝不显示 bearer 值）。", "Kind": "类型", "No active tokens.": "没有活跃令牌。", "Revoke client": "撤销客户端",
+      "Recent security events ·": "最近的安全事件 ·", "Time": "时间", "Event": "事件", "User / device": "用户 / 设备", "Result": "结果", "success": "成功", "failure": "失败", "No events recorded.": "没有记录的事件。",
+      "Client name:": "客户端名称：", "Client ID:": "客户端 ID：", "Callback:": "回调地址：", "Scope:": "Scope：", "Public Relay operator is inside the trust boundary": "公共 Relay 运营者位于信任边界内",
+      "This Relay can observe or modify MCP requests and results, and its operator can run modified server code. User-to-user isolation does not protect you from the operator. Do not use any public instance for secrets or high-trust computer access; self-host a private Relay instead.": "此 Relay 可以观察或修改 MCP 请求和结果，运营者也可以运行修改后的服务器代码。用户之间的隔离不能保护你免受运营者影响。不要将任何公共实例用于密钥或高信任电脑访问；请改为自建私有 Relay。",
+      "Unverified dynamic OAuth client": "未验证的动态 OAuth 客户端", "The client name above is self-asserted. Only authorize if the callback origin matches the application you intended to connect.": "上面的客户端名称由客户端自行声明。只有在回调来源与目标应用一致时才授权。", "Verified device identity": "已验证的设备身份", "This Agent proved possession of the Ed25519 private key for device": "此 Agent 已证明持有设备的 Ed25519 私钥",
+      "The Relay requires a request-bound signed proof for authorization and a fresh signed proof on every Agent connection.": "Relay 要求授权时提供绑定请求的签名证明，并要求 Agent 每次连接都提供新的签名证明。", "Legacy unbound Agent": "旧版未绑定 Agent", "This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.": "此设备没有经过验证的加密身份。OAuth 仍会强制执行账户/资源所有权，但被盗的 Agent bearer 可能冒充此旧版设备，直到完成迁移。",
+      "Open registration is disabled. A single-use invite from this instance operator is required.": "公开注册已关闭，需要此实例运营者提供的单次邀请。", "Invite code": "邀请代码", "Password (12+ characters)": "密码（至少 12 个字符）", "Register and authorize": "注册并授权",
+      "This invite can be used once and expires at": "此邀请只能使用一次，过期时间为", "Shown once.": "只显示一次。", "The Relay stores only a one-way hash of this code. Copy it now.": "Relay 只保存此代码的单向哈希，请现在复制。",
+      "Account": "账户", "Password": "密码", "Title": "标题", "Set up Chat with CLI": "设置 Chat with CLI"
     };
+    const legacyAttributes = {
+      "Username": "用户名", "Password": "密码", "current password": "当前密码", "new password": "新密码",
+      "new name": "新名称", "new display name": "新的显示名称", "password to enable": "启用所需密码",
+      "temporary password": "临时密码", "REVOKE": "输入 REVOKE", "DELETE": "输入 DELETE", "type RELEASE": "输入 RELEASE",
+      "Invite code": "邀请代码", "Password (12+ characters)": "密码（至少 12 个字符）"
+    };
+    if (legacy[legacyPageTitle]) document.title = language === "zh-CN" ? legacy[legacyPageTitle] : legacyPageTitle;
     if (language === "zh-CN" || language === "en-US") {
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
       const nodes = [];
@@ -439,6 +499,13 @@ const appJS = `
         const replacement = language === "zh-CN" ? legacy[trimmed] : trimmed;
         const start = original.indexOf(trimmed);
         node.nodeValue = original.slice(0, start) + replacement + original.slice(start + trimmed.length);
+      });
+      document.querySelectorAll("input[placeholder], textarea[placeholder], select[title], input[title], textarea[title]").forEach((element) => {
+        if (element.hasAttribute("data-i18n-placeholder") || element.hasAttribute("data-i18n-title")) return;
+        if (!legacyAttributeOriginals.has(element)) legacyAttributeOriginals.set(element, {placeholder: element.getAttribute("placeholder"), title: element.getAttribute("title")});
+        const original = legacyAttributeOriginals.get(element);
+        if (original.placeholder !== null) element.setAttribute("placeholder", language === "zh-CN" && legacyAttributes[original.placeholder] ? legacyAttributes[original.placeholder] : original.placeholder);
+        if (original.title !== null) element.setAttribute("title", language === "zh-CN" && legacyAttributes[original.title] ? legacyAttributes[original.title] : original.title);
       });
     }
     document.querySelectorAll("[data-language-select]").forEach((select) => {
@@ -463,8 +530,8 @@ const appJS = `
     });
   }
   function makeControls(host) {
-    host.innerHTML = '<label class="sr-only" for="cwc-language">Language</label><select id="cwc-language" data-language-select aria-label="Language"><option value="auto">Auto</option><option value="en-US">English</option><option value="zh-CN">中文</option></select><button class="icon-button" type="button" data-theme-toggle><span class="theme-icon" aria-hidden="true">◐</span><span class="sr-only">Theme</span></button>';
-    host.querySelector("select").addEventListener("change", (event) => { root.dataset.locale = event.target.value; persist(localeKey, event.target.value); translate(); });
+    host.innerHTML = '<label class="sr-only" for="cwc-language" data-i18n="Language">Language</label><select id="cwc-language" data-language-select aria-label="Language"><option value="auto" data-i18n="Automatic">Auto</option><option value="en-US" data-i18n="English">English</option><option value="zh-CN" data-i18n="中文">中文</option></select><button class="icon-button" type="button" data-theme-toggle><span class="theme-icon" aria-hidden="true">◐</span><span class="sr-only">Theme</span></button>';
+    host.querySelector("select").addEventListener("change", (event) => { root.dataset.locale = event.target.value; persist(localeKey, event.target.value); translate(); applyTheme(stored(themeKey, "auto")); });
     host.querySelector("[data-theme-toggle]").addEventListener("click", (event) => { const next = event.currentTarget.dataset.nextTheme || "dark"; persist(themeKey, next); applyTheme(next); });
   }
   function copyText(button) {
@@ -472,8 +539,9 @@ const appJS = `
     if (!target) return;
     const value = target.textContent.trim();
     const done = () => { const original = button.textContent; button.textContent = locale() === "zh-CN" ? "已复制" : "Copied"; setTimeout(() => { button.textContent = original; }, 1400); };
-    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(value).then(done).catch(() => {});
-    else { const area = document.createElement("textarea"); area.className = "copy-fallback"; area.value = value; document.body.appendChild(area); area.select(); try { document.execCommand("copy"); done(); } catch (_) {} area.remove(); }
+    const fallback = () => { const area = document.createElement("textarea"); area.className = "copy-fallback"; area.value = value; document.body.appendChild(area); area.select(); try { document.execCommand("copy"); done(); } catch (_) {} area.remove(); };
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(value).then(done).catch(fallback);
+    else fallback();
   }
   function loadAdSense() {
     const slot = document.querySelector("[data-adsense-client]");
@@ -571,7 +639,11 @@ func executeUITemplate(w http.ResponseWriter, r *http.Request, tmpl *template.Te
 		}
 		html = html[:start] + html[start+end+len("</style>"):]
 	}
-	html = strings.Replace(html, "<html", `<html data-locale="`+locale+`"`, 1)
+	if strings.Contains(html, "<html lang=") {
+		html = strings.Replace(html, "<html", `<html data-locale="`+locale+`"`, 1)
+	} else {
+		html = strings.Replace(html, "<html", `<html lang="en" data-locale="`+locale+`"`, 1)
+	}
 	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css">`, 1)
 	html = strings.Replace(html, "<body>", `<body><div class="ui-controls-floating" data-ui-controls></div>`, 1)
 	html = strings.Replace(html, "</body>", `<script src="/assets/app.js" defer></script></body>`, 1)

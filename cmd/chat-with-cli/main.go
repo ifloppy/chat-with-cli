@@ -50,7 +50,7 @@ func (s *stringList) Set(value string) error {
 
 func main() {
 	if len(os.Args) < 2 {
-		if _, err := os.Stat("/dev/tty"); err == nil {
+		if interactiveTerminalAvailable() {
 			if err := runInteractiveUI(nil); err != nil {
 				log.Printf("error: %v", err)
 				os.Exit(1)
@@ -109,6 +109,14 @@ func main() {
 		log.Printf("error: %v", err)
 		os.Exit(1)
 	}
+}
+
+func interactiveTerminalAvailable() bool {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	return tty.Close() == nil
 }
 
 func usage() {

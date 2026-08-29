@@ -82,4 +82,12 @@ func TestLocalUIAssetsAndMonetizationContract(t *testing.T) {
 	if strings.Contains(landing.Header().Get("Content-Security-Policy"), "unsafe-inline") {
 		t.Fatalf("UI CSP unexpectedly permits inline code: %s", landing.Header().Get("Content-Security-Policy"))
 	}
+	for _, path := range []string{"/docs?lang=zh-CN", "/connect?lang=zh-CN", "/account?lang=zh-CN", "/admin?lang=zh-CN"} {
+		page := httptest.NewRecorder()
+		h.ServeHTTP(page, httptest.NewRequest(http.MethodGet, s.absolute(path), nil))
+		pageBody := page.Body.String()
+		if page.Code != http.StatusOK || !strings.Contains(pageBody, `data-locale="zh-CN"`) || !strings.Contains(pageBody, "/assets/app.css") || !strings.Contains(pageBody, "/assets/app.js") || strings.Contains(pageBody, "<style") {
+			t.Fatalf("page %s did not use the shared localized UI shell: status=%d body=%s", path, page.Code, pageBody)
+		}
+	}
 }

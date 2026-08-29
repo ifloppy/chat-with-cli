@@ -2,6 +2,8 @@
 
 Open-source remote development bridge for AI agents.
 
+[简体中文使用指南](docs/README.zh-CN.md) · [English user guide](docs/README.md)
+
 `chat-with-cli` is a Go single-binary MCP server, outbound workstation Agent,
 and OAuth-enabled Relay. It provides bounded filesystem access, durable PTY
 tasks, checkpoints, privacy-preserving audit metadata, and optional Linux
