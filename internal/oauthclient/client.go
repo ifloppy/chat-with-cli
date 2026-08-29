@@ -73,10 +73,11 @@ func (m *Manager) Resource() (string, error) {
 		return "", errors.New("device or immutable device ID is required")
 	}
 	if deviceID != "" {
-		if !protocol.ValidDeviceID(deviceID) {
+		canonicalID, ok := protocol.NormalizeDeviceID(deviceID)
+		if !ok {
 			return "", errors.New("invalid immutable device ID")
 		}
-		return base + "/agent/id/" + url.PathEscape(deviceID), nil
+		return base + "/agent/id/" + url.PathEscape(canonicalID), nil
 	}
 	if !protocol.ValidDeviceName(device) {
 		return "", errors.New("invalid device name")
@@ -143,6 +144,7 @@ func refresh(ctx context.Context, client *http.Client, cred Credential) (Credent
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {cred.RefreshToken},
 		"client_id":     {cred.ClientID},
+		"resource":      {cred.Resource},
 	}
 	var token tokenResponse
 	if err := postFormJSON(ctx, client, strings.TrimRight(cred.Issuer, "/")+"/oauth/token", form, &token); err != nil {

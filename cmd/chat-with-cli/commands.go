@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/ifloppy/chat-with-cli/internal/config"
 	"github.com/ifloppy/chat-with-cli/internal/mcpserver"
 	"github.com/ifloppy/chat-with-cli/internal/oauthclient"
@@ -34,7 +33,7 @@ func runAgentSetup(args []string) error {
 	profile := fs.String("profile", "read-only", "read-only, developer, computer-use, or custom")
 	roots := new(stringList)
 	fs.Var(roots, "root", "allowed filesystem root (repeatable)")
-	stateDir := fs.String("state-dir", "", "agent state directory")
+	stateDir := fs.String("state-dir", defaultAgentStateDir(), "agent state directory")
 	allowFileWrite := fs.Bool("allow-file-write", false, "allow filesystem/checkpoint writes")
 	allowExec := fs.Bool("allow-exec", false, "allow PTY shell execution")
 	execSandbox := fs.String("exec-sandbox", "none", "none or landlock")
@@ -45,19 +44,30 @@ func runAgentSetup(args []string) error {
 	killSwitchPath := fs.String("kill-switch-file", "", "local emergency kill-switch file")
 	maxActiveTasks := fs.Int("max-active-tasks", 32, "maximum concurrent PTY tasks")
 	installSystemd := fs.Bool("install-systemd", false, "write a systemd user unit; never enables or starts it")
+	binaryPath := fs.String("binary", "", "chat-with-cli binary path for the generated systemd unit; defaults to the currently running executable")
 	unitPath := fs.String("unit", "", "systemd user unit path")
 	force := fs.Bool("force", false, "replace an existing config/unit after symlink checks")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	applyKillSwitchDefault(stateDir, killSwitchPath)
 	if !protocol.ValidDeviceName(strings.TrimSpace(*device)) {
 		return errors.New("--device must be 1-128 ASCII letters, digits, dot, underscore, or hyphen")
 	}
 	if strings.TrimSpace(*deviceID) == "" {
 		*deviceID = protocol.NewID()
 	}
-	if !protocol.ValidDeviceID(strings.TrimSpace(*deviceID)) {
+	canonicalID, ok := protocol.NormalizeDeviceID(*deviceID)
+	if !ok {
 		return errors.New("--device-id must be 32 hexadecimal characters")
+	}
+	*deviceID = canonicalID
+	if strings.TrimSpace(*relayURL) == "" {
+		return errors.New("--relay is required, for example https://relay.example.com")
+	}
+	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: strings.TrimSpace(*deviceID)}
+	if _, err := manager.Resource(); err != nil {
+		return fmt.Errorf("invalid --relay: %w", err)
 	}
 	if !validCapabilityProfile(*profile) {
 		return fmt.Errorf("invalid capability profile %q", *profile)
@@ -92,6 +102,9 @@ func runAgentSetup(args []string) error {
 	if *allowComputer {
 		*allowScreen, *allowAccessibility = true, true
 	}
+	if *allowExec && strings.EqualFold(strings.TrimSpace(*profile), "developer") && runtime.GOOS == "linux" && !flagWasSet(fs, "exec-sandbox") && strings.EqualFold(strings.TrimSpace(*execSandbox), "none") {
+		*execSandbox = "landlock"
+	}
 	if !*allowExec {
 		*execSandbox = "none"
 	}
@@ -104,6 +117,28 @@ func runAgentSetup(args []string) error {
 			return err
 		}
 		*roots = append(*roots, cwd)
+	}
+	for i, root := range *roots {
+		normalized, err := normalizeExistingDirectory(root)
+		if err != nil {
+			return fmt.Errorf("invalid --root %q: %w", root, err)
+		}
+		(*roots)[i] = normalized
+	}
+	var err error
+	*stateDir, err = normalizeUserPath(*stateDir)
+	if err != nil {
+		return fmt.Errorf("invalid --state-dir: %w", err)
+	}
+	*configPath, err = normalizeUserPath(*configPath)
+	if err != nil {
+		return fmt.Errorf("invalid --config: %w", err)
+	}
+	if strings.TrimSpace(*killSwitchPath) != "" {
+		*killSwitchPath, err = normalizeUserPath(*killSwitchPath)
+		if err != nil {
+			return fmt.Errorf("invalid --kill-switch-file: %w", err)
+		}
 	}
 	values := map[string]any{
 		"agent.relay_url":           strings.TrimSpace(*relayURL),
@@ -126,36 +161,152 @@ func runAgentSetup(args []string) error {
 	if err := writeConfigFile(*configPath, values, *force); err != nil {
 		return fmt.Errorf("write agent config: %w", err)
 	}
-	fmt.Printf("agent config written to %s\nimmutable device ID: %s\nMCP endpoint: %s/mcp/id/%s\n", *configPath, *deviceID, strings.TrimRight(*relayURL, "/"), *deviceID)
+	base := strings.TrimRight(*relayURL, "/")
+	fmt.Printf("Agent configuration written to %s\n\n", *configPath)
+	fmt.Printf("Device name: %s\nImmutable device ID: %s\nMCP endpoint: %s/mcp/id/%s\n", *device, *deviceID, base, *deviceID)
+	fmt.Println("Filesystem roots exposed to MCP read tools:")
+	home, _ := os.UserHomeDir()
+	for _, root := range *roots {
+		fmt.Printf("  - %s\n", root)
+		if root == string(filepath.Separator) || (home != "" && filepath.Clean(root) == filepath.Clean(home)) {
+			fmt.Fprintln(os.Stderr, "WARNING: this root exposes a broad filesystem area. Prefer a dedicated workspace directory unless broad read access is intentional.")
+		}
+	}
+	fmt.Printf("\nNext steps:\n  1. Authorize this workstation in your browser:\n     chat-with-cli login --config %s\n", *configPath)
 	if *installSystemd {
 		if *unitPath == "" {
 			*unitPath = filepath.Join(userConfigDir(), "systemd", "user", "chat-with-cli-agent.service")
+		}
+		*unitPath, err = normalizeUserPath(*unitPath)
+		if err != nil {
+			return fmt.Errorf("invalid --unit: %w", err)
+		}
+		if strings.TrimSpace(*binaryPath) == "" {
+			*binaryPath, err = os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolve current chat-with-cli binary: %w", err)
+			}
+		}
+		*binaryPath, err = normalizeExistingFile(*binaryPath)
+		if err != nil {
+			return fmt.Errorf("invalid --binary: %w", err)
+		}
+		readWritePaths := []string{*stateDir, filepath.Dir(oauthclient.DefaultCredentialsPath())}
+		if *allowFileWrite {
+			readWritePaths = append(readWritePaths, (*roots)...)
+		}
+		seenPaths := map[string]bool{}
+		var writable strings.Builder
+		for _, path := range readWritePaths {
+			path = strings.TrimSpace(path)
+			if path == "" || seenPaths[path] {
+				continue
+			}
+			seenPaths[path] = true
+			fmt.Fprintf(&writable, "ReadWritePaths=%s\n", systemdQuote(path))
+		}
+		memoryHardening := "MemoryDenyWriteExecute=true\n"
+		if *allowExec {
+			// JIT runtimes and development toolchains commonly need executable
+			// mappings. Landlock remains the filesystem boundary for Developer.
+			memoryHardening = ""
 		}
 		unit := fmt.Sprintf(`[Unit]
 Description=Chat with CLI Agent
 After=graphical-session.target
 
 [Service]
-ExecStart=/usr/local/bin/chat-with-cli agent --config %s
+ExecStart=%s agent --config %s
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-RestrictSUIDSGID=true
+%sRestrictSUIDSGID=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
-
+%s
 [Install]
 WantedBy=default.target
-`, *configPath)
+`, systemdQuote(*binaryPath), systemdQuote(*configPath), writable.String(), memoryHardening)
 		if err := writeTextFile(*unitPath, unit, 0o600, *force); err != nil {
 			return fmt.Errorf("write systemd user unit: %w", err)
 		}
-		fmt.Printf("systemd user unit written to %s; it remains inactive until you explicitly enable it after review\n", *unitPath)
+		fmt.Printf("  2. Review the generated systemd user unit:\n     %s\n", *unitPath)
+		fmt.Println("  3. After OAuth and review, start it explicitly:")
+		fmt.Println("     systemctl --user daemon-reload && systemctl --user enable --now chat-with-cli-agent.service")
+	} else {
+		fmt.Printf("  2. After OAuth and review, start manually:\n     chat-with-cli agent --config %s\n", *configPath)
 	}
+	fmt.Println("\nRun `chat-with-cli doctor` after the Agent is connected. Setup never starts the Agent automatically.")
 	return nil
+}
+
+func normalizeUserPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("path must not be empty")
+	}
+	if value == "~" || strings.HasPrefix(value, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", errors.New("cannot resolve home directory")
+		}
+		if value == "~" {
+			value = home
+		} else {
+			value = filepath.Join(home, strings.TrimPrefix(value, "~/"))
+		}
+	}
+	return filepath.Abs(value)
+}
+
+func normalizeExistingDirectory(value string) (string, error) {
+	path, err := normalizeUserPath(value)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("path is not a directory")
+	}
+	return filepath.Clean(path), nil
+}
+
+func normalizeExistingFile(value string) (string, error) {
+	path, err := normalizeUserPath(value)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("path is not a regular file")
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return "", errors.New("file is not executable")
+	}
+	return filepath.Clean(path), nil
+}
+
+func systemdQuote(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\"", "\\\"")
+	value = strings.ReplaceAll(value, "%", "%%")
+	return "\"" + value + "\""
 }
 
 func validCapabilityProfile(value string) bool {
@@ -171,7 +322,7 @@ func runRelaySetup(args []string) error {
 	fs := flag.NewFlagSet("relay setup", flag.ContinueOnError)
 	configPath := fs.String("config", defaultRelayConfigPath(), "relay TOML configuration path")
 	publicURL := fs.String("public-url", "", "public HTTPS origin")
-	listen := fs.String("listen", ":8765", "HTTP listen address")
+	listen := fs.String("listen", "127.0.0.1:8765", "HTTP listen address")
 	mode := fs.String("instance-mode", "private", "private or public")
 	stateDir := fs.String("state-dir", defaultRelayStateDir(), "relay state directory")
 	setupTokenFile := fs.String("setup-token-file", "", "one-time setup token path")
@@ -179,15 +330,35 @@ func runRelaySetup(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*setupTokenFile) == "" {
-		*setupTokenFile = defaultSetupTokenPath(*stateDir)
+	if strings.TrimSpace(*publicURL) == "" {
+		return errors.New("--public-url is required, for example https://relay.example.com")
 	}
+	base, err := normalizeDiagnosticURL(*publicURL)
+	if err != nil {
+		return fmt.Errorf("invalid --public-url: %w", err)
+	}
+	*publicURL = base
 	if strings.EqualFold(strings.TrimSpace(*mode), oauthserver.ModePublic) {
 		*mode = oauthserver.ModePublic
 	} else if strings.EqualFold(strings.TrimSpace(*mode), oauthserver.ModePrivate) {
 		*mode = oauthserver.ModePrivate
 	} else {
 		return fmt.Errorf("invalid instance mode %q", *mode)
+	}
+	*stateDir, err = normalizeUserPath(*stateDir)
+	if err != nil {
+		return fmt.Errorf("invalid --state-dir: %w", err)
+	}
+	*configPath, err = normalizeUserPath(*configPath)
+	if err != nil {
+		return fmt.Errorf("invalid --config: %w", err)
+	}
+	if strings.TrimSpace(*setupTokenFile) == "" {
+		*setupTokenFile = defaultSetupTokenPath(*stateDir)
+	}
+	*setupTokenFile, err = normalizeUserPath(*setupTokenFile)
+	if err != nil {
+		return fmt.Errorf("invalid --setup-token-file: %w", err)
 	}
 	existingToken, err := readPrivateCredential(*setupTokenFile)
 	if err != nil {
@@ -199,18 +370,24 @@ func runRelaySetup(args []string) error {
 		}
 	}
 	values := map[string]any{
-		"relay.public_url":           strings.TrimSpace(*publicURL),
+		"relay.public_url":           *publicURL,
 		"relay.listen":               strings.TrimSpace(*listen),
 		"relay.instance_mode":        strings.TrimSpace(*mode),
-		"relay.state_dir":            strings.TrimSpace(*stateDir),
-		"relay.setup_token_file":     strings.TrimSpace(*setupTokenFile),
+		"relay.state_dir":            *stateDir,
+		"relay.setup_token_file":     *setupTokenFile,
 		"relay.disable_registration": false,
 	}
 	if err := writeConfigFile(*configPath, values, *force); err != nil {
 		return fmt.Errorf("write relay config: %w", err)
 	}
-	fmt.Printf("relay config written to %s\none-time setup token: %s\n", *configPath, *setupTokenFile)
-	fmt.Println("Start the Relay manually, then open /setup from the configured public origin.")
+	fmt.Printf("Relay configuration written to %s\n", *configPath)
+	fmt.Printf("One-time setup token file: %s (the token itself is intentionally not printed)\n", *setupTokenFile)
+	fmt.Printf("Local listener: %s\nPublic origin: %s\n\n", *listen, *publicURL)
+	fmt.Println("Next steps:")
+	fmt.Printf("  1. Put Caddy/Nginx/your HTTPS proxy in front of %s.\n", *listen)
+	fmt.Printf("  2. Start the Relay: chat-with-cli relay --config %s\n", *configPath)
+	fmt.Printf("  3. Read the setup token locally, then open %s/setup in your browser.\n", *publicURL)
+	fmt.Printf("  4. After setup, sign in at %s/admin and review security controls before pairing a workstation.\n", *publicURL)
 	return nil
 }
 
@@ -313,14 +490,18 @@ func runDoctor(args []string) error {
 		return resp.StatusCode == http.StatusOK && strings.Contains(resp.Header.Get("Content-Type"), "json")
 	}))
 	checks = append(checks, doctorHTTPCheck(context.Background(), client, "DCR endpoint", base+"/oauth/register", func(resp *http.Response) bool {
-		return resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusCreated
+		// Probe with GET so doctor never creates a dynamic OAuth client. Go's
+		// method-aware mux returns 405 with Allow: POST for a healthy endpoint.
+		return resp.StatusCode == http.StatusMethodNotAllowed && strings.Contains(resp.Header.Get("Allow"), http.MethodPost)
 	}))
 	route := strings.TrimSpace(*device)
 	if strings.TrimSpace(*deviceID) != "" {
-		if !protocol.ValidDeviceID(strings.TrimSpace(*deviceID)) {
+		canonicalID, ok := protocol.NormalizeDeviceID(*deviceID)
+		if !ok {
 			return errors.New("invalid --device-id")
 		}
-		route = "id/" + strings.TrimSpace(*deviceID)
+		*deviceID = canonicalID
+		route = "id/" + canonicalID
 	}
 	if route != "" {
 		checks = append(checks, doctorHTTPCheck(context.Background(), client, "protected resource metadata", base+"/.well-known/oauth-protected-resource/agent/"+route, func(resp *http.Response) bool { return resp.StatusCode == http.StatusOK }))
@@ -481,45 +662,37 @@ func desktopBusDoctorCheck(name, service, objectPath string) doctorCheck {
 }
 
 func doctorAgentConnectionCheck(ctx context.Context, base, route, token string) doctorCheck {
-	u, err := url.Parse(base)
+	target := strings.TrimRight(base, "/") + "/agent/" + route + "?probe=1"
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
 	if err != nil {
 		return doctorCheck{Name: "Agent connection", Detail: ": " + err.Error()}
 	}
-	if u.Scheme == "http" {
-		u.Scheme = "ws"
-	} else {
-		u.Scheme = "wss"
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	u.Path = "/agent/" + route
-	u.RawQuery = ""
-	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(connectCtx, u.String(), &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}}})
+	resp, err := client.Do(req)
 	if err != nil {
 		return doctorCheck{Name: "Agent connection", Detail: ": " + redactDiagnosticError(err)}
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "doctor complete")
-	conn.SetReadLimit(1 << 20)
-	request := protocol.Request{ID: protocol.NewID(), Method: "system_info", Args: json.RawMessage(`{}`)}
-	data, err := json.Marshal(request)
-	if err != nil {
-		return doctorCheck{Name: "Agent connection", Detail: ": failed to encode probe"}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	if resp.Header.Get("cf-mitigated") == "challenge" {
+		return doctorCheck{Name: "Agent connection", Detail: ": Cloudflare Managed Challenge"}
 	}
-	if err := conn.Write(connectCtx, websocket.MessageText, data); err != nil {
-		return doctorCheck{Name: "Agent connection", Detail: ": probe write failed"}
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return doctorCheck{Name: "Agent connection", OK: true, Detail: ": authorized Agent is online"}
+	case http.StatusServiceUnavailable:
+		return doctorCheck{Name: "Agent connection", Detail: ": credential accepted but device is offline or disabled"}
+	case http.StatusUnauthorized:
+		return doctorCheck{Name: "Agent connection", Detail: ": saved Agent credential is not authorized"}
+	default:
+		return doctorCheck{Name: "Agent connection", Detail: fmt.Sprintf(": unexpected HTTP %d", resp.StatusCode)}
 	}
-	_, responseData, err := conn.Read(connectCtx)
-	if err != nil {
-		return doctorCheck{Name: "Agent connection", Detail: ": probe read failed"}
-	}
-	var response protocol.Response
-	if err := json.Unmarshal(responseData, &response); err != nil || response.ID != request.ID {
-		return doctorCheck{Name: "Agent connection", Detail: ": invalid Agent probe response"}
-	}
-	if response.Error != "" {
-		return doctorCheck{Name: "Agent connection", Detail: ": Agent probe failed: " + response.Error}
-	}
-	return doctorCheck{Name: "Agent connection", OK: true, Detail: ": system_info probe succeeded"}
 }
 
 func doctorMCPCheck(ctx context.Context, client *http.Client, target, token, name string) doctorCheck {

@@ -10,16 +10,26 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
 )
 
 type Engine struct {
-	cfg   Config
-	roots []string
-	tasks *TaskManager
-	audit *auditLog
+	cfg       Config
+	roots     []string
+	protected []string
+	tasks     *TaskManager
+	audit     *auditLog
+
+	killSwitchStop     chan struct{}
+	killSwitchDone     chan struct{}
+	killSwitchStopOnce sync.Once
+	killSwitchMu       sync.Mutex
+	killSwitchCtx      context.Context
+	killSwitchCancel   context.CancelFunc
+	killSwitchLatched  bool
 
 	computerMu           sync.Mutex
 	kwinDBusDisabled     bool
@@ -95,7 +105,31 @@ func New(cfg Config) (*Engine, error) {
 		}
 		roots = append(roots, filepath.Clean(real))
 	}
-	e := &Engine{cfg: cfg, roots: roots}
+	protectedCandidates := append([]string(nil), cfg.ProtectedPaths...)
+	protectedCandidates = append(protectedCandidates, cfg.StateDir)
+	if strings.TrimSpace(cfg.KillSwitchPath) != "" {
+		protectedCandidates = append(protectedCandidates, cfg.KillSwitchPath)
+	}
+	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+		protectedCandidates = append(protectedCandidates, filepath.Join(configDir, "chat-with-cli"))
+	}
+	protected := make([]string, 0, len(protectedCandidates))
+	seenProtected := make(map[string]struct{}, len(protectedCandidates))
+	for _, candidate := range protectedCandidates {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		path, err := canonicalPath(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("resolve protected path %q: %w", candidate, err)
+		}
+		if _, exists := seenProtected[path]; exists {
+			continue
+		}
+		seenProtected[path] = struct{}{}
+		protected = append(protected, path)
+	}
+	e := &Engine{cfg: cfg, roots: roots, protected: protected}
 	taskDir := filepath.Join(cfg.StateDir, "tasks")
 	if err := ensurePrivateDir(taskDir); err != nil {
 		return nil, fmt.Errorf("initialize task state: %w", err)
@@ -104,6 +138,13 @@ func New(cfg Config) (*Engine, error) {
 	e.audit, err = newAuditLog(cfg.StateDir)
 	if err != nil {
 		return nil, fmt.Errorf("initialize audit log: %w", err)
+	}
+	if strings.TrimSpace(cfg.KillSwitchPath) != "" {
+		e.killSwitchStop = make(chan struct{})
+		e.killSwitchDone = make(chan struct{})
+		e.killSwitchCtx, e.killSwitchCancel = context.WithCancel(context.Background())
+		e.updateKillSwitchState(e.killSwitchActive())
+		go e.watchKillSwitch()
 	}
 	return e, nil
 }
@@ -133,7 +174,79 @@ func (e *Engine) killSwitchActive() bool {
 	return err == nil
 }
 
-func (e *Engine) Close() error {
+func (e *Engine) updateKillSwitchState(active bool) {
+	e.killSwitchMu.Lock()
+	if e.killSwitchLatched == active {
+		e.killSwitchMu.Unlock()
+		return
+	}
+	e.killSwitchLatched = active
+	if active {
+		if e.killSwitchCancel != nil {
+			e.killSwitchCancel()
+		}
+	} else {
+		e.killSwitchCtx, e.killSwitchCancel = context.WithCancel(context.Background())
+	}
+	e.killSwitchMu.Unlock()
+
+	if active {
+		// The local panic switch is an out-of-band authority: cancel all
+		// in-flight Engine calls and kill every detached PTY immediately.
+		e.tasks.StopAll(syscall.SIGKILL)
+		e.closePortalSession()
+	}
+}
+
+func (e *Engine) callContext(parent context.Context) (context.Context, context.CancelFunc, bool) {
+	e.killSwitchMu.Lock()
+	killCtx := e.killSwitchCtx
+	active := e.killSwitchLatched
+	e.killSwitchMu.Unlock()
+	if killCtx == nil {
+		return parent, func() {}, false
+	}
+	if active {
+		return parent, func() {}, true
+	}
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(killCtx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}, false
+}
+
+func (e *Engine) watchKillSwitch() {
+	defer close(e.killSwitchDone)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.killSwitchStop:
+			return
+		case <-ticker.C:
+			e.updateKillSwitchState(e.killSwitchActive())
+		}
+	}
+}
+
+func (e *Engine) stopKillSwitchWatcher() {
+	e.killSwitchStopOnce.Do(func() {
+		if e.killSwitchStop == nil {
+			return
+		}
+		close(e.killSwitchStop)
+		<-e.killSwitchDone
+		e.killSwitchMu.Lock()
+		if e.killSwitchCancel != nil {
+			e.killSwitchCancel()
+		}
+		e.killSwitchMu.Unlock()
+	})
+}
+
+func (e *Engine) closePortalSession() error {
 	e.portalMu.Lock()
 	portal := e.portal
 	conn := e.portalConn
@@ -149,10 +262,57 @@ func (e *Engine) Close() error {
 	return nil
 }
 
+func (e *Engine) Close() error {
+	e.stopKillSwitchWatcher()
+	e.EndRemoteSession()
+	return nil
+}
+
+// EndRemoteSession fail-closes work that outlives an individual RPC. Detached
+// PTYs and a Desktop Portal control session must not survive loss of the Relay
+// session that authorized them. In-flight RPCs are canceled by the Agent
+// connection context; this method handles background work explicitly.
+func (e *Engine) EndRemoteSession() {
+	e.tasks.StopAll(syscall.SIGKILL)
+	_ = e.closePortalSession()
+}
+
 func (e *Engine) Config() Config {
 	cfg := e.cfg
 	cfg.Roots = append([]string(nil), e.roots...)
 	return cfg
+}
+
+func canonicalPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(real), nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return resolveMissingPath(abs)
+}
+
+func (e *Engine) isProtectedPath(path string) bool {
+	for _, protected := range e.protected {
+		if pathWithin(protected, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) rootCoversProtectedPath(root string) bool {
+	for _, protected := range e.protected {
+		if pathWithin(root, protected) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) ResolvePath(path string) (string, error) {
@@ -178,6 +338,9 @@ func (e *Engine) ResolvePath(path string) (string, error) {
 	}
 	for _, root := range e.roots {
 		if pathWithin(root, candidate) {
+			if e.isProtectedPath(candidate) {
+				return "", fmt.Errorf("path %q is reserved for chat-with-cli private state", path)
+			}
 			return candidate, nil
 		}
 	}
@@ -233,15 +396,21 @@ func (e *Engine) Invoke(ctx context.Context, method string, raw json.RawMessage)
 	}
 	defer func() { e.audit.record(auditMethod, started, err) }()
 	if e.killSwitchActive() {
+		e.updateKillSwitchState(true)
 		return nil, errors.New("local emergency kill switch is active")
 	}
+	callCtx, cancel, blocked := e.callContext(ctx)
+	if blocked {
+		return nil, errors.New("local emergency kill switch is active")
+	}
+	defer cancel()
 	if len(method) == 0 || len(method) > maxEngineMethodBytes {
 		return nil, errors.New("method name is missing or too long")
 	}
 	if len(raw) > maxEngineArgsBytes {
 		return nil, errors.New("request arguments are too large")
 	}
-	return e.invoke(ctx, method, raw)
+	return e.invoke(callCtx, method, raw)
 }
 
 func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage) (any, error) {

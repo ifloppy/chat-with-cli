@@ -49,14 +49,19 @@ passes WebSockets; see [reverse-proxy.md](reverse-proxy.md).
 ```bash
 ./chat-with-cli agent setup \
   --relay https://cli.example.com \
+  --root "$HOME/project" \
   --device workstation \
-  --profile read-only
-./chat-with-cli login --relay https://cli.example.com \
-  --device workstation --device-id <id-from-agent-setup>
-./chat-with-cli agent --config "$HOME/.config/chat-with-cli/config.toml"
+  --profile read-only \
+  --install-systemd
+./chat-with-cli login
+# Review the generated config and unit before starting the Agent.
+systemctl --user daemon-reload
+systemctl --user enable --now chat-with-cli-agent.service
 ```
 
-The immutable ID is the resource identity; the device name is only a display
+The generated config stores the Relay URL and immutable device ID, so `login`
+can reuse them without manual transcription. Immutable IDs are canonicalized to
+lowercase and are the resource identity; the device name is only a display
 label and legacy route. Use the ID endpoint in MCP clients:
 
 ```text

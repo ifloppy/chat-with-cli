@@ -47,11 +47,16 @@ On the workstation, create a default read-only Agent profile, authorize it in
 the browser, and run it:
 
 ```bash
-./chat-with-cli agent setup --relay https://cli.example.com --device workstation
-# Copy the immutable device ID printed by the command.
-./chat-with-cli login --relay https://cli.example.com \
-  --device workstation --device-id <immutable-device-id>
-./chat-with-cli agent --config "$HOME/.config/chat-with-cli/config.toml"
+./chat-with-cli agent setup \
+  --relay https://cli.example.com \
+  --root "$HOME/project" \
+  --device workstation \
+  --profile read-only \
+  --install-systemd
+./chat-with-cli login
+# Review config/unit before starting anything.
+systemctl --user daemon-reload
+systemctl --user enable --now chat-with-cli-agent.service
 ```
 
 Use `https://cli.example.com/mcp/id/<immutable-device-id>` as the remote MCP
@@ -79,11 +84,14 @@ Run the Agent as a dedicated unprivileged user and use `--exec-sandbox=landlock`
 when shell work needs an additional kernel boundary.
 
 Private Relay mode is the default. Public mode, account registration, DCR,
-MCP, Agent access, and the local emergency kill switch are independently
-manageable from `/admin`. OAuth uses PKCE S256, exact resource/scope binding,
-rotating refresh tokens, bounded sessions, and one-way server-side token
-identifiers. Public traffic must use HTTPS behind a carefully configured
-reverse proxy.
+MCP, Agent access, users, devices, and the emergency kill switch are managed
+from `/admin`. Emergency disable operations contract authority immediately;
+re-enabling devices/users or releasing the global kill switch requires recent
+administrator re-authentication. OAuth uses PKCE S256, exact user/resource/scope
+and device-owner binding, rotating refresh-token families, bounded sessions,
+and one-way server-side token identifiers. Public traffic must use HTTPS behind
+a carefully configured reverse proxy. A Relay that cannot durably persist
+authorization state fails closed and reports HTTP 503 from `/health`.
 
 ## Architecture
 

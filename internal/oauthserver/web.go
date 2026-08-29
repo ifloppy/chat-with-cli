@@ -22,15 +22,27 @@ func SecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+type landingPageData struct {
+	Version        string
+	Mode           string
+	GitHubURL      string
+	PublicURL      string
+	SetupAvailable bool
+	Degraded       bool
+}
+
 var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Chat with CLI</title><style>
-:root{color-scheme:light dark}body{font:16px system-ui,sans-serif;max-width:760px;margin:10vh auto;padding:24px;line-height:1.5}a{color:#69a7ff}.card{border:1px solid #8885;border-radius:12px;padding:20px;margin:18px 0}.meta{display:grid;grid-template-columns:8rem 1fr;gap:6px;color:#bbb}.actions{display:flex;gap:14px;flex-wrap:wrap}a.button{border:1px solid #8888;border-radius:8px;padding:10px 14px;text-decoration:none}</style></head>
-<body><h1>Chat with CLI</h1><p>Secure, outbound-connected remote development tools for an MCP-compatible client.</p>
-<div class="card"><div class="meta"><span>Version</span><span>{{.Version}}</span><span>Instance</span><span>{{.Mode}}</span><span>Relay health</span><span>available</span></div></div>
-<div class="actions"><a class="button" href="/admin">Sign in / Admin</a><a class="button" href="/setup">Setup</a><a class="button" href="/docs">Documentation</a><a class="button" href="{{.GitHubURL}}" rel="noreferrer">GitHub</a></div>
+:root{color-scheme:light dark}*{box-sizing:border-box}body{font:16px system-ui,sans-serif;max-width:980px;margin:0 auto;padding:56px 24px 80px;line-height:1.55}h1{font-size:clamp(34px,7vw,58px);line-height:1.02;margin:.25em 0}.lead{max-width:720px;font-size:19px;color:#777}.badge,.status{display:inline-flex;align-items:center;border:1px solid #8886;border-radius:999px;padding:5px 10px;font-size:13px}.status.ok{color:#188038}.status.bad{color:#b3261e}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:28px 0}.card{border:1px solid #8885;border-radius:16px;padding:20px;background:#8881}.card h2{font-size:18px;margin:0 0 8px}.meta{display:grid;grid-template-columns:7rem 1fr;gap:7px 12px}.muted{color:#777}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:22px 0}.button{border:1px solid #8888;border-radius:10px;padding:10px 14px;text-decoration:none;color:inherit}.primary{background:#1769e0;color:white;border-color:#1769e0}.steps{counter-reset:step;display:grid;gap:12px}.step{border-left:3px solid #8885;padding-left:14px}.step b{display:block;margin-bottom:3px}code{font:14px ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.command{display:block;padding:10px 12px;border-radius:9px;background:#8882;margin-top:8px}</style></head>
+<body><span class="badge">{{.Mode}} relay</span><h1>Chat with CLI</h1><p class="lead">Connect an MCP client to a workstation through a private, outbound Agent connection. Capabilities stay disabled until the workstation explicitly enables them.</p>
+<div class="actions">{{if .SetupAvailable}}<a class="button primary" href="/setup">Finish first-run setup</a>{{else}}<a class="button primary" href="/admin">Open admin console</a>{{end}}<a class="button" href="/docs">Documentation</a><a class="button" href="{{.GitHubURL}}" rel="noreferrer">GitHub</a></div>
+<div class="grid"><div class="card"><h2>Relay</h2><div class="meta"><span>Version</span><b>{{.Version}}</b><span>Instance</span><b>{{.Mode}}</b><span>Status</span>{{if .Degraded}}<b class="status bad">authorization frozen</b>{{else}}<b class="status ok">ready</b>{{end}}</div></div>
+<div class="card"><h2>{{if .SetupAvailable}}Setup required{{else}}Relay configured{{end}}</h2>{{if .SetupAvailable}}<p>The Relay has not created its owner account yet. Use the one-time token stored locally on the Relay host.</p>{{else}}<p>Owner setup is complete. Devices and credentials are visible only after administrator sign-in.</p>{{end}}</div>
+<div class="card"><h2>Security model</h2><p>OAuth credentials are bound to one user, exact device resource, and scope. New public devices use random immutable IDs.</p></div></div>
+{{if not .SetupAvailable}}<div class="card"><h2>Add a workstation</h2><div class="steps"><div class="step"><b>1. Create a safe local Agent config</b><span class="muted">Read-only is the default profile.</span><code class="command">chat-with-cli agent setup --relay {{.PublicURL}} --root /path/to/workspace --profile read-only --install-systemd</code></div><div class="step"><b>2. Authorize the generated device ID</b><span class="muted">The setup command prints the exact browser-login command. The service remains disabled until you explicitly start it.</span></div><div class="step"><b>3. Connect your MCP client</b><code class="command">{{.PublicURL}}/mcp/id/&lt;device-id&gt;</code></div></div></div>{{end}}
+<p class="muted">Health endpoint: <code>/health</code>. No device inventory or host information is exposed on this public page.</p>
 </body></html>`))
-
 var docsTemplate = template.Must(template.New("docs").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Documentation · Chat with CLI</title><style>body{font:16px system-ui,sans-serif;max-width:760px;margin:8vh auto;padding:24px;line-height:1.5}li{margin:9px 0}a{color:#69a7ff}.note{border:1px solid #8885;border-radius:10px;padding:14px}</style></head>
@@ -40,15 +52,17 @@ var docsTemplate = template.Must(template.New("docs").Parse(`<!doctype html>
 
 var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Chat with CLI</title>
-<style>body{font:16px system-ui,sans-serif;max-width:620px;margin:6vh auto;padding:24px}label{display:block;margin-top:14px}input,select,button{font:inherit;padding:10px;width:100%;box-sizing:border-box;margin-top:5px}button{margin-top:20px}.note{background:#f3f3f3;padding:14px;border-radius:8px}</style></head>
-<body><h1>First-run setup</h1><p class="note">This page is available only before the first administrator account is created. Obtain the one-time setup token from the Relay host’s protected setup-token file.</p>
+<style>:root{color-scheme:light dark}*{box-sizing:border-box}body{font:16px system-ui,sans-serif;max-width:720px;margin:0 auto;padding:48px 24px 72px;line-height:1.5}h1{font-size:36px;margin-bottom:8px}.lead{color:#777}.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:26px 0}.step{border:1px solid #8885;border-radius:12px;padding:12px}.step b{display:block}form{border:1px solid #8885;border-radius:16px;padding:22px}label{display:block;margin-top:16px;font-weight:600}input,select,button{font:inherit;padding:11px;width:100%;box-sizing:border-box;margin-top:6px;border-radius:8px;border:1px solid #8888}button{margin-top:22px;background:#1769e0;color:#fff;border-color:#1769e0;font-weight:650}.note,.warning{padding:14px;border-radius:10px;margin:16px 0}.note{background:#8882}.warning{border:1px solid #b8860b88;background:#b8860b18}.check{display:flex;gap:9px;align-items:flex-start;font-weight:400}.check input{width:auto;margin-top:5px}.muted{color:#777}@media(max-width:620px){.steps{grid-template-columns:1fr}}</style></head>
+<body><h1>First-run setup</h1><p class="lead">Create the first administrator and choose how this Relay accepts users. This page permanently disappears after successful setup.</p>
+<div class="steps"><div class="step"><b>1 · Local token</b><span class="muted">Read the protected setup-token file on the Relay host.</span></div><div class="step"><b>2 · Owner account</b><span class="muted">Create a strong administrator password.</span></div><div class="step"><b>3 · Add devices</b><span class="muted">Sign in, then pair workstations with immutable IDs.</span></div></div>
+<div class="warning"><b>Keep the setup token local.</b> Do not paste it into chat, logs, tickets, or command arguments. It is single-use and removed after successful initialization.</div>
 <form method="post" action="/setup"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 <label>One-time setup token<input name="setup_token" autocomplete="one-time-code" required></label>
 <label>Owner username<input name="username" autocomplete="username" value="owner" minlength="3" maxlength="64" required></label>
-<label>Owner password<input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
-<label>Instance mode<select name="mode"><option value="private">Private (recommended)</option><option value="public">Public</option></select></label>
-<label><input type="checkbox" name="registration" value="open"> Enable public account registration</label>
-<button type="submit">Complete setup</button></form></body></html>`))
+<label>Owner password<input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="1024" required><small class="muted">Minimum 12 characters. The Relay stores an Argon2id hash, not this password.</small></label>
+<label>Instance mode<select name="mode"><option value="private">Private — recommended</option><option value="public">Public — multi-user</option></select></label>
+<label class="check"><input type="checkbox" name="registration" value="open"><span>Enable public self-registration immediately. Leave this off unless you intentionally operate a public multi-user Relay.</span></label>
+<button type="submit">Create owner and finish setup</button></form><p class="muted">After setup, sign in to <code>/admin</code> to review security controls before connecting a workstation.</p></body></html>`))
 
 func (s *Server) setupAvailable() bool {
 	s.mu.Lock()
@@ -68,6 +82,7 @@ func (s *Server) handleLanding(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	version, mode, github := s.cfg.Version, s.cfg.Mode, s.cfg.GitHubURL
+	degraded := s.persistenceFault
 	s.mu.Unlock()
 	if version == "" {
 		version = "development"
@@ -77,7 +92,7 @@ func (s *Server) handleLanding(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = landingTemplate.Execute(w, map[string]string{"Version": version, "Mode": mode, "GitHubURL": github})
+	_ = landingTemplate.Execute(w, landingPageData{Version: version, Mode: mode, GitHubURL: github, PublicURL: strings.TrimRight(s.base.String(), "/"), SetupAvailable: s.setupAvailable(), Degraded: degraded})
 }
 
 func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
@@ -157,22 +172,17 @@ func (s *Server) handleSetupPOST(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired setup token", http.StatusForbidden)
 		return
 	}
+	snapshot := s.snapshotMutableStateLocked()
 	user, err := s.createUserLocked(r.Form.Get("username"), r.Form.Get("password"), true)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	previousMode, previousRegistration, previousToken := s.cfg.Mode, s.registrationEnabled, s.setupTokenHash
 	s.cfg.Mode = mode
 	s.registrationEnabled = mode == ModePublic && registrationOpen
 	s.setupTokenHash = ""
 	s.recordSecurityLocked(SecurityEvent{Event: "setup_completed", User: user.Username, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
-	if err := s.saveLocked(); err != nil {
-		delete(s.users, user.ID)
-		if normalized, ok := normalizeUsername(user.Username); ok {
-			delete(s.usernames, normalized)
-		}
-		s.cfg.Mode, s.registrationEnabled, s.setupTokenHash = previousMode, previousRegistration, previousToken
+	if err := s.saveOrRollbackLocked(snapshot); err != nil {
 		http.Error(w, "failed to persist setup", http.StatusInternalServerError)
 		return
 	}

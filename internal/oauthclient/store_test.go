@@ -61,3 +61,16 @@ func TestSavedRelayForDeviceAmbiguous(t *testing.T) {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
 }
+
+func TestSavedRelayForDeviceIDCanonicalizesCase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	resource := "https://relay.example/agent/id/abcdef0123456789abcdef0123456789"
+	store := credentialStore{Version: 1, Profiles: map[string]Credential{resource: {Issuer: "https://relay.example", Resource: resource}}}
+	if err := saveStore(path, store); err != nil {
+		t.Fatal(err)
+	}
+	relay, ok, err := SavedRelayForDeviceID(path, "ABCDEF0123456789ABCDEF0123456789")
+	if err != nil || !ok || relay != "https://relay.example" {
+		t.Fatalf("relay=%q ok=%v err=%v", relay, ok, err)
+	}
+}

@@ -17,10 +17,6 @@ import (
 )
 
 func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
-	path, err := e.ResolvePath(in.Path)
-	if err != nil {
-		return FileReadOutput{}, err
-	}
 	if in.Offset < 0 {
 		return FileReadOutput{}, errors.New("offset must be >= 0")
 	}
@@ -31,7 +27,7 @@ func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
 	if limit > e.cfg.MaxReadBytes {
 		limit = e.cfg.MaxReadBytes
 	}
-	file, err := os.Open(path)
+	file, path, err := e.secureOpenRead(in.Path)
 	if err != nil {
 		return FileReadOutput{}, err
 	}
@@ -64,25 +60,12 @@ func (e *Engine) WriteFile(in FileWriteInput) error {
 	if !e.cfg.AllowFileWrite {
 		return errors.New("filesystem write is disabled; start the agent with --allow-file-write")
 	}
-	path, err := e.ResolvePath(in.Path)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	switch strings.ToLower(strings.TrimSpace(in.Mode)) {
 	case "", "rewrite":
-		return atomicWriteFile(path, []byte(in.Content))
+		_, err := e.secureAtomicWrite(in.Path, []byte(in.Content), 0o644)
+		return err
 	case "append":
-		if info, err := os.Lstat(path); err == nil {
-			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-				return errors.New("refusing to append to a non-regular file or symlink")
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		file, _, err := e.secureOpenAppend(in.Path)
 		if err != nil {
 			return err
 		}
@@ -110,6 +93,12 @@ func (e *Engine) ListFiles(in FileListInput) (FileListOutput, error) {
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if path != root && e.isProtectedPath(path) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
@@ -174,6 +163,12 @@ func (e *Engine) SearchFiles(ctx context.Context, in FileSearchInput) (FileSearc
 		if walkErr != nil {
 			return nil
 		}
+		if path != root && e.isProtectedPath(path) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -185,12 +180,20 @@ func (e *Engine) SearchFiles(ctx context.Context, in FileSearchInput) (FileSearc
 			}
 			return nil
 		}
+		// Content search never follows symlinks. Following a workspace symlink
+		// here would let an allowed root expose arbitrary files outside it.
+		if d.Type()&os.ModeSymlink != 0 {
+			if kind == "files" && re.MatchString(path) {
+				hits = append(hits, FileSearchHit{Path: path})
+			}
+			return nil
+		}
 		if kind == "files" {
 			if re.MatchString(path) {
 				hits = append(hits, FileSearchHit{Path: path})
 			}
 		} else {
-			fileHits := searchFileContent(path, re, max-len(hits))
+			fileHits := e.searchFileContent(path, re, max-len(hits))
 			hits = append(hits, fileHits...)
 		}
 		if len(hits) >= max {
@@ -205,22 +208,27 @@ func (e *Engine) SearchFiles(ctx context.Context, in FileSearchInput) (FileSearc
 	return FileSearchOutput{Hits: hits, Truncated: truncated}, err
 }
 
-func searchFileContent(path string, re *regexp.Regexp, remaining int) []FileSearchHit {
+func (e *Engine) searchFileContent(path string, re *regexp.Regexp, remaining int) []FileSearchHit {
 	if remaining <= 0 {
 		return nil
 	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 16<<20 {
-		return nil
-	}
-	if isLikelyBinary(path) {
-		return nil
-	}
-	file, err := os.Open(path)
+	file, _, err := e.secureOpenRead(path)
 	if err != nil {
 		return nil
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 16<<20 {
+		return nil
+	}
+	probe := make([]byte, 8192)
+	n, _ := file.Read(probe)
+	if bytes.IndexByte(probe[:n], 0) >= 0 {
+		return nil
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil
+	}
 
 	hits := make([]FileSearchHit, 0, min(remaining, 8))
 	scanner := bufio.NewScanner(file)
@@ -245,17 +253,6 @@ func compactLine(line string, max int) string {
 		return line
 	}
 	return line[:max-1] + "…"
-}
-
-func isLikelyBinary(path string) bool {
-	file, err := os.Open(path)
-	if err != nil {
-		return true
-	}
-	defer file.Close()
-	buf := make([]byte, 8192)
-	n, _ := file.Read(buf)
-	return bytes.IndexByte(buf[:n], 0) >= 0
 }
 
 func shouldSkipDir(name string) bool {
@@ -312,10 +309,6 @@ func (e *Engine) PatchFile(in FilePatchInput) (FilePatchOutput, error) {
 	if !e.cfg.AllowFileWrite {
 		return FilePatchOutput{}, errors.New("filesystem write is disabled; start the agent with --allow-file-write")
 	}
-	path, err := e.ResolvePath(in.Path)
-	if err != nil {
-		return FilePatchOutput{}, err
-	}
 	if in.OldText == "" {
 		return FilePatchOutput{}, errors.New("old_text must not be empty")
 	}
@@ -323,19 +316,28 @@ func (e *Engine) PatchFile(in FilePatchInput) (FilePatchOutput, error) {
 	if expected <= 0 {
 		expected = 1
 	}
-	data, err := os.ReadFile(path)
+	file, _, err := e.secureOpenRead(in.Path)
 	if err != nil {
 		return FilePatchOutput{}, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, int64(e.cfg.MaxReadBytes)+1))
+	_ = file.Close()
+	if err != nil {
+		return FilePatchOutput{}, err
+	}
+	if len(data) > e.cfg.MaxReadBytes {
+		return FilePatchOutput{}, errors.New("file exceeds maximum patch size")
 	}
 	count := bytes.Count(data, []byte(in.OldText))
 	if count != expected {
 		return FilePatchOutput{}, fmt.Errorf("expected %d exact matches, found %d", expected, count)
 	}
 	patched := bytes.Replace(data, []byte(in.OldText), []byte(in.NewText), expected)
-	if err := atomicWriteFile(path, patched); err != nil {
+	writtenPath, err := e.secureAtomicWrite(in.Path, patched, 0o644)
+	if err != nil {
 		return FilePatchOutput{}, err
 	}
-	return FilePatchOutput{Path: path, Replacements: count}, nil
+	return FilePatchOutput{Path: writtenPath, Replacements: count}, nil
 }
 
 func atomicWriteFile(path string, data []byte) error {

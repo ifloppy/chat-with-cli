@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -127,6 +128,8 @@ func runExecSandbox(args []string) error {
 	roots := new(stringList)
 	fs.Var(roots, "root", "workspace root to expose to the child")
 	allowWrite := fs.Bool("allow-write", false, "allow child writes inside workspace roots")
+	tempDir := fs.String("temp-dir", "", "private writable temporary directory for write-enabled sandboxes")
+	cwd := fs.String("cwd", "", "working directory to enter after applying the sandbox")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -134,8 +137,32 @@ func runExecSandbox(args []string) error {
 	if len(command) == 0 {
 		return fmt.Errorf("exec-sandbox requires a command after --")
 	}
-	if err := execsandbox.Apply(*roots, *allowWrite); err != nil {
+	if err := execsandbox.Apply(*roots, *allowWrite, *tempDir); err != nil {
 		return err
+	}
+	if strings.TrimSpace(*cwd) != "" {
+		if err := os.Chdir(*cwd); err != nil {
+			return fmt.Errorf("enter sandbox working directory: %w", err)
+		}
+		realCWD, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("verify sandbox working directory: %w", err)
+		}
+		inside := false
+		for _, root := range *roots {
+			realRoot, resolveErr := filepath.EvalSymlinks(root)
+			if resolveErr != nil {
+				continue
+			}
+			rel, relErr := filepath.Rel(realRoot, realCWD)
+			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			return fmt.Errorf("sandbox working directory escaped allowed roots")
+		}
 	}
 	child := exec.Command(command[0], command[1:]...)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -154,7 +181,7 @@ func addEngineFlags(fs *flag.FlagSet) (*stringList, *string, *bool, *bool, *stri
 	allowAccessibility := fs.Bool("allow-accessibility", false, "allow read-only AT-SPI accessibility inspection")
 	allowComputer := fs.Bool("allow-computer-use", false, "allow screenshots, accessibility writes, and keyboard/mouse control")
 	computerPersist := fs.String("computer-persist", "process", "portal permission persistence: none, process, or persistent")
-	stateDir := fs.String("state-dir", "", "state directory for task logs and checkpoints")
+	stateDir := fs.String("state-dir", defaultAgentStateDir(), "state directory for task logs and checkpoints")
 	killSwitchPath := fs.String("kill-switch-file", "", "disable all Engine tools while this local file exists")
 	maxActiveTasks := fs.Int("max-active-tasks", 32, "maximum concurrent PTY tasks")
 	return roots, profile, allowFileWrite, allowExec, execSandbox, allowScreen, allowAccessibility, allowComputer, computerPersist, stateDir, killSwitchPath, maxActiveTasks
@@ -199,12 +226,21 @@ func applyCapabilityProfile(fs *flag.FlagSet, profile string, allowFileWrite, al
 	return nil
 }
 
-func newEngine(roots []string, allowFileWrite, allowExec bool, execSandbox string, allowScreen, allowAccessibility, allowComputer bool, computerPersist, stateDir, killSwitchPath string, maxActiveTasks int) (*engine.Engine, error) {
+func applyExecSandboxDefault(fs *flag.FlagSet, profile string, allowExec bool, execSandbox *string) {
+	if !allowExec || flagWasSet(fs, "exec-sandbox") {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(profile), "developer") && runtime.GOOS == "linux" && strings.EqualFold(strings.TrimSpace(*execSandbox), "none") {
+		*execSandbox = "landlock"
+	}
+}
+
+func newEngine(roots []string, allowFileWrite, allowExec bool, execSandbox string, allowScreen, allowAccessibility, allowComputer bool, computerPersist, stateDir, killSwitchPath string, protectedPaths []string, maxActiveTasks int) (*engine.Engine, error) {
 	return engine.New(engine.Config{
 		Roots: roots, AllowFileWrite: allowFileWrite, AllowExec: allowExec, ExecSandbox: execSandbox, AllowScreen: allowScreen || allowComputer,
 		AllowAccessibility:   allowAccessibility || allowComputer,
 		AllowComputerControl: allowComputer, ComputerPersistMode: computerPersist,
-		StateDir: stateDir, KillSwitchPath: killSwitchPath, MaxReadBytes: 256 * 1024, MaxActiveTasks: maxActiveTasks,
+		StateDir: stateDir, KillSwitchPath: killSwitchPath, ProtectedPaths: protectedPaths, MaxReadBytes: 256 * 1024, MaxActiveTasks: maxActiveTasks,
 	})
 }
 
@@ -214,10 +250,12 @@ func runLocal(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	applyKillSwitchDefault(stateDir, killSwitchPath)
 	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
 	}
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
+	applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, nil, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
@@ -253,6 +291,7 @@ func runServe(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	applyKillSwitchDefault(stateDir, killSwitchPath)
 	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
 	}
@@ -260,7 +299,8 @@ func runServe(args []string) error {
 	if *token == "" && !loopbackListen(*listen) {
 		return fmt.Errorf("refusing unauthenticated non-loopback listen %q", *listen)
 	}
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
+	applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, nil, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
@@ -271,7 +311,10 @@ func runServe(args []string) error {
 	handler = maxRequestBody(8<<20, handler)
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", bearerAuth(*token, handler))
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte("ok\n"))
+	})
 	ctx, cancel := signalContext()
 	defer cancel()
 	return serveHTTP(ctx, *listen, oauthserver.SecurityHeaders(mux))
@@ -365,10 +408,24 @@ func relayDeviceRoute(r *http.Request) string {
 	if device := strings.TrimSpace(r.PathValue("device")); protocol.ValidDeviceName(device) {
 		return device
 	}
-	if id := strings.TrimSpace(r.PathValue("id")); protocol.ValidDeviceID(id) {
+	if id, ok := protocol.NormalizeDeviceID(r.PathValue("id")); ok {
 		return "id/" + id
 	}
 	return ""
+}
+
+func defaultAgentStateDir() string {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); xdg != "" {
+		return filepath.Join(xdg, "chat-with-cli")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "state", "chat-with-cli")
+}
+
+func applyKillSwitchDefault(stateDir, killSwitchPath *string) {
+	if strings.TrimSpace(*killSwitchPath) == "" && strings.TrimSpace(*stateDir) != "" {
+		*killSwitchPath = filepath.Join(*stateDir, "PANIC")
+	}
 }
 
 func defaultRelayStateDir() string {
@@ -459,10 +516,10 @@ func writePrivateCredential(path, value string) error {
 
 func runRelay(args []string) error {
 	fs := flag.NewFlagSet("relay", flag.ContinueOnError)
-	listen := fs.String("listen", ":8765", "HTTP listen address")
+	listen := fs.String("listen", "127.0.0.1:8765", "HTTP listen address")
 	mode := fs.String("instance-mode", oauthserver.ModePrivate, "instance mode: private or public")
-	clientToken := fs.String("client-token", "", "optional private legacy/static MCP bearer token")
-	agentToken := fs.String("agent-token", "", "optional private legacy Agent bearer token")
+	clientToken := fs.String("client-token", "", "legacy single-tenant MCP bearer token; grants access to every registered legacy device")
+	agentToken := fs.String("agent-token", "", "legacy single-tenant Agent bearer token; shared across all legacy devices")
 	publicURL := fs.String("public-url", "", "public HTTPS origin used for OAuth, for example https://cli.example.com")
 	ownerUsername := fs.String("owner-username", "owner", "private instance owner username")
 	ownerPassword := fs.String("owner-password", "", "private instance first-run owner password")
@@ -556,8 +613,8 @@ func runRelay(args []string) error {
 	if !oauthEnabled && *clientToken == "" {
 		return fmt.Errorf("relay requires --public-url for OAuth or a legacy --client-token")
 	}
-	if strings.EqualFold(*mode, oauthserver.ModePublic) && (*clientToken != "" || *agentToken != "") {
-		return fmt.Errorf("public mode forbids shared static client/agent tokens; use browser OAuth")
+	if oauthEnabled && (*clientToken != "" || *agentToken != "") {
+		return fmt.Errorf("OAuth mode forbids shared static client/agent tokens because they cannot enforce per-user device ownership; remove the static tokens or run explicit legacy mode without --public-url")
 	}
 	if !oauthEnabled && *agentToken == "" {
 		return fmt.Errorf("legacy relay mode requires --agent-token")
@@ -604,18 +661,18 @@ func runRelay(args []string) error {
 	}
 
 	mux := http.NewServeMux()
+	var oauthHealth *oauthserver.Server
 	if oauthEnabled {
 		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL}
 		oauth, err := oauthserver.New(cfg)
 		if err != nil {
 			return err
 		}
+		oauthHealth = oauth
 		broker.SetAgentConnectionAuthorizer(func(device, credentialHash string) bool {
-			if *agentToken != "" && relay.TokenFingerprint(*agentToken) == credentialHash {
-				return oauth.AgentConnectionEnabled(device)
-			}
 			return oauth.VerifyAgentConnection(credentialHash, device)
 		})
+		oauth.SetAgentSessionResetter(broker.DisconnectDevice)
 		oauth.SetDeviceStatusProvider(func() map[string]oauthserver.DeviceStatus {
 			status := broker.DeviceStatuses()
 			out := make(map[string]oauthserver.DeviceStatus, len(status))
@@ -625,10 +682,10 @@ func runRelay(args []string) error {
 			return out
 		})
 		oauth.RegisterRoutes(mux)
-		mux.Handle("/mcp/{device}", oauth.ProtectScopedResource(*clientToken, "mcp", pathHandler))
-		mux.Handle("/mcp/id/{id}", oauth.ProtectScopedResource(*clientToken, "mcp", pathHandler))
-		mux.Handle("/agent/{device}", oauth.ProtectScopedResource(*agentToken, "agent:connect", broker.AgentHandler()))
-		mux.Handle("/agent/id/{id}", oauth.ProtectScopedResource(*agentToken, "agent:connect", broker.AgentHandler()))
+		mux.Handle("/mcp/{device}", oauth.ProtectScopedResource("mcp", pathHandler))
+		mux.Handle("/mcp/id/{id}", oauth.ProtectScopedResource("mcp", pathHandler))
+		mux.Handle("/agent/{device}", oauth.ProtectScopedResource("agent:connect", broker.AgentHandler()))
+		mux.Handle("/agent/id/{id}", oauth.ProtectScopedResource("agent:connect", broker.AgentHandler()))
 		log.Printf("%s OAuth instance; MCP endpoint: %s/mcp/<device>", strings.ToLower(*mode), strings.TrimRight(*publicURL, "/"))
 	} else {
 		mux.Handle("/mcp/{device}", bearerAuth(*clientToken, pathHandler))
@@ -646,7 +703,14 @@ func runRelay(args []string) error {
 	if *agentToken != "" {
 		mux.Handle("/agent", broker.LegacyAgentHandler(*agentToken))
 	}
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if oauthHealth != nil && !oauthHealth.Ready() {
+			http.Error(w, "authorization state unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
 	ctx, cancel := signalContext()
 	defer cancel()
 	return serveHTTP(ctx, *listen, oauthserver.SecurityHeaders(mux))
@@ -702,6 +766,7 @@ func runAgent(args []string) error {
 	if !flagWasSet(fs, "kill-switch-file") {
 		*killSwitchPath = values.String(*killSwitchPath, "agent.kill_switch_file")
 	}
+	applyKillSwitchDefault(stateDir, killSwitchPath)
 	if !flagWasSet(fs, "max-active-tasks") {
 		*maxActiveTasks = values.Int(*maxActiveTasks, "agent.max_active_tasks")
 	}
@@ -728,10 +793,13 @@ func runAgent(args []string) error {
 		return fmt.Errorf("--device must be 1-128 ASCII letters, digits, dot, underscore, or hyphen")
 	}
 	*device = strings.TrimSpace(*device)
-	if strings.TrimSpace(*deviceID) != "" && !protocol.ValidDeviceID(strings.TrimSpace(*deviceID)) {
-		return fmt.Errorf("--device-id must be 32 hexadecimal characters")
+	if strings.TrimSpace(*deviceID) != "" {
+		canonicalID, ok := protocol.NormalizeDeviceID(*deviceID)
+		if !ok {
+			return fmt.Errorf("--device-id must be 32 hexadecimal characters")
+		}
+		*deviceID = canonicalID
 	}
-	*deviceID = strings.TrimSpace(*deviceID)
 	if strings.TrimSpace(*relayURL) == "" && *token == "" {
 		saved, ok, err := "", false, error(nil)
 		if *deviceID != "" {
@@ -750,7 +818,10 @@ func runAgent(args []string) error {
 	if strings.TrimSpace(*relayURL) == "" {
 		return fmt.Errorf("--relay is required for first login; later starts can reuse the saved OAuth profile")
 	}
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, *maxActiveTasks)
+	if _, configuredInFile := values.Raw("agent.exec_sandbox"); !configuredInFile {
+		applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
+	}
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, []string{*credentials, *configPath}, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
@@ -779,28 +850,53 @@ func runLogin(args []string) error {
 	device := fs.String("device", deviceDefault, "device to authorize")
 	deviceID := fs.String("device-id", "", "immutable 128-bit device ID to authorize")
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
+	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if !flagWasSet(fs, "credentials") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS")) != "" {
-		*credentials = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS"))
+	values, err := config.LoadOptional(*configPath)
+	if err != nil {
+		return fmt.Errorf("load agent config: %w", err)
 	}
-	if *relayURL == "" {
-		return fmt.Errorf("--relay is required")
+	if !flagWasSet(fs, "relay") {
+		*relayURL = values.String(*relayURL, "agent.relay_url")
+	}
+	if !flagWasSet(fs, "device") {
+		*device = values.String(*device, "agent.device")
+	}
+	if !flagWasSet(fs, "device-id") {
+		*deviceID = values.String(*deviceID, "agent.device_id")
+	}
+	if !flagWasSet(fs, "credentials") {
+		*credentials = values.String(*credentials, "agent.credentials")
+		if strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS")) != "" {
+			*credentials = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS"))
+		}
+	}
+	if strings.TrimSpace(*relayURL) == "" {
+		return fmt.Errorf("Relay URL is missing; run `chat-with-cli agent setup --relay https://...` or provide --relay")
 	}
 	if !protocol.ValidDeviceName(strings.TrimSpace(*device)) {
 		return fmt.Errorf("invalid --device")
 	}
-	if strings.TrimSpace(*deviceID) != "" && !protocol.ValidDeviceID(strings.TrimSpace(*deviceID)) {
-		return fmt.Errorf("invalid --device-id")
+	if strings.TrimSpace(*deviceID) != "" {
+		canonicalID, ok := protocol.NormalizeDeviceID(*deviceID)
+		if !ok {
+			return fmt.Errorf("invalid --device-id")
+		}
+		*deviceID = canonicalID
 	}
-	manager := &oauthclient.Manager{RelayURL: *relayURL, Device: strings.TrimSpace(*device), DeviceID: strings.TrimSpace(*deviceID), CredentialsPath: *credentials}
+	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, CredentialsPath: *credentials}
+	resource, err := manager.Resource()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := signalContext()
 	defer cancel()
 	if _, err := manager.Token(ctx); err != nil {
 		return err
 	}
-	fmt.Printf("authorized %s via browser OAuth; credentials saved to %s\n", *device, *credentials)
+	fmt.Printf("Authorized %s via browser OAuth.\nAgent resource: %s\nCredentials saved to %s\n", *device, resource, *credentials)
 	return nil
 }
 

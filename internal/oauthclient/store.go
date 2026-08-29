@@ -155,14 +155,15 @@ func SavedRelayForDeviceID(path, deviceID string) (string, bool, error) {
 	if path == "" {
 		path = DefaultCredentialsPath()
 	}
-	if !protocol.ValidDeviceID(strings.TrimSpace(deviceID)) {
+	canonicalID, ok := protocol.NormalizeDeviceID(deviceID)
+	if !ok {
 		return "", false, fmt.Errorf("invalid immutable device ID")
 	}
 	store, err := loadStore(path)
 	if err != nil {
 		return "", false, err
 	}
-	suffix := "/agent/id/" + url.PathEscape(strings.TrimSpace(deviceID))
+	suffix := "/agent/id/" + url.PathEscape(canonicalID)
 	match := ""
 	for resource := range store.Profiles {
 		if !strings.HasSuffix(resource, suffix) {

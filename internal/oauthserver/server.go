@@ -1,6 +1,7 @@
 package oauthserver
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ifloppy/chat-with-cli/internal/authzctx"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
@@ -134,9 +136,53 @@ type authCode struct {
 }
 
 type Server struct {
-	cfg                 Config
-	base                *url.URL
-	mu                  sync.Mutex
+	cfg                  Config
+	base                 *url.URL
+	mu                   sync.Mutex
+	clients              map[string]Client
+	access               map[string]tokenRecord
+	refresh              map[string]tokenRecord
+	refreshUsed          map[string]tokenRecord
+	pending              map[string]pendingAuth
+	codes                map[string]authCode
+	users                map[string]User
+	usernames            map[string]string
+	devices              map[string]string
+	disabledDevices      map[string]bool
+	deviceRecords        map[string]DeviceRecord
+	sessions             map[string]sessionRecord
+	passwordSlots        chan struct{}
+	stateFile            string
+	registrationEnabled  bool
+	dcrEnabled           bool
+	mcpEnabled           bool
+	agentEnabled         bool
+	killSwitch           bool
+	trustedProxies       []*net.IPNet
+	rateMu               sync.Mutex
+	rates                map[string]rateWindow
+	setupTokenHash       string
+	setupTokenPath       string
+	securityEvents       []SecurityEvent
+	statusProvider       func() map[string]DeviceStatus
+	agentSessionResetter func(device string)
+	startedAt            time.Time
+	// persistenceFault is a fail-closed latch. Once authorization state cannot
+	// be durably written, MCP/Agent access remains frozen until process restart
+	// and a clean state load. Availability is preferred over stale authorization.
+	persistenceFault bool
+}
+
+type DeviceStatus struct {
+	Device       string
+	Online       bool
+	ConnectedAt  time.Time
+	LastSeen     time.Time
+	InFlight     int
+	Capabilities protocol.AgentCapabilities
+}
+
+type mutableStateSnapshot struct {
 	clients             map[string]Client
 	access              map[string]tokenRecord
 	refresh             map[string]tokenRecord
@@ -149,30 +195,57 @@ type Server struct {
 	disabledDevices     map[string]bool
 	deviceRecords       map[string]DeviceRecord
 	sessions            map[string]sessionRecord
-	passwordSlots       chan struct{}
-	stateFile           string
 	registrationEnabled bool
 	dcrEnabled          bool
 	mcpEnabled          bool
 	agentEnabled        bool
 	killSwitch          bool
-	trustedProxies      []*net.IPNet
-	rateMu              sync.Mutex
-	rates               map[string]rateWindow
 	setupTokenHash      string
-	setupTokenPath      string
 	securityEvents      []SecurityEvent
-	statusProvider      func() map[string]DeviceStatus
-	startedAt           time.Time
+	mode                string
 }
 
-type DeviceStatus struct {
-	Device       string
-	Online       bool
-	ConnectedAt  time.Time
-	LastSeen     time.Time
-	InFlight     int
-	Capabilities protocol.AgentCapabilities
+func cloneMap[K comparable, V any](src map[K]V) map[K]V {
+	out := make(map[K]V, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneClients(src map[string]Client) map[string]Client {
+	out := make(map[string]Client, len(src))
+	for key, value := range src {
+		value.RedirectURIs = append([]string(nil), value.RedirectURIs...)
+		out[key] = value
+	}
+	return out
+}
+
+func (s *Server) snapshotMutableStateLocked() mutableStateSnapshot {
+	return mutableStateSnapshot{
+		clients: cloneClients(s.clients), access: cloneMap(s.access), refresh: cloneMap(s.refresh), refreshUsed: cloneMap(s.refreshUsed),
+		pending: cloneMap(s.pending), codes: cloneMap(s.codes), users: cloneMap(s.users), usernames: cloneMap(s.usernames),
+		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions),
+		registrationEnabled: s.registrationEnabled, dcrEnabled: s.dcrEnabled, mcpEnabled: s.mcpEnabled, agentEnabled: s.agentEnabled,
+		killSwitch: s.killSwitch, setupTokenHash: s.setupTokenHash, securityEvents: append([]SecurityEvent(nil), s.securityEvents...), mode: s.cfg.Mode,
+	}
+}
+
+func (s *Server) restoreMutableStateLocked(snapshot mutableStateSnapshot) {
+	s.clients, s.access, s.refresh, s.refreshUsed = snapshot.clients, snapshot.access, snapshot.refresh, snapshot.refreshUsed
+	s.pending, s.codes, s.users, s.usernames = snapshot.pending, snapshot.codes, snapshot.users, snapshot.usernames
+	s.devices, s.disabledDevices, s.deviceRecords, s.sessions = snapshot.devices, snapshot.disabledDevices, snapshot.deviceRecords, snapshot.sessions
+	s.registrationEnabled, s.dcrEnabled, s.mcpEnabled, s.agentEnabled = snapshot.registrationEnabled, snapshot.dcrEnabled, snapshot.mcpEnabled, snapshot.agentEnabled
+	s.killSwitch, s.setupTokenHash, s.securityEvents, s.cfg.Mode = snapshot.killSwitch, snapshot.setupTokenHash, snapshot.securityEvents, snapshot.mode
+}
+
+func (s *Server) saveOrRollbackLocked(snapshot mutableStateSnapshot) error {
+	if err := s.saveLocked(); err != nil {
+		s.restoreMutableStateLocked(snapshot)
+		return err
+	}
+	return nil
 }
 
 func New(cfg Config) (*Server, error) {
@@ -318,6 +391,75 @@ func csrfMatches(r *http.Request, expectedHash string) bool {
 		subtle.ConstantTimeCompare([]byte(expectedHash), []byte(tokenKey(provided))) == 1
 }
 
+func canonicalizeRouteMap[V any](values map[string]V) (map[string]V, error) {
+	if values == nil {
+		return nil, nil
+	}
+	out := make(map[string]V, len(values))
+	origins := make(map[string]string, len(values))
+	for route, value := range values {
+		canonical, ok := canonicalDeviceRoute(route)
+		if !ok {
+			return nil, fmt.Errorf("invalid persisted device route %q", route)
+		}
+		if previous, exists := origins[canonical]; exists && previous != route {
+			return nil, fmt.Errorf("persisted device routes %q and %q alias the same immutable identity", previous, route)
+		}
+		origins[canonical] = route
+		out[canonical] = value
+	}
+	return out, nil
+}
+
+func (s *Server) canonicalizeDiskState(state *diskState) error {
+	var err error
+	state.Devices, err = canonicalizeRouteMap(state.Devices)
+	if err != nil {
+		return err
+	}
+	state.DisabledDevices, err = canonicalizeRouteMap(state.DisabledDevices)
+	if err != nil {
+		return err
+	}
+	state.DeviceRecords, err = canonicalizeRouteMap(state.DeviceRecords)
+	if err != nil {
+		return err
+	}
+	for route, record := range state.DeviceRecords {
+		if strings.HasPrefix(route, "id/") {
+			record.ID = strings.TrimPrefix(route, "id/")
+		} else if record.ID != "" {
+			id, ok := protocol.NormalizeDeviceID(record.ID)
+			if !ok {
+				return fmt.Errorf("invalid persisted immutable device ID %q for route %q", record.ID, route)
+			}
+			record.ID = id
+		}
+		state.DeviceRecords[route] = record
+	}
+	canonicalizeTokens := func(records map[string]tokenRecord) error {
+		for key, record := range records {
+			canonical, ok := s.validateResource(record.Resource)
+			if !ok {
+				return fmt.Errorf("invalid persisted OAuth resource for token %s", shortHandle(key))
+			}
+			record.Resource = canonical
+			records[key] = record
+		}
+		return nil
+	}
+	if err := canonicalizeTokens(state.Access); err != nil {
+		return err
+	}
+	if err := canonicalizeTokens(state.Refresh); err != nil {
+		return err
+	}
+	if err := canonicalizeTokens(state.RefreshUsed); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Server) load() error {
 	return withStateFileLock(s.stateFile, func() error {
 		if info, err := os.Lstat(s.stateFile); err == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -335,6 +477,9 @@ func (s *Server) load() error {
 		var state diskState
 		if err := json.Unmarshal(data, &state); err != nil {
 			return fmt.Errorf("decode OAuth state: %w", err)
+		}
+		if err := s.canonicalizeDiskState(&state); err != nil {
+			return fmt.Errorf("canonicalize OAuth state: %w", err)
 		}
 		if state.Clients != nil {
 			s.clients = state.Clients
@@ -394,7 +539,11 @@ func (s *Server) load() error {
 }
 
 func (s *Server) saveLocked() error {
-	return withStateFileLock(s.stateFile, s.saveLockedUnlocked)
+	err := withStateFileLock(s.stateFile, s.saveLockedUnlocked)
+	if err != nil {
+		s.persistenceFault = true
+	}
+	return err
 }
 
 func (s *Server) saveLockedUnlocked() error {
@@ -496,6 +645,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /setup", s.handleSetupGET)
 	mux.HandleFunc("POST /setup", s.handleSetupPOST)
 	mux.HandleFunc("GET /admin", s.handleAdmin)
+	mux.HandleFunc("GET /admin/reauth", s.handleAdminReauthGET)
+	mux.HandleFunc("POST /admin/reauth", s.handleAdminReauthPOST)
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
 	mux.HandleFunc("POST /admin/action", s.handleAdminAction)
@@ -559,8 +710,8 @@ func (s *Server) handleAgentResourceMetadata(w http.ResponseWriter, r *http.Requ
 func (s *Server) handleDeviceResourceMetadata(w http.ResponseWriter, r *http.Request, kind, scope string) {
 	device := strings.TrimSpace(r.PathValue("device"))
 	if device == "" {
-		id := strings.TrimSpace(r.PathValue("id"))
-		if !protocol.ValidDeviceID(id) {
+		id, ok := protocol.NormalizeDeviceID(r.PathValue("id"))
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
@@ -701,18 +852,38 @@ func (s *Server) resourceParts(raw string) (kind, device, canonical string, ok b
 			return "", "", "", false
 		}
 	} else {
-		if parts[1] != "id" || !protocol.ValidDeviceID(parts[2]) {
+		canonicalID, valid := protocol.NormalizeDeviceID(parts[2])
+		if parts[1] != "id" || !valid {
 			return "", "", "", false
 		}
-		device = "id/" + parts[2]
+		parts[2] = canonicalID
+		device = "id/" + canonicalID
 	}
 	return parts[0], device, s.absolute("/" + parts[0] + "/" + strings.Join(parts[1:], "/")), true
 }
 
+func canonicalDeviceRoute(route string) (string, bool) {
+	route = strings.TrimSpace(route)
+	if strings.HasPrefix(route, "id/") {
+		id, ok := protocol.NormalizeDeviceID(strings.TrimPrefix(route, "id/"))
+		if !ok {
+			return "", false
+		}
+		return "id/" + id, true
+	}
+	if !protocol.ValidDeviceName(route) {
+		return "", false
+	}
+	return route, true
+}
+
 func (s *Server) ensureDeviceRecordLocked(route, ownerID string) DeviceRecord {
+	if canonical, ok := canonicalDeviceRoute(route); ok {
+		route = canonical
+	}
 	record := s.deviceRecords[route]
 	if record.ID == "" {
-		if strings.HasPrefix(route, "id/") && protocol.ValidDeviceID(strings.TrimPrefix(route, "id/")) {
+		if strings.HasPrefix(route, "id/") {
 			record.ID = strings.TrimPrefix(route, "id/")
 		} else {
 			record.ID = protocol.NewID()
@@ -1020,6 +1191,9 @@ func (s *Server) authorizeResourceLocked(userID, resource string) error {
 	if s.users[userID].ID == "" {
 		return errors.New("unknown authorization user")
 	}
+	if s.persistenceFault {
+		return errors.New("authorization state persistence failed; Relay access is frozen until restart after storage repair")
+	}
 	if s.killSwitch || (kind == "mcp" && !s.mcpEnabled) || (kind == "agent" && !s.agentEnabled) {
 		return errors.New("this capability is temporarily disabled by the administrator")
 	}
@@ -1033,6 +1207,9 @@ func (s *Server) authorizeResourceLocked(userID, resource string) error {
 	}
 	if kind == "agent" {
 		if owner == "" {
+			if s.cfg.Mode == ModePublic && !strings.HasPrefix(device, "id/") {
+				return errors.New("public instances require an immutable device ID for first claim; legacy name routes are compatibility-only")
+			}
 			owned := 0
 			for _, candidate := range s.devices {
 				if candidate == userID {
@@ -1059,6 +1236,18 @@ func (s *Server) authorizeResourceLocked(userID, resource string) error {
 	return nil
 }
 
+func agentDisplayNameHint(client Client) string {
+	const prefix = "chat-with-cli agent "
+	if !strings.HasPrefix(client.Name, prefix) {
+		return ""
+	}
+	name := strings.TrimSpace(strings.TrimPrefix(client.Name, prefix))
+	if !validateDeviceDisplayName(name) {
+		return ""
+	}
+	return name
+}
+
 func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requestID, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1066,8 +1255,20 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 	if !ok || time.Now().After(pending.Expires) {
 		return errors.New("authorization request expired")
 	}
+	snapshot := s.snapshotMutableStateLocked()
 	if err := s.authorizeResourceLocked(userID, pending.Resource); err != nil {
 		return err
+	}
+	if kind, device, _, ok := s.resourceParts(pending.Resource); ok && kind == "agent" {
+		client := s.clients[pending.ClientID]
+		if hint := agentDisplayNameHint(client); hint != "" {
+			record := s.ensureDeviceRecordLocked(device, userID)
+			defaultName := strings.TrimPrefix(device, "id/")
+			if record.DisplayName == "" || record.DisplayName == record.ID || record.DisplayName == defaultName {
+				record.DisplayName = hint
+				s.deviceRecords[device] = record
+			}
+		}
 	}
 	pending.UserID = userID
 	code := randomToken(32)
@@ -1076,8 +1277,7 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 	client := s.clients[pending.ClientID]
 	client.Approved = true
 	s.clients[pending.ClientID] = client
-	if err := s.saveLocked(); err != nil {
-		delete(s.codes, tokenKey(code))
+	if err := s.saveOrRollbackLocked(snapshot); err != nil {
 		return errors.New("failed to persist authorization")
 	}
 	u, _ := url.Parse(pending.RedirectURI)
@@ -1190,8 +1390,17 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code binding check failed")
 		return
 	}
-	if resource != "" && resource != code.Resource {
-		oauthError(w, http.StatusBadRequest, "invalid_target", "resource does not match authorization request")
+	if resource == "" || resource != code.Resource {
+		oauthError(w, http.StatusBadRequest, "invalid_target", "resource is required and must exactly match the authorization grant")
+		return
+	}
+	kind, _, _, resourceOK := s.resourceParts(code.Resource)
+	requiredScope := "mcp"
+	if kind == "agent" {
+		requiredScope = "agent:connect"
+	}
+	if !resourceOK || !s.resourceOwnedByUserLocked(code.UserID, code.Resource, requiredScope) {
+		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization grant no longer owns the requested resource")
 		return
 	}
 	access, refresh, expires, err := s.issueTokensLocked(code.ClientID, code.UserID, code.Resource, code.Scope)
@@ -1208,13 +1417,15 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) exchangeRefresh(w http.ResponseWriter, r *http.Request) {
 	refreshValue := r.Form.Get("refresh_token")
 	clientID := r.Form.Get("client_id")
+	resource := r.Form.Get("resource")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupLocked(time.Now())
 	key := tokenKey(refreshValue)
 	record, ok := s.refresh[key]
-	if !ok || record.ClientID != clientID {
+	if !ok || record.ClientID != clientID || resource == "" || resource != record.Resource {
 		if used, replay := s.refreshUsed[key]; replay && (clientID == "" || used.ClientID == clientID) {
+			s.resetAgentSessionForResourceLocked(used.Resource)
 			s.revokeFamilyLocked(used.Family)
 			_ = s.saveLocked()
 		}
@@ -1222,13 +1433,12 @@ func (s *Server) exchangeRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, clientExists := s.clients[record.ClientID]
-	user, userExists := s.users[record.UserID]
 	kind, _, _, resourceOK := s.resourceParts(record.Resource)
 	requiredScope := "mcp"
 	if kind == "agent" {
 		requiredScope = "agent:connect"
 	}
-	if !clientExists || !userExists || user.Disabled || !resourceOK || !s.resourceEnabledLocked(record.Resource, requiredScope) {
+	if !clientExists || !resourceOK || !s.resourceOwnedByUserLocked(record.UserID, record.Resource, requiredScope) {
 		delete(s.refresh, key)
 		_ = s.saveLocked()
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
@@ -1287,9 +1497,14 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	key := tokenKey(r.Form.Get("token"))
 	s.mu.Lock()
-	if record, ok := s.refresh[key]; ok {
+	if record, ok := s.access[key]; ok {
+		s.resetAgentSessionForResourceLocked(record.Resource)
+		s.revokeFamilyLocked(record.Family)
+	} else if record, ok := s.refresh[key]; ok {
+		s.resetAgentSessionForResourceLocked(record.Resource)
 		s.revokeFamilyLocked(record.Family)
 	} else if record, ok := s.refreshUsed[key]; ok {
+		s.resetAgentSessionForResourceLocked(record.Resource)
 		s.revokeFamilyLocked(record.Family)
 	}
 	delete(s.access, key)
@@ -1336,21 +1551,19 @@ func (s *Server) VerifyAgentConnection(credentialHash, device string) bool {
 	return s.verifyAccessKey(credentialHash, s.absolute("/agent/"+device), "agent:connect")
 }
 
-// AgentConnectionEnabled applies the Relay-wide and device-level gates to a
-// legacy static-token peer. Static compatibility credentials have no OAuth
-// record to revalidate, but they must still stop working after an admin
-// disables Agent access, the device, or the Relay kill switch.
-func (s *Server) AgentConnectionEnabled(device string) bool {
-	device = strings.TrimSpace(device)
-	if !validateDeviceRoute(device) {
+func (s *Server) resourceOwnedByUserLocked(userID, resource, requiredScope string) bool {
+	user, exists := s.users[userID]
+	if !exists || user.ID == "" || user.Disabled || !s.resourceEnabledLocked(resource, requiredScope) {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.devices[device]; !exists {
+	kind, device, _, ok := s.resourceParts(resource)
+	if !ok {
 		return false
 	}
-	return s.resourceEnabledLocked(s.absolute("/agent/"+device), "agent:connect")
+	if (requiredScope == "mcp" && kind != "mcp") || (requiredScope == "agent:connect" && kind != "agent") {
+		return false
+	}
+	return s.devices[device] == userID
 }
 
 func (s *Server) verifyAccessKey(credentialHash, resource, requiredScope string) bool {
@@ -1361,19 +1574,16 @@ func (s *Server) verifyAccessKey(credentialHash, resource, requiredScope string)
 	defer s.mu.Unlock()
 	s.cleanupLocked(time.Now())
 	record, ok := s.access[credentialHash]
-	if !ok || !s.resourceEnabledLocked(resource, requiredScope) {
+	if !ok || !s.resourceOwnedByUserLocked(record.UserID, resource, requiredScope) {
 		return false
 	}
 	client, clientExists := s.clients[record.ClientID]
-	user, userExists := s.users[record.UserID]
-	_, device, _, resourceOK := s.resourceParts(resource)
-	return clientExists && client.ID != "" && userExists && !user.Disabled && s.devices[device] == record.UserID &&
-		record.UserID != "" && resourceOK && record.Resource == resource &&
+	return clientExists && client.ID != "" && record.UserID != "" && record.Resource == resource &&
 		strings.Contains(" "+record.Scope+" ", " "+requiredScope+" ")
 }
 
 func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
-	if s.killSwitch || (requiredScope == "mcp" && !s.mcpEnabled) || (requiredScope == "agent:connect" && !s.agentEnabled) {
+	if s.persistenceFault || s.killSwitch || (requiredScope == "mcp" && !s.mcpEnabled) || (requiredScope == "agent:connect" && !s.agentEnabled) {
 		return false
 	}
 	_, device, _, ok := s.resourceParts(resource)
@@ -1386,13 +1596,17 @@ func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
 	return true
 }
 
-func (s *Server) ProtectResource(staticToken string, next http.Handler) http.Handler {
-	return s.ProtectScopedResource(staticToken, "mcp", next)
+func (s *Server) ProtectResource(next http.Handler) http.Handler {
+	return s.ProtectScopedResource("mcp", next)
 }
 
-func (s *Server) ProtectScopedResource(staticToken, requiredScope string, next http.Handler) http.Handler {
+func (s *Server) ProtectScopedResource(requiredScope string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resource := s.absolute(r.URL.EscapedPath())
+		resource, validResource := s.validateResource(s.absolute(r.URL.EscapedPath()))
+		if !validResource {
+			http.NotFound(w, r)
+			return
+		}
 		s.mu.Lock()
 		enabled := s.resourceEnabledLocked(resource, requiredScope)
 		s.mu.Unlock()
@@ -1401,25 +1615,86 @@ func (s *Server) ProtectScopedResource(staticToken, requiredScope string, next h
 			return
 		}
 		token := bearerValue(r.Header.Get("Authorization"))
-		if staticToken != "" && len(token) == len(staticToken) && subtle.ConstantTimeCompare([]byte(token), []byte(staticToken)) == 1 {
-			s.mu.Lock()
-			_, device, _, registered := s.resourceParts(resource)
-			registered = registered && s.devices[device] != ""
-			s.mu.Unlock()
-			if registered {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
 		if s.VerifyAccessScope(token, resource, requiredScope) {
-			next.ServeHTTP(w, r)
+			credentialHash := tokenKey(token)
+			checker := func() bool { return s.verifyAccessKey(credentialHash, resource, requiredScope) }
+			ctx, cancel := context.WithCancel(authzctx.WithChecker(r.Context(), checker))
+			defer cancel()
+			go func() {
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if !checker() {
+							cancel()
+							return
+						}
+					}
+				}
+			}()
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		metadataURL := s.ResourceMetadataURL(r.URL.EscapedPath())
+		resourceURL, _ := url.Parse(resource)
+		metadataURL := s.ResourceMetadataURL(resourceURL.EscapedPath())
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata=%q, scope=%q`, metadataURL, requiredScope))
 		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
+}
+
+// SetAgentSessionResetter installs a local Relay callback used to terminate
+// device sessions after security-sensitive OAuth revocation. It is configured
+// by the Relay before serving requests and never receives bearer credentials.
+func (s *Server) SetAgentSessionResetter(resetter func(device string)) {
+	s.mu.Lock()
+	s.agentSessionResetter = resetter
+	s.mu.Unlock()
+}
+
+func (s *Server) resetAgentSessionForResourceLocked(resource string) {
+	_, device, _, ok := s.resourceParts(resource)
+	if ok && s.agentSessionResetter != nil {
+		s.agentSessionResetter(device)
+	}
+}
+
+func (s *Server) agentSessionResetterSafe(device string) {
+	if s.agentSessionResetter != nil {
+		s.agentSessionResetter(device)
+	}
+}
+
+func (s *Server) resetOwnedAgentSessionsLocked(userID string) {
+	if s.agentSessionResetter == nil {
+		return
+	}
+	for device, owner := range s.devices {
+		if owner == userID {
+			s.agentSessionResetter(device)
+		}
+	}
+}
+
+func (s *Server) resetAllAgentSessionsLocked() {
+	if s.agentSessionResetter == nil {
+		return
+	}
+	for device := range s.devices {
+		s.agentSessionResetter(device)
+	}
+}
+
+// Ready reports whether the Relay can safely authorize MCP and Agent traffic.
+// A persistence fault is fail-closed and should surface as an unhealthy
+// readiness check instead of pretending the Relay is operational.
+func (s *Server) Ready() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.persistenceFault
 }
 
 func (s *Server) ClientCount() int {

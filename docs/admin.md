@@ -15,14 +15,24 @@ Available controls include:
 
 - enable/disable public registration and DCR;
 - emergency disable/re-enable MCP or Agent access;
-- disable, unlink/revoke, and rename devices; device IDs remain immutable;
+- disable, unlink/revoke, and rename devices; device IDs remain immutable and
+  canonicalized;
 - create, disable, delete, and rotate credentials for users; log out one or
   all browser sessions;
 - revoke OAuth clients, individual access tokens, refresh-token families, and
   individual browser sessions;
 - activate or release the Relay kill switch.
 
-Destructive actions require explicit confirmation and recent administrator
-authentication. The dashboard is a control plane, not a replacement for OS
-permissions: a running Agent's local capability policy and the desktop's
-Portal consent still apply.
+Authority-reducing controls are intentionally fast: disabling MCP/Agent,
+disabling a user/device, or engaging the global kill switch does not require a
+fresh password prompt. Authority-expanding recovery is stricter: re-enabling a
+user/device or releasing the kill switch requires a password re-check through
+`/admin/reauth`; destructive revocations/deletions retain explicit confirmation.
+Repeated disable requests are idempotent and cannot accidentally toggle access
+back on.
+
+If authorization state cannot be durably persisted, the Relay freezes MCP and
+Agent authorization fail-closed, shows a red dashboard warning, and `/health`
+returns 503 until the storage problem is fixed and the Relay restarts cleanly.
+The dashboard is a control plane, not a replacement for OS permissions: a
+running Agent's local capability policy and desktop Portal consent still apply.

@@ -164,7 +164,7 @@ func TestPublicAgentOAuthCanRegisterAndClaimDevice(t *testing.T) {
 	defer cleanup()
 	calls := 0
 	manager := &Manager{
-		RelayURL: base, Device: "new-user-laptop", CredentialsPath: filepath.Join(t.TempDir(), "credentials.json"),
+		RelayURL: base, Device: "new-user-laptop", DeviceID: "99999999999999999999999999999999", CredentialsPath: filepath.Join(t.TempDir(), "credentials.json"),
 		OpenBrowser: loginBrowser(t, "newuser", "new-user-password-123", "register", &calls),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -177,8 +177,19 @@ func TestPublicAgentOAuthCanRegisterAndClaimDevice(t *testing.T) {
 	if !oauth.VerifyAccessScope(access, resource, "agent:connect") {
 		t.Fatal("registered user did not receive Agent access")
 	}
-	owner, ok := oauth.DeviceOwner("new-user-laptop")
+	owner, ok := oauth.DeviceOwner("id/99999999999999999999999999999999")
 	if !ok || strings.ToLower(owner.Username) != "newuser" {
 		t.Fatalf("unexpected device owner: %+v ok=%v", owner, ok)
+	}
+}
+
+func TestManagerResourceCanonicalizesDeviceIDCase(t *testing.T) {
+	manager := &Manager{RelayURL: "https://relay.example", Device: "label", DeviceID: "ABCDEF0123456789ABCDEF0123456789"}
+	resource, err := manager.Resource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resource != "https://relay.example/agent/id/abcdef0123456789abcdef0123456789" {
+		t.Fatalf("resource=%q", resource)
 	}
 }

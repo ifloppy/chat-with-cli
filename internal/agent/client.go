@@ -59,6 +59,10 @@ func (c *Client) Run(ctx context.Context) error {
 		if err == nil {
 			conn.SetReadLimit(32 << 20)
 			err = c.serve(ctx, conn)
+			// A detached PTY must not keep executing after the remote authority
+			// disappears. Treat every Relay disconnect as the end of that remote
+			// authorization session; reconnect starts from a clean local state.
+			c.Engine.EndRemoteSession()
 			_ = conn.CloseNow()
 			backoff = time.Second
 		}
@@ -110,10 +114,11 @@ func agentURLForRoute(base, device, deviceID string) (string, error) {
 	}
 	route := strings.TrimSpace(device)
 	if strings.TrimSpace(deviceID) != "" {
-		if !protocol.ValidDeviceID(strings.TrimSpace(deviceID)) {
+		canonicalID, ok := protocol.NormalizeDeviceID(deviceID)
+		if !ok {
 			return "", errors.New("invalid immutable device ID")
 		}
-		route = "id/" + strings.TrimSpace(deviceID)
+		route = "id/" + canonicalID
 	} else if !protocol.ValidDeviceName(route) {
 		return "", errors.New("invalid device name")
 	}

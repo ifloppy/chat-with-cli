@@ -13,6 +13,7 @@ type Config struct {
 	ComputerPersistMode  string
 	StateDir             string
 	KillSwitchPath       string
+	ProtectedPaths       []string
 	MaxReadBytes         int
 	MaxTaskLogBytes      int64
 	MaxActiveTasks       int

@@ -41,6 +41,18 @@ func parseTrustedProxyCIDRs(values []string) ([]*net.IPNet, error) {
 	return proxies, nil
 }
 
+func ipTrusted(ip net.IP, trusted []*net.IPNet) bool {
+	if ip == nil {
+		return false
+	}
+	for _, network := range trusted {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func requestIP(r *http.Request, trusted []*net.IPNet) string {
 	remote := ""
 	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
@@ -50,31 +62,30 @@ func requestIP(r *http.Request, trusted []*net.IPNet) string {
 	}
 	remoteIP := net.ParseIP(remote)
 	if remoteIP == nil {
-		remote = "unknown"
+		return "unknown"
 	}
-	trustedRemote := false
-	if remoteIP != nil {
-		for _, network := range trusted {
-			if network.Contains(remoteIP) {
-				trustedRemote = true
-				break
-			}
+	if !ipTrusted(remoteIP, trusted) {
+		return remoteIP.String()
+	}
+
+	// X-Forwarded-For is an append-style chain. Walk from the proxy nearest
+	// to us toward the client and discard only addresses in explicitly trusted
+	// proxy ranges. Taking the left-most value would let a client prepend a
+	// spoofed address and evade per-IP limits.
+	forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(forwarded) - 1; i >= 0; i-- {
+		ip := net.ParseIP(strings.TrimSpace(forwarded[i]))
+		if ip == nil {
+			continue
+		}
+		if !ipTrusted(ip, trusted) {
+			return ip.String()
 		}
 	}
-	if trustedRemote {
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			for _, candidate := range strings.Split(forwarded, ",") {
-				candidate = strings.TrimSpace(candidate)
-				if ip := net.ParseIP(candidate); ip != nil {
-					return ip.String()
-				}
-			}
-		}
-		if realIP := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); realIP != nil {
-			return realIP.String()
-		}
+	if realIP := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); realIP != nil && !ipTrusted(realIP, trusted) {
+		return realIP.String()
 	}
-	return remote
+	return remoteIP.String()
 }
 
 func (s *Server) allowRate(r *http.Request, bucket string, limit int, window time.Duration) bool {

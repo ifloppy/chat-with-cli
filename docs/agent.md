@@ -4,7 +4,7 @@ The default config path is `~/.config/chat-with-cli/config.toml` (or
 `$XDG_CONFIG_HOME/chat-with-cli/config.toml`). Create it with:
 
 ```bash
-chat-with-cli agent setup --relay https://cli.example.com --device workstation
+chat-with-cli agent setup --relay https://cli.example.com --root "$HOME/project" --device workstation
 ```
 
 CLI flags override config values. Secrets belong in environment variables or
@@ -34,8 +34,10 @@ Capabilities can also be selected separately:
 --max-active-tasks N        bounded concurrent PTY tasks (maximum 256)
 ```
 
-The default root is the current directory when no root is specified. Resolve
-roots deliberately; a root is not a shell sandbox. With `--allow-exec`, a
+`agent setup` prints every configured filesystem root and warns when `/` or the
+whole home directory is exposed. Prefer an explicit project/workspace root;
+read-only still means every readable file under that root can be returned to an
+authorized MCP client. A root is not a shell sandbox. With `--allow-exec`, a
 shell without Landlock still has the Agent user's normal filesystem, network,
 process, and environment access. Landlock is filesystem-only defense in depth.
 
@@ -51,9 +53,17 @@ advisory lock. Remote Relay origins must use HTTPS/WSS (loopback HTTP is
 allowed for local development), and active Agent WebSockets revalidate their
 credential before every brokered RPC.
 
-Use the immutable device ID for both `login` and `agent` after setup. Keep the
-ID and credential file private even though the human-readable name is only a
+`agent setup` stores the immutable device ID and Relay URL in the config, so a
+normal first login is simply `chat-with-cli login`. Explicit CLI overrides are
+still supported. Immutable IDs are normalized to one lowercase canonical form
+across OAuth, Relay routes, Agent WebSockets, and the credential store. Keep the
+credential file private even though the human-readable device name is only a
 label.
+
+When the authenticated Relay session is revoked or disconnected, the Agent
+ends that remote session: in-flight calls are canceled, detached PTY tasks are
+terminated, and the active Desktop Portal control session is closed. This is a
+security-first default; do not rely on remote PTY tasks surviving disconnects.
 
 ## systemd user unit
 

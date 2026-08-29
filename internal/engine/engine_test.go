@@ -233,3 +233,152 @@ func TestScreenshotPayloadLeavesWebSocketHeadroom(t *testing.T) {
 		t.Fatalf("screenshot cap %d leaves insufficient WebSocket headroom", maxScreenshotBytes)
 	}
 }
+
+func TestKillSwitchStopsRunningTask(t *testing.T) {
+	root := t.TempDir()
+	killSwitch := filepath.Join(t.TempDir(), "PANIC")
+	eng, err := New(Config{
+		Roots: []string{root}, AllowExec: true,
+		StateDir: t.TempDir(), KillSwitchPath: killSwitch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	info, err := eng.tasks.Start(context.Background(), StartTaskInput{Command: "sleep 30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(killSwitch, []byte("stop\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		current, ok := eng.tasks.getInfo(info.ID)
+		if ok && current.State != "running" {
+			if _, err := eng.Invoke(context.Background(), "system_info", nil); err == nil || !strings.Contains(err.Error(), "kill switch") {
+				t.Fatalf("kill switch did not block new calls: %v", err)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("kill switch did not terminate running task")
+}
+
+func TestKillSwitchCancelsInFlightContext(t *testing.T) {
+	killSwitch := filepath.Join(t.TempDir(), "PANIC")
+	eng, err := New(Config{Roots: []string{t.TempDir()}, StateDir: t.TempDir(), KillSwitchPath: killSwitch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	callCtx, cancel, blocked := eng.callContext(context.Background())
+	if blocked {
+		cancel()
+		t.Fatal("kill switch unexpectedly active")
+	}
+	defer cancel()
+	if err := os.WriteFile(killSwitch, []byte("stop\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-callCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("kill switch did not cancel an in-flight Engine context")
+	}
+
+	if err := os.Remove(killSwitch); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, release, blocked := eng.callContext(context.Background())
+		if !blocked && ctx.Err() == nil {
+			release()
+			return
+		}
+		release()
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("kill switch did not recover after PANIC file removal")
+}
+
+func TestProtectedPathsAreHiddenFromFilesystemTools(t *testing.T) {
+	root := t.TempDir()
+	privateDir := filepath.Join(root, "private")
+	if err := os.Mkdir(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(privateDir, "credentials.json")
+	if err := os.WriteFile(secret, []byte("secret-marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(Config{
+		Roots: []string{root}, StateDir: t.TempDir(),
+		ProtectedPaths: []string{privateDir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ReadFile(FileReadInput{Path: secret}); err == nil || !strings.Contains(err.Error(), "private state") {
+		t.Fatalf("protected read was not rejected: %v", err)
+	}
+	listed, err := eng.ListFiles(FileListInput{Path: root, Depth: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, entry := range listed.Entries {
+		if strings.Contains(entry.Path, privateDir) {
+			t.Fatalf("protected path leaked through fs_list: %+v", entry)
+		}
+	}
+	searched, err := eng.SearchFiles(context.Background(), FileSearchInput{
+		Path: root, Pattern: "secret-marker", Kind: "content",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searched.Hits) != 0 {
+		t.Fatalf("protected path leaked through fs_search: %+v", searched.Hits)
+	}
+}
+
+func TestLandlockRefusesRootContainingPrivateState(t *testing.T) {
+	root := t.TempDir()
+	privateDir := filepath.Join(root, "private")
+	if err := os.Mkdir(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(Config{
+		Roots: []string{root}, StateDir: t.TempDir(), AllowExec: true,
+		ExecSandbox: "landlock", ProtectedPaths: []string{privateDir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.command("true", root, ""); err == nil || !strings.Contains(err.Error(), "contains chat-with-cli private state") {
+		t.Fatalf("broad Landlock root was accepted: %v", err)
+	}
+}
+
+func TestEndRemoteSessionStopsDetachedTasks(t *testing.T) {
+	eng := testEngine(t, true)
+	defer eng.Close()
+	info, err := eng.tasks.Start(context.Background(), StartTaskInput{Command: "sleep 30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.EndRemoteSession()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		current, ok := eng.tasks.getInfo(info.ID)
+		if ok && current.State != "running" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("detached PTY survived loss of the remote authorization session")
+}

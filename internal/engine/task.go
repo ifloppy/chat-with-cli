@@ -34,6 +34,7 @@ type Task struct {
 	info     TaskInfo
 	pty      *os.File
 	logPath  string
+	tempDir  string
 	copyDone chan struct{}
 }
 
@@ -117,23 +118,65 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	}()
 	id := protocol.NewID()
 	logPath := filepath.Join(m.dir, id+".log")
+	tempDir := ""
+	if m.engine.cfg.ExecSandbox == "landlock" && m.engine.cfg.AllowFileWrite {
+		tempDir = filepath.Join(m.dir, id+".tmp")
+		if err := os.Mkdir(tempDir, 0o700); err != nil {
+			return TaskInfo{}, fmt.Errorf("create private task temp directory: %w", err)
+		}
+	}
+	cleanupTemp := func() {
+		if tempDir != "" {
+			_ = os.RemoveAll(tempDir)
+		}
+	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
+		cleanupTemp()
 		return TaskInfo{}, err
 	}
-	cmd, err := m.engine.command(in.Command)
+	cmd, err := m.engine.command(in.Command, cwd, tempDir)
 	if err != nil {
 		_ = logFile.Close()
 		_ = os.Remove(logPath)
+		cleanupTemp()
 		return TaskInfo{}, err
 	}
-	cmd.Dir = cwd
+	if m.engine.cfg.ExecSandbox == "none" {
+		cmd.Dir = cwd
+	}
 	cmd.Env = mergeEnv(os.Environ(), in.Env)
+	if tempDir != "" {
+		cmd.Env = setEnv(cmd.Env, "TMPDIR", tempDir)
+		cmd.Env = setEnv(cmd.Env, "TMP", tempDir)
+		cmd.Env = setEnv(cmd.Env, "TEMP", tempDir)
+	}
+	select {
+	case <-ctx.Done():
+		_ = logFile.Close()
+		_ = os.Remove(logPath)
+		cleanupTemp()
+		return TaskInfo{}, ctx.Err()
+	default:
+	}
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		_ = logFile.Close()
 		_ = os.Remove(logPath)
+		cleanupTemp()
 		return TaskInfo{}, fmt.Errorf("start PTY: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		pid := cmd.Process.Pid
+		if killErr := syscall.Kill(-pid, syscall.SIGKILL); killErr != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = ptmx.Close()
+		_ = logFile.Close()
+		_ = os.Remove(logPath)
+		_, _ = cmd.Process.Wait()
+		cleanupTemp()
+		return TaskInfo{}, err
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
@@ -143,7 +186,7 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 		ID: id, Name: name, Command: in.Command, Cwd: cwd,
 		PID: cmd.Process.Pid, State: "running", StartedAt: time.Now(),
 	}
-	task := &Task{info: info, pty: ptmx, logPath: logPath, copyDone: make(chan struct{})}
+	task := &Task{info: info, pty: ptmx, logPath: logPath, tempDir: tempDir, copyDone: make(chan struct{})}
 	m.mu.Lock()
 	m.tasks[id] = task
 	m.history[id] = info
@@ -177,6 +220,9 @@ func (m *TaskManager) waitTask(task *Task, cmd *exec.Cmd, logFile *os.File) {
 	_ = task.pty.Close()
 	<-task.copyDone
 	_ = logFile.Close()
+	if task.tempDir != "" {
+		_ = os.RemoveAll(task.tempDir)
+	}
 
 	exitCode := 0
 	state := "completed"
@@ -276,6 +322,29 @@ func (m *TaskManager) Send(in SendTaskInput) error {
 	return err
 }
 
+func (m *TaskManager) StopAll(sig syscall.Signal) {
+	m.mu.RLock()
+	tasks := make([]*Task, 0, len(m.tasks))
+	for _, task := range m.tasks {
+		tasks = append(tasks, task)
+	}
+	m.mu.RUnlock()
+	for _, task := range tasks {
+		task.mu.RLock()
+		pid := task.info.PID
+		task.mu.RUnlock()
+		if pid <= 0 {
+			continue
+		}
+		if err := syscall.Kill(-pid, sig); err == nil {
+			continue
+		}
+		if process, err := os.FindProcess(pid); err == nil {
+			_ = process.Signal(sig)
+		}
+	}
+}
+
 func (m *TaskManager) Stop(in StopTaskInput) error {
 	m.mu.RLock()
 	task := m.tasks[in.TaskID]
@@ -350,15 +419,23 @@ func shellCommand(command string) *exec.Cmd {
 	return exec.Command("/bin/sh", "-lc", command)
 }
 
-func (e *Engine) command(command string) (*exec.Cmd, error) {
+func (e *Engine) command(command, cwd, tempDir string) (*exec.Cmd, error) {
 	if e.cfg.ExecSandbox == "none" {
 		return shellCommand(command), nil
+	}
+	for _, root := range e.roots {
+		if e.rootCoversProtectedPath(root) {
+			return nil, fmt.Errorf("Landlock root %q contains chat-with-cli private state; choose a narrower root or disable shell execution", root)
+		}
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("resolve chat-with-cli executable for exec sandbox: %w", err)
 	}
-	args := []string{"exec-sandbox"}
+	args := []string{"exec-sandbox", "--cwd", cwd}
+	if tempDir != "" {
+		args = append(args, "--temp-dir", tempDir)
+	}
 	for _, root := range e.roots {
 		args = append(args, "--root", root)
 	}
@@ -371,6 +448,17 @@ func (e *Engine) command(command string) (*exec.Cmd, error) {
 		args = append(args, "--", "/bin/sh", "-lc", command)
 	}
 	return exec.Command(executable, args...), nil
+}
+
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			out = append(out, item)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 func mergeEnv(base []string, extra map[string]string) []string {

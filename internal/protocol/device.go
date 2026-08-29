@@ -22,17 +22,23 @@ func ValidDeviceName(name string) bool {
 // ValidDeviceID accepts the immutable 128-bit identifier used by the modern
 // device route. Human-readable names remain labels only; callers should use
 // this identifier as the authorization/resource key.
-func ValidDeviceID(id string) bool {
+func NormalizeDeviceID(id string) (string, bool) {
+	id = strings.ToLower(strings.TrimSpace(id))
 	if len(id) != 32 {
-		return false
+		return "", false
 	}
-	for _, r := range strings.ToLower(id) {
+	for _, r := range id {
 		if (r >= 'a' && r <= 'f') || (r >= '0' && r <= '9') {
 			continue
 		}
-		return false
+		return "", false
 	}
-	return true
+	return id, true
+}
+
+func ValidDeviceID(id string) bool {
+	_, ok := NormalizeDeviceID(id)
+	return ok
 }
 
 // AgentCapabilities is a deliberately small, privacy-preserving capability

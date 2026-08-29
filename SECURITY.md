@@ -34,7 +34,8 @@ is not required.
 - Filesystem and checkpoint writes require `--allow-file-write`.
 - Arbitrary PTY shell commands require `--allow-exec`.
 - `--exec-sandbox=landlock` adds a Linux filesystem-only boundary to shell
-  children; it is not enabled implicitly.
+  children. On Linux the `developer` profile selects it by default; explicit
+  `--exec-sandbox=none` opts back into unsandboxed shell authority.
 - Screenshots require `--allow-screen`; AT-SPI accessibility reads require
   `--allow-accessibility`.
 - Keyboard, pointer, semantic UI actions, and editable-text mutation require
@@ -55,13 +56,23 @@ Dynamic Client Registration, mandatory PKCE S256, one-use expiring
 authorization codes, exact redirect matching, short-lived resource-bound
 access tokens, rotating refresh-token families with replay revocation, and
 OAuth revocation. MCP grants require `mcp`; Agent grants require
-`agent:connect`; resource URLs and scopes are checked again at request time.
+`agent:connect`; access is bound to the exact user, resource, scope, device
+owner, and token family. OAuth-enabled Relays reject shared static client/Agent
+tokens because a shared bearer cannot enforce per-user device ownership. Legacy
+static mode is a separate single-tenant compatibility mode.
 
 Relay passwords use Argon2id with random per-password salts. Password hashing
 is concurrency-limited and unknown users use a dummy hash path to reduce
 username timing differences. Login, DCR, authorization, token, revoke, setup,
 and admin flows have bounded rates and body sizes. Pending authorization,
 client, user, session, and broker resources have bounded counts/lifetimes.
+
+
+Authorization-state persistence is fail-closed. If the Relay cannot durably
+write OAuth/security state, the running process freezes MCP and Agent access
+instead of continuing with potentially stale authorization. Repair storage and
+restart from the last durable state. Revoking either an access or refresh token
+revokes its complete refresh-token family.
 
 Browser forms use CSRF tokens bound to cookies and pending requests. Admin and
 setup pages use HttpOnly, SameSite cookies, Secure cookies on HTTPS, CSP,
@@ -83,18 +94,21 @@ Keychain, and Credential Manager backends remain future work.
 
 New deployments should use the random immutable 128-bit device ID and routes
 `/agent/id/<id>` and `/mcp/id/<id>`. The human-readable device name is a label,
-not a security principal. Legacy name routes remain for alpha compatibility and
-can be claimed by the first successful Agent authorization, so public name
-squatting is an availability risk. OAuth account ownership still gates MCP
-authorization; knowing an ID is not a bearer credential.
+not a security principal. Public instances require an immutable ID for new
+device claims; legacy name routes are compatibility-only for already-owned
+devices. OAuth account ownership still gates MCP authorization; knowing an ID
+is not sufficient to use an already-owned device.
 
 The admin control plane can rename labels without changing routes, disable or
 unlink devices, revoke device token families, and permanently disable Agent or
 MCP access. Device capabilities are still enforced locally by the Agent; Relay
 admin state cannot grant a capability the Agent did not enable. Authenticated
-Agent WebSockets revalidate their one-way bearer fingerprint before each
-brokered RPC, so token, device, Agent, and kill-switch revocation also stops
-already-open peers from making new calls.
+Agent WebSockets continuously revalidate their one-way bearer fingerprint,
+including while idle and while an RPC is in flight. MCP caller authorization is
+also revalidated before dispatch and during in-flight work. Token/client/device
+revocation resets the affected remote Agent session; a lost Agent session kills
+detached PTYs and closes Desktop Portal control before reconnecting. This keeps
+previously-started background work from surviving loss of remote authority.
 
 ## Prompt injection and Computer Use
 

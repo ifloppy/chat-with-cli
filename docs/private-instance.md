@@ -32,7 +32,9 @@ hash and are not written into OAuth credentials.
 Without `--public-url`, a Relay can run only in legacy private mode with both
 `--client-token` and `--agent-token`. Do not expose this mode directly to the
 Internet. It has no browser OAuth, per-user ownership, or dynamic resource
-authorization. Public mode rejects shared static tokens.
+authorization: either shared credential should be treated as broad single-tenant
+device authority. OAuth-enabled private and public instances reject shared
+static tokens.
 
 ## Operations
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ifloppy/chat-with-cli/internal/authzctx"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
@@ -27,7 +28,10 @@ type Broker struct {
 	authorizer     func(device, credentialHash string) bool
 }
 
-const maxRPCTime = 2 * time.Minute
+const (
+	maxRPCTime                = 2 * time.Minute
+	agentRevalidationInterval = 250 * time.Millisecond
+)
 
 type peer struct {
 	device         string
@@ -42,6 +46,7 @@ type peer struct {
 	lastSeen       time.Time
 	capabilities   protocol.AgentCapabilities
 	credentialHash string
+	closeReason    string
 }
 
 type RemoteCaller struct {
@@ -84,6 +89,9 @@ func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMe
 	if p == nil {
 		return nil, fmt.Errorf("device %q is offline", device)
 	}
+	if !authzctx.Allowed(rpcCtx) {
+		return nil, errors.New("caller authorization revoked")
+	}
 	if !b.peerAuthorized(p) {
 		p.close("authorization revoked")
 		return nil, errors.New("agent authorization revoked")
@@ -107,19 +115,40 @@ func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMe
 	}()
 
 	request := protocol.Request{ID: id, Method: method, Args: raw}
+	if !authzctx.Allowed(rpcCtx) {
+		return nil, errors.New("caller authorization revoked")
+	}
 	if err := p.writeJSON(rpcCtx, request); err != nil {
 		return nil, err
 	}
-	select {
-	case response := <-ch:
-		if response.Error != "" {
-			return nil, errors.New(response.Error)
+	revalidate := time.NewTicker(agentRevalidationInterval)
+	defer revalidate.Stop()
+	for {
+		select {
+		case response := <-ch:
+			if response.Error != "" {
+				return nil, errors.New(response.Error)
+			}
+			return response.Result, nil
+		case <-revalidate.C:
+			if !authzctx.Allowed(rpcCtx) {
+				return nil, errors.New("caller authorization revoked")
+			}
+			if !b.peerAuthorized(p) {
+				p.close("authorization revoked")
+				return nil, errors.New("agent authorization revoked")
+			}
+		case <-p.done:
+			p.stateMu.RLock()
+			reason := p.closeReason
+			p.stateMu.RUnlock()
+			if reason == "authorization revoked" {
+				return nil, errors.New("agent authorization revoked")
+			}
+			return nil, errors.New("device disconnected")
+		case <-rpcCtx.Done():
+			return nil, rpcCtx.Err()
 		}
-		return response.Result, nil
-	case <-p.done:
-		return nil, errors.New("device disconnected")
-	case <-rpcCtx.Done():
-		return nil, rpcCtx.Err()
 	}
 }
 
@@ -172,11 +201,32 @@ func (p *peer) readLoop(onClose func()) {
 	}
 }
 
-func (p *peer) close(_ string) {
-	p.doneOnce.Do(func() { close(p.done) })
+func (p *peer) close(reason string) {
+	p.doneOnce.Do(func() {
+		p.stateMu.Lock()
+		p.closeReason = reason
+		p.stateMu.Unlock()
+		close(p.done)
+	})
 	// A revoked/replaced peer must not make the HTTP/RPC path wait for a
 	// close-handshake from an unresponsive client.
 	_ = p.conn.CloseNow()
+}
+
+func (b *Broker) watchPeerAuthorization(p *peer) {
+	ticker := time.NewTicker(agentRevalidationInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		case <-ticker.C:
+			if !b.peerAuthorized(p) {
+				p.close("authorization revoked")
+				return
+			}
+		}
+	}
 }
 
 func (b *Broker) AgentHandler() http.HandlerFunc {
@@ -184,6 +234,23 @@ func (b *Broker) AgentHandler() http.HandlerFunc {
 		device := deviceRoute(r)
 		if device == "" {
 			http.Error(w, "invalid device", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Query().Get("probe") == "1" {
+			b.mu.RLock()
+			peer := b.peers[device]
+			b.mu.RUnlock()
+			if peer == nil {
+				http.Error(w, "device offline", http.StatusServiceUnavailable)
+				return
+			}
+			if !b.peerAuthorized(peer) {
+				peer.close("authorization revoked")
+				http.Error(w, "agent authorization revoked", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		b.acceptAgent(w, r, device)
@@ -194,7 +261,7 @@ func deviceRoute(r *http.Request) string {
 	if device := strings.TrimSpace(r.PathValue("device")); protocol.ValidDeviceName(device) {
 		return device
 	}
-	if id := strings.TrimSpace(r.PathValue("id")); protocol.ValidDeviceID(id) {
+	if id, ok := protocol.NormalizeDeviceID(r.PathValue("id")); ok {
 		return "id/" + id
 	}
 	return ""
@@ -243,6 +310,7 @@ func (b *Broker) acceptAgent(w http.ResponseWriter, r *http.Request, device stri
 	if old != nil {
 		old.close("replaced by a new connection")
 	}
+	go b.watchPeerAuthorization(p)
 	go p.readLoop(func() {
 		b.mu.Lock()
 		if b.peers[device] == p {
@@ -277,6 +345,18 @@ func bearerToken(header string) string {
 func TokenFingerprint(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// DisconnectDevice terminates the current remote authorization session for a
+// device without changing its credentials. The Agent may reconnect if still
+// authorized, but local session-scoped PTYs/Portal control are torn down.
+func (b *Broker) DisconnectDevice(device string) {
+	b.mu.RLock()
+	p := b.peers[device]
+	b.mu.RUnlock()
+	if p != nil {
+		p.close("remote session reset")
+	}
 }
 
 func (b *Broker) Devices() []string {

@@ -256,8 +256,9 @@ func (s *Server) createSession(userID string) (string, error) {
 	token := randomToken(32)
 	s.mu.Lock()
 	now := time.Now().Unix()
+	snapshot := s.snapshotMutableStateLocked()
 	s.sessions[tokenKey(token)] = sessionRecord{UserID: userID, CreatedAt: now, LastSeenAt: now, LastReauthAt: now, Expires: time.Now().Add(sessionLifetime).Unix()}
-	err := s.saveLocked()
+	err := s.saveOrRollbackLocked(snapshot)
 	s.mu.Unlock()
 	if err != nil {
 		return "", err
