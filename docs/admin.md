@@ -31,8 +31,6 @@ user/device or releasing the kill switch requires a password re-check through
 Repeated disable requests are idempotent and cannot accidentally toggle access
 back on.
 
-If authorization state cannot be durably persisted, the Relay freezes MCP and
-Agent authorization fail-closed, shows a red dashboard warning, and `/health`
-returns 503 until the storage problem is fixed and the Relay restarts cleanly.
+If authorization state cannot be durably persisted, the Relay marks `oauth-state.guard` dirty, freezes MCP and Agent authorization fail-closed across restarts, shows a red dashboard warning, and returns 503 from `/health`. Repair storage and repeat the intended revoke/disable action while the Relay remains frozen. A successful recovery save forces the global kill switch on and marks the guard clean; restart, verify users/devices/tokens, then use recent re-authentication to release the kill switch. Never delete the guard merely to make the Relay start healthy.
 The dashboard is a control plane, not a replacement for OS permissions: a
 running Agent's local capability policy and desktop Portal consent still apply.

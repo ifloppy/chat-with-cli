@@ -2335,6 +2335,7 @@ func TestPersistedProofStateRoundTripsWhenConsistent(t *testing.T) {
 				ID: "verified-client", DeviceID: strings.ToUpper(identity.ID()), DevicePublicKey: encoded, DeviceKeyVerified: true,
 			},
 		},
+		Users:   map[string]User{"owner-id": {ID: "owner-id", Username: "owner", PasswordHash: "test-only"}},
 		Devices: map[string]string{"id/" + strings.ToUpper(identity.ID()): "owner-id"},
 		DeviceRecords: map[string]DeviceRecord{
 			"id/" + strings.ToUpper(identity.ID()): {ID: strings.ToUpper(identity.ID()), OwnerID: "owner-id", DevicePublicKey: encoded},
@@ -2351,6 +2352,48 @@ func TestPersistedProofStateRoundTripsWhenConsistent(t *testing.T) {
 	if !ok || record.ID != identity.ID() || record.DevicePublicKey != encoded {
 		t.Fatalf("device proof state was not canonicalized: %+v ok=%v", record, ok)
 	}
+}
+
+func TestPersistedIdentityCrossReferencesFailClosed(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19046", Password: "state-integrity-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("user-map-id-mismatch", func(t *testing.T) {
+		state := diskState{Users: map[string]User{"map-id": {ID: "different-id", Username: "alice"}}}
+		if err := s.canonicalizeDiskState(&state); err == nil {
+			t.Fatal("persisted user map key and immutable user ID mismatch was accepted")
+		}
+	})
+	t.Run("duplicate-normalized-username", func(t *testing.T) {
+		state := diskState{Users: map[string]User{
+			"alice-1": {ID: "alice-1", Username: "Alice"},
+			"alice-2": {ID: "alice-2", Username: "alice"},
+		}}
+		if err := s.canonicalizeDiskState(&state); err == nil {
+			t.Fatal("duplicate normalized persisted usernames were accepted")
+		}
+	})
+	t.Run("device-unknown-owner", func(t *testing.T) {
+		state := diskState{Devices: map[string]string{"device-a": "missing-user"}}
+		if err := s.canonicalizeDiskState(&state); err == nil {
+			t.Fatal("persisted device referencing a missing owner was accepted")
+		}
+	})
+	t.Run("device-record-owner-conflict", func(t *testing.T) {
+		state := diskState{
+			Users: map[string]User{
+				"alice-id": {ID: "alice-id", Username: "alice"},
+				"bob-id":   {ID: "bob-id", Username: "bob"},
+			},
+			Devices:       map[string]string{"device-a": "alice-id"},
+			DeviceRecords: map[string]DeviceRecord{"device-a": {OwnerID: "bob-id"}},
+		}
+		if err := s.canonicalizeDiskState(&state); err == nil {
+			t.Fatal("conflicting persisted device ownership records were accepted")
+		}
+	})
 }
 
 func TestAuthorizationPageExplainsVerifiedDeviceIdentity(t *testing.T) {
@@ -2661,6 +2704,9 @@ func TestDeviceBoundOAuthClientCannotRequestMCPOrAnotherAgent(t *testing.T) {
 	if rr := authorize(s.absolute("/agent/id/"+other.ID()), "agent:connect offline_access"); rr.Code != http.StatusForbidden {
 		t.Fatalf("device-bound client targeted another Agent: status=%d want 403 body=%s", rr.Code, rr.Body.String())
 	}
+	if rr := authorize(s.absolute("/agent/legacy-device-name"), "agent:connect offline_access"); rr.Code != http.StatusForbidden {
+		t.Fatalf("device-bound client fell back to a legacy Agent name route: status=%d want 403 body=%s", rr.Code, rr.Body.String())
+	}
 }
 
 func TestGenericOAuthClientCannotGainAgentScopeWithoutLegacyMigration(t *testing.T) {
@@ -2886,5 +2932,183 @@ func TestSetupCannotOverrideExplicitOperatorMode(t *testing.T) {
 	mux.ServeHTTP(rr, post)
 	if rr.Code != http.StatusBadRequest || s.cfg.Mode != ModePrivate || len(s.users) != 0 {
 		t.Fatalf("setup overrode explicit mode: status=%d mode=%q users=%d body=%s", rr.Code, s.cfg.Mode, len(s.users), rr.Body.String())
+	}
+}
+
+func TestDeleteUserInvalidatesAllOldDeviceAuthority(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19164", Password: "delete-authority-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientID = "victim-authority-client"
+	const redirect = "http://127.0.0.1:45129/callback"
+	const codeValue = "victim-code-before-delete"
+	verifier := strings.Repeat("C", 43)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	route := "id/" + identity.ID()
+	resource := s.absolute("/agent/" + route)
+
+	s.mu.Lock()
+	adminID := s.usernames["owner"]
+	admin := s.users[adminID]
+	victim, err := s.createUserLocked("delete-victim", "delete-victim-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.clients[clientID] = Client{
+		ID: clientID, Name: "chat-with-cli agent delete-victim", RedirectURIs: []string{redirect}, Approved: true,
+		DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true, IssuedAt: time.Now().Unix(),
+	}
+	if err := s.authorizeResourceLocked(victim.ID, clientID, resource); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	access, refresh, _, err := s.issueTokensLocked(clientID, victim.ID, resource, "agent:connect offline_access")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.codes[tokenKey(codeValue)] = authCode{pendingAuth: pendingAuth{
+		ClientID: clientID, UserID: victim.ID, RedirectURI: redirect, Resource: resource,
+		Scope: "agent:connect offline_access", CodeChallenge: challenge,
+	}, Expires: time.Now().Add(time.Minute)}
+	s.mu.Unlock()
+
+	if err := s.applyAdminAction("delete-user", victim.ID, "", admin, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	_, userPresent := s.users[victim.ID]
+	_, clientPresent := s.clients[clientID]
+	_, codePresent := s.codes[tokenKey(codeValue)]
+	_, accessPresent := s.access[tokenKey(access)]
+	_, refreshPresent := s.refresh[tokenKey(refresh)]
+	retired := s.retiredDevices[route]
+	_, owned := s.devices[route]
+	s.mu.Unlock()
+	if userPresent || clientPresent || codePresent || accessPresent || refreshPresent || !retired || owned {
+		t.Fatalf("delete-user left stale authority: user=%v client=%v code=%v access=%v refresh=%v retired=%v owned=%v", userPresent, clientPresent, codePresent, accessPresent, refreshPresent, retired, owned)
+	}
+
+	codeForm := url.Values{"grant_type": {"authorization_code"}, "code": {codeValue}, "client_id": {clientID}, "redirect_uri": {redirect}, "code_verifier": {verifier}, "resource": {resource}}
+	codeReq := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(codeForm.Encode()))
+	codeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	codeRR := httptest.NewRecorder()
+	s.handleToken(codeRR, codeReq)
+	if codeRR.Code != http.StatusBadRequest || !strings.Contains(codeRR.Body.String(), "invalid_grant") {
+		t.Fatalf("deleted user's old authorization code revived: status=%d body=%s", codeRR.Code, codeRR.Body.String())
+	}
+
+	refreshForm := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID}, "resource": {resource}}
+	refreshReq := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(refreshForm.Encode()))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRR := httptest.NewRecorder()
+	s.handleToken(refreshRR, refreshReq)
+	if refreshRR.Code != http.StatusBadRequest || !strings.Contains(refreshRR.Body.String(), "invalid_grant") {
+		t.Fatalf("deleted user's old refresh token revived: status=%d body=%s", refreshRR.Code, refreshRR.Body.String())
+	}
+
+	authQ := url.Values{
+		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {redirect},
+		"code_challenge": {challenge}, "code_challenge_method": {"S256"},
+		"resource": {resource}, "scope": {"agent:connect offline_access"}, "state": {"state"},
+	}
+	authRR := httptest.NewRecorder()
+	s.handleAuthorizeGET(authRR, httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize")+"?"+authQ.Encode(), nil))
+	if authRR.Code != http.StatusBadRequest {
+		t.Fatalf("deleted user's old DCR client remained authorizable: status=%d body=%s", authRR.Code, authRR.Body.String())
+	}
+
+	challengeBody, _ := json.Marshal(map[string]any{
+		"client_name": "chat-with-cli agent delete-victim", "redirect_uri": redirect,
+		"chat_with_cli_device_id": identity.ID(), "chat_with_cli_device_public_key": deviceidentity.EncodePublicKey(identity.PublicKey()),
+	})
+	challengeReq := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register/challenge"), bytes.NewReader(challengeBody))
+	challengeReq.Header.Set("Content-Type", "application/json")
+	challengeRR := httptest.NewRecorder()
+	s.handleRegistrationChallenge(challengeRR, challengeReq)
+	if challengeRR.Code != http.StatusGone {
+		t.Fatalf("deleted user's old real device private key could request a new DCR challenge: status=%d want 410 body=%s", challengeRR.Code, challengeRR.Body.String())
+	}
+}
+
+func TestPersistenceFaultGuardPreventsCredentialResurrectionAcrossRestart(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := Config{PublicURL: "http://127.0.0.1:19164", Password: "guard-recovery-password-12345", StateDir: stateDir}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	owner := s.users[ownerID]
+	const device = "guard-recovery-device"
+	s.clients["guard-client"] = Client{ID: "guard-client", Approved: true}
+	s.devices[device] = ownerID
+	access, _, _, err := s.issueTokensLocked("guard-client", ownerID, s.absolute("/mcp/"+device), "mcp offline_access")
+	s.mu.Unlock()
+	if err != nil || !s.VerifyAccess(access, s.absolute("/mcp/"+device)) {
+		t.Fatalf("token setup failed: err=%v", err)
+	}
+	if err := os.Chmod(stateDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	revokeErr := s.applyAdminAction("revoke-token", tokenKey(access), "", owner, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil))
+	if revokeErr == nil || s.Ready() || s.VerifyAccess(access, s.absolute("/mcp/"+device)) {
+		t.Fatalf("failed persistence did not freeze authorization: err=%v ready=%v", revokeErr, s.Ready())
+	}
+	guardBytes, err := os.ReadFile(filepath.Join(stateDir, "oauth-state.guard"))
+	if err != nil || string(guardBytes) != stateGuardDirty {
+		t.Fatalf("persistence fault was not durably marked dirty: state=%q err=%v", guardBytes, err)
+	}
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	restarted, err := New(Config{PublicURL: cfg.PublicURL, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Ready() || restarted.VerifyAccess(access, restarted.absolute("/mcp/"+device)) {
+		t.Fatal("dirty authorization state became usable after Relay restart")
+	}
+	if err := restarted.applyAdminAction("revoke-token", tokenKey(access), "", restarted.users[ownerID], httptest.NewRequest(http.MethodPost, restarted.absolute("/admin/action"), nil)); err != nil {
+		t.Fatalf("recovery revocation could not be persisted: %v", err)
+	}
+	if !restarted.killSwitch || restarted.Ready() {
+		t.Fatal("recovery write did not retain fail-closed state until restart")
+	}
+	_ = restarted.Close()
+
+	recovered, err := New(Config{PublicURL: cfg.PublicURL, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if recovered.persistenceFault || !recovered.killSwitch || recovered.VerifyAccess(access, recovered.absolute("/mcp/"+device)) {
+		t.Fatalf("recovered Relay did not remain safely blocked: fault=%v kill=%v", recovered.persistenceFault, recovered.killSwitch)
+	}
+}
+
+func TestStateGuardRejectsSymlink(t *testing.T) {
+	stateDir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "guard-target")
+	if err := os.WriteFile(target, []byte(stateGuardClean), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(stateDir, "oauth-state.guard")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(Config{PublicURL: "http://127.0.0.1:19165", Password: "guard-symlink-password-12345", StateDir: stateDir})
+	if err == nil {
+		t.Fatal("symlinked OAuth state guard was accepted")
 	}
 }

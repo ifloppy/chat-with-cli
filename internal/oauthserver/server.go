@@ -196,6 +196,7 @@ type Server struct {
 	statusProvider                 func() map[string]DeviceStatus
 	agentSessionResetter           func(device string)
 	stateLease                     *stateLease
+	stateGuard                     *os.File
 	startedAt                      time.Time
 	// persistenceFault is a fail-closed latch. Once authorization state cannot
 	// be durably written, MCP/Agent access remains frozen until process restart
@@ -321,10 +322,20 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("acquire OAuth state lease: %w", err)
 		}
 	}
-	keepLease := false
-	defer func() {
-		if !keepLease && lease != nil {
+	guard, guardDirty, err := openStateGuard(cfg.StateDir)
+	if err != nil {
+		if lease != nil {
 			_ = lease.Close()
+		}
+		return nil, fmt.Errorf("open OAuth state guard: %w", err)
+	}
+	keepResources := false
+	defer func() {
+		if !keepResources {
+			_ = guard.Close()
+			if lease != nil {
+				_ = lease.Close()
+			}
 		}
 	}()
 	var registrationChallengeKey [32]byte
@@ -346,8 +357,9 @@ func New(cfg Config) (*Server, error) {
 		dcrEnabled:          true,
 		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
 		rates: make(map[string]rateWindow), consumedRegistrationChallenges: make(map[string]map[string]int64), registrationChallengeKey: registrationChallengeKey, consumedAgentChallenges: make(map[string]map[string]int64), agentChallengeKey: agentChallengeKey, setupTokenPath: cfg.SetupTokenPath,
-		stateLease: lease,
-		startedAt:  time.Now(),
+		stateLease: lease, stateGuard: guard,
+		persistenceFault: guardDirty,
+		startedAt:        time.Now(),
 	}
 	if cfg.SetupToken != "" {
 		s.setupTokenHash = tokenKey(cfg.SetupToken)
@@ -380,7 +392,7 @@ func New(cfg Config) (*Server, error) {
 			}
 		}
 	}
-	keepLease = true
+	keepResources = true
 	return s, nil
 }
 
@@ -388,12 +400,23 @@ func New(cfg Config) (*Server, error) {
 // OAuth state or revoke credentials; normal process shutdown simply relinquishes
 // the exclusive writer authority for the next Relay process.
 func (s *Server) Close() error {
-	if s == nil || s.stateLease == nil {
+	if s == nil {
 		return nil
 	}
-	err := s.stateLease.Close()
-	s.stateLease = nil
-	return err
+	var first error
+	if s.stateGuard != nil {
+		if err := s.stateGuard.Close(); err != nil {
+			first = err
+		}
+		s.stateGuard = nil
+	}
+	if s.stateLease != nil {
+		if err := s.stateLease.Close(); err != nil && first == nil {
+			first = err
+		}
+		s.stateLease = nil
+	}
+	return first
 }
 
 func validatePublicURL(raw string) (*url.URL, error) {
@@ -479,6 +502,20 @@ func canonicalizeRouteMap[V any](values map[string]V) (map[string]V, error) {
 
 func (s *Server) canonicalizeDiskState(state *diskState) error {
 	var err error
+	normalizedUsers := make(map[string]string, len(state.Users))
+	for mapID, user := range state.Users {
+		if mapID == "" || user.ID == "" || user.ID != mapID {
+			return fmt.Errorf("persisted user record %s has an inconsistent immutable user ID", shortHandle(mapID))
+		}
+		normalized, ok := normalizeUsername(user.Username)
+		if !ok {
+			return fmt.Errorf("persisted user %s has an invalid username", shortHandle(mapID))
+		}
+		if previous, exists := normalizedUsers[normalized]; exists && previous != mapID {
+			return fmt.Errorf("persisted users %s and %s normalize to the same username", shortHandle(previous), shortHandle(mapID))
+		}
+		normalizedUsers[normalized] = mapID
+	}
 	for clientID, client := range state.Clients {
 		hasDeviceIdentity := client.DeviceID != "" || client.DevicePublicKey != "" || client.DeviceKeyVerified
 		if !hasDeviceIdentity {
@@ -550,6 +587,19 @@ func (s *Server) canonicalizeDiskState(state *diskState) error {
 			record.ID = id
 		}
 		state.DeviceRecords[route] = record
+	}
+	for route, ownerID := range state.Devices {
+		if ownerID == "" || state.Users[ownerID].ID != ownerID {
+			return fmt.Errorf("persisted device route %q references an unknown owner", route)
+		}
+		if record, exists := state.DeviceRecords[route]; exists && record.OwnerID != "" && record.OwnerID != ownerID {
+			return fmt.Errorf("persisted device route %q has conflicting ownership records", route)
+		}
+	}
+	for route, record := range state.DeviceRecords {
+		if record.OwnerID != "" && state.Users[record.OwnerID].ID != record.OwnerID {
+			return fmt.Errorf("persisted device record %q references an unknown owner", route)
+		}
 	}
 	canonicalizeTokens := func(records map[string]tokenRecord) error {
 		for key, record := range records {
@@ -653,12 +703,37 @@ func (s *Server) load() error {
 			s.ensureDeviceRecordLocked(route, ownerID)
 		}
 		s.cleanupLocked(time.Now())
-		return s.saveLockedUnlocked()
+		if s.persistenceFault {
+			// A dirty guard means a previous authorization mutation may not have
+			// reached durable state. Load the last known JSON only for admin
+			// recovery; never rewrite it automatically or enable remote access.
+			return nil
+		}
+		return s.saveStateTransactionUnlocked()
 	})
 }
 
+func (s *Server) saveStateTransactionUnlocked() error {
+	if s.persistenceFault {
+		// Any recovery write must persist a global stop first. Even if the guard
+		// becomes clean, the next process remains fail-closed until an admin
+		// explicitly reviews state and releases the kill switch.
+		s.killSwitch = true
+	}
+	if err := writeStateGuard(s.stateGuard, stateGuardDirty); err != nil {
+		return fmt.Errorf("mark OAuth state dirty: %w", err)
+	}
+	if err := s.saveLockedUnlocked(); err != nil {
+		return err
+	}
+	if err := writeStateGuard(s.stateGuard, stateGuardClean); err != nil {
+		return fmt.Errorf("mark OAuth state clean: %w", err)
+	}
+	return nil
+}
+
 func (s *Server) saveLocked() error {
-	err := withStateFileLock(s.stateFile, s.saveLockedUnlocked)
+	err := withStateFileLock(s.stateFile, s.saveStateTransactionUnlocked)
 	if err != nil {
 		s.persistenceFault = true
 	}

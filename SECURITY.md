@@ -68,11 +68,7 @@ and admin flows have bounded rates and body sizes. Pending authorization,
 client, user, session, and broker resources have bounded counts/lifetimes.
 
 
-Authorization-state persistence is fail-closed. If the Relay cannot durably
-write OAuth/security state, the running process freezes MCP and Agent access
-instead of continuing with potentially stale authorization. Repair storage and
-restart from the last durable state. Revoking either an access or refresh token
-revokes its complete refresh-token family.
+Authorization-state persistence is fail-closed across process restarts. The Relay keeps a 0600 `oauth-state.guard` file open for its lifetime, marks it `dirty` before each authorization-state transaction, fsyncs the JSON state, and marks the guard `clean` only after the durable write succeeds. A dirty guard freezes MCP and Agent access after restart. Repair storage, repeat the intended revoke/disable operation, and persist it successfully; recovery writes force the emergency kill switch on, so the subsequent restart remains blocked until an administrator reviews state and explicitly releases it. Do not delete the guard to bypass recovery. Revoking either an access or refresh token revokes its complete refresh-token family.
 
 Browser forms use CSRF tokens bound to cookies and pending requests. Admin and
 setup pages use HttpOnly, SameSite cookies, Secure cookies on HTTPS, CSP,
