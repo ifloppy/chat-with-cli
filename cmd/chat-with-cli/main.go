@@ -311,7 +311,14 @@ func runServe(args []string) error {
 		&mcp.StreamableHTTPOptions{Stateless: true})
 	handler = maxRequestBody(8<<20, handler)
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", bearerAuth(*token, handler))
+	if *token == "" {
+		// Unauthenticated direct MCP is an explicit loopback-only mode. Keep
+		// this decision at the command boundary instead of teaching the shared
+		// bearer middleware that an empty secret means "allow".
+		mux.Handle("/mcp", handler)
+	} else {
+		mux.Handle("/mcp", bearerAuth(*token, handler))
+	}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write([]byte("ok\n"))
@@ -966,10 +973,11 @@ func runLogin(args []string) error {
 }
 
 func bearerAuth(token string, next http.Handler) http.Handler {
-	if token == "" {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		header := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if !strings.HasPrefix(header, prefix) {
