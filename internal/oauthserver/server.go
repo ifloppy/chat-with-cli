@@ -44,6 +44,8 @@ const (
 	agentChallengeLifetime                  = 30 * time.Second
 )
 
+var errAuthorizationRecoveryRequired = errors.New("authorization state recovery is required before ordinary state changes can be persisted")
+
 type Config struct {
 	PublicURL string
 	StateDir  string
@@ -274,6 +276,14 @@ func (s *Server) restoreMutableStateLocked(snapshot mutableStateSnapshot) {
 
 func (s *Server) saveOrRollbackLocked(snapshot mutableStateSnapshot) error {
 	if err := s.saveLocked(); err != nil {
+		s.restoreMutableStateLocked(snapshot)
+		return err
+	}
+	return nil
+}
+
+func (s *Server) saveRecoveryOrRollbackLocked(snapshot mutableStateSnapshot) error {
+	if err := s.saveRecoveryLocked(); err != nil {
 		s.restoreMutableStateLocked(snapshot)
 		return err
 	}
@@ -709,15 +719,18 @@ func (s *Server) load() error {
 			// recovery; never rewrite it automatically or enable remote access.
 			return nil
 		}
-		return s.saveStateTransactionUnlocked()
+		return s.saveStateTransactionUnlocked(false)
 	})
 }
 
-func (s *Server) saveStateTransactionUnlocked() error {
+func (s *Server) saveStateTransactionUnlocked(recovery bool) error {
 	if s.persistenceFault {
-		// Any recovery write must persist a global stop first. Even if the guard
-		// becomes clean, the next process remains fail-closed until an admin
-		// explicitly reviews state and releases the kill switch.
+		if !recovery {
+			return errAuthorizationRecoveryRequired
+		}
+		// A recovery write must persist a global stop first. Even after the
+		// guard becomes clean, the next process remains fail-closed until an
+		// administrator reviews state and explicitly releases the kill switch.
 		s.killSwitch = true
 	}
 	if err := writeStateGuard(s.stateGuard, stateGuardDirty); err != nil {
@@ -733,7 +746,15 @@ func (s *Server) saveStateTransactionUnlocked() error {
 }
 
 func (s *Server) saveLocked() error {
-	err := withStateFileLock(s.stateFile, s.saveStateTransactionUnlocked)
+	err := withStateFileLock(s.stateFile, func() error { return s.saveStateTransactionUnlocked(false) })
+	if err != nil && !errors.Is(err, errAuthorizationRecoveryRequired) {
+		s.persistenceFault = true
+	}
+	return err
+}
+
+func (s *Server) saveRecoveryLocked() error {
+	err := withStateFileLock(s.stateFile, func() error { return s.saveStateTransactionUnlocked(true) })
 	if err != nil {
 		s.persistenceFault = true
 	}
@@ -830,6 +851,16 @@ func (s *Server) cleanupLocked(now time.Time) {
 	for key, client := range s.clients {
 		if !client.Approved && now.Sub(time.Unix(client.IssuedAt, 0)) > time.Hour {
 			delete(s.clients, key)
+			for pendingID, pending := range s.pending {
+				if pending.ClientID == key {
+					delete(s.pending, pendingID)
+				}
+			}
+			for codeID, code := range s.codes {
+				if code.ClientID == key {
+					delete(s.codes, codeID)
+				}
+			}
 		}
 	}
 }
@@ -1647,6 +1678,11 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 	if !ok || time.Now().After(pending.Expires) {
 		return errors.New("authorization request expired")
 	}
+	client, exists := s.clients[pending.ClientID]
+	if !exists || !exactRedirect(client, pending.RedirectURI) {
+		delete(s.pending, requestID)
+		return errors.New("OAuth client was revoked, expired, or no longer matches the authorization redirect")
+	}
 	snapshot := s.snapshotMutableStateLocked()
 	if err := s.authorizeResourceLocked(userID, pending.ClientID, pending.Resource); err != nil {
 		return err
@@ -1666,7 +1702,6 @@ func (s *Server) grantAuthorization(w http.ResponseWriter, r *http.Request, requ
 	code := randomToken(32)
 	delete(s.pending, requestID)
 	s.codes[tokenKey(code)] = authCode{pendingAuth: pending, Expires: time.Now().Add(codeLifetime)}
-	client := s.clients[pending.ClientID]
 	client.Approved = true
 	s.clients[pending.ClientID] = client
 	if err := s.saveOrRollbackLocked(snapshot); err != nil {

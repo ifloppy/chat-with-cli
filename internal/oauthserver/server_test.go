@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -582,8 +583,9 @@ func TestAgentAuthorizationUsesSafeClientNameAsInitialDisplayLabel(t *testing.T)
 	route := "id/" + id
 	s.mu.Lock()
 	ownerID := s.usernames["owner"]
-	s.clients["agent-hint-client"] = Client{ID: "agent-hint-client", Name: "chat-with-cli agent 工作站 · 上海", DeviceID: id, DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true, Approved: false}
-	s.pending["agent-hint-request"] = pendingAuth{ClientID: "agent-hint-client", RedirectURI: "http://127.0.0.1:43201/callback", Resource: s.absolute("/agent/id/" + id), Scope: "agent:connect offline_access", Expires: time.Now().Add(time.Minute)}
+	const redirect = "http://127.0.0.1:43201/callback"
+	s.clients["agent-hint-client"] = Client{ID: "agent-hint-client", Name: "chat-with-cli agent 工作站 · 上海", RedirectURIs: []string{redirect}, DeviceID: id, DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true, Approved: false, IssuedAt: time.Now().Unix()}
+	s.pending["agent-hint-request"] = pendingAuth{ClientID: "agent-hint-client", RedirectURI: redirect, Resource: s.absolute("/agent/id/" + id), Scope: "agent:connect offline_access", Expires: time.Now().Add(time.Minute)}
 	s.mu.Unlock()
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/authorize"), nil)
@@ -1155,12 +1157,20 @@ func TestAuthorizationGrantRollsBackDeviceClaimWhenPersistenceFails(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	const route = "id/0123456789abcdef0123456789abcdef"
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := "id/" + identity.ID()
+	const redirect = "http://127.0.0.1:43199/callback"
 	s.mu.Lock()
 	ownerID := s.usernames["owner"]
-	s.clients["grant-client"] = Client{ID: "grant-client", Approved: false}
+	s.clients["grant-client"] = Client{
+		ID: "grant-client", RedirectURIs: []string{redirect}, Approved: false, IssuedAt: time.Now().Unix(),
+		DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true,
+	}
 	s.pending["grant-request"] = pendingAuth{
-		ClientID: "grant-client", RedirectURI: "http://127.0.0.1:43199/callback",
+		ClientID: "grant-client", RedirectURI: redirect,
 		Resource: s.absolute("/agent/" + route), Scope: "agent:connect offline_access", Expires: time.Now().Add(time.Minute),
 	}
 	s.mu.Unlock()
@@ -3110,5 +3120,162 @@ func TestStateGuardRejectsSymlink(t *testing.T) {
 	_, err := New(Config{PublicURL: "http://127.0.0.1:19165", Password: "guard-symlink-password-12345", StateDir: stateDir})
 	if err == nil {
 		t.Fatal("symlinked OAuth state guard was accepted")
+	}
+}
+
+func TestPersistenceFaultRecoveryRejectsAuthorityExpansion(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19165", Password: "recovery-boundary-password-12345", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	owner := s.users[ownerID]
+	s.persistenceFault = true
+	s.killSwitch = true
+	s.mu.Unlock()
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)
+
+	for _, tc := range []struct {
+		action string
+		target string
+		value  string
+	}{
+		{"create-user", "new-user", "new-user-password-12345"},
+		{"set-registration", "", "on"},
+		{"set-dcr", "", "on"},
+		{"set-mcp", "", "on"},
+		{"set-agent", "", "on"},
+		{"set-kill-switch", "", "off"},
+		{"rename-device", "missing", "renamed"},
+	} {
+		if err := s.applyAdminAction(tc.action, tc.target, tc.value, owner, req); !errors.Is(err, errPersistenceRecoveryOnly) {
+			t.Fatalf("recovery action %s value=%s err=%v want recovery-only denial", tc.action, tc.value, err)
+		}
+	}
+
+	// Authority reduction remains available so an operator can repeat the
+	// revoke/disable action that originally failed to persist.
+	if err := s.applyAdminAction("set-agent", "", "off", owner, req); err != nil {
+		t.Fatalf("authority-reducing recovery action was blocked: %v", err)
+	}
+	if s.agentEnabled || !s.killSwitch || !s.persistenceFault {
+		t.Fatalf("recovery contraction state wrong: agent=%v kill=%v fault=%v", s.agentEnabled, s.killSwitch, s.persistenceFault)
+	}
+}
+
+func TestExpiredUnapprovedClientCannotSurviveThroughPendingAuthorization(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19166", Password: "stale-client-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.clients["stale-client"] = Client{ID: "stale-client", IssuedAt: time.Now().Add(-2 * time.Hour).Unix()}
+	s.pending["stale-pending"] = pendingAuth{ClientID: "stale-client", UserID: ownerID, Resource: s.absolute("/mcp/stale-device"), RedirectURI: "http://127.0.0.1:45555/callback", Expires: time.Now().Add(5 * time.Minute)}
+	s.cleanupLocked(time.Now())
+	_, clientExists := s.clients["stale-client"]
+	_, pendingExists := s.pending["stale-pending"]
+	s.mu.Unlock()
+	if clientExists || pendingExists {
+		t.Fatalf("expired DCR client left authorization artifacts: client=%v pending=%v", clientExists, pendingExists)
+	}
+}
+
+func TestGrantAuthorizationCannotReanimateMissingClient(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19167", Password: "missing-client-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.pending["orphan-pending"] = pendingAuth{ClientID: "deleted-client", Resource: s.absolute("/mcp/orphan-device"), RedirectURI: "http://127.0.0.1:45556/callback", Expires: time.Now().Add(time.Minute)}
+	s.mu.Unlock()
+	rr := httptest.NewRecorder()
+	if err := s.grantAuthorization(rr, httptest.NewRequest(http.MethodPost, s.absolute("/oauth/authorize"), nil), "orphan-pending", ownerID); err == nil {
+		t.Fatal("authorization grant recreated a missing OAuth client")
+	}
+	s.mu.Lock()
+	_, clientExists := s.clients["deleted-client"]
+	_, pendingExists := s.pending["orphan-pending"]
+	s.mu.Unlock()
+	if clientExists || pendingExists {
+		t.Fatalf("missing-client grant left stale authority artifacts: client=%v pending=%v", clientExists, pendingExists)
+	}
+}
+
+func TestGrantAuthorizationRechecksExactClientRedirect(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19168", Password: "redirect-recheck-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.clients["redirect-client"] = Client{ID: "redirect-client", RedirectURIs: []string{"http://127.0.0.1:45558/callback"}, IssuedAt: time.Now().Unix()}
+	s.pending["redirect-pending"] = pendingAuth{ClientID: "redirect-client", Resource: s.absolute("/mcp/redirect-device"), RedirectURI: "http://127.0.0.1:45557/callback", Expires: time.Now().Add(time.Minute)}
+	s.mu.Unlock()
+	rr := httptest.NewRecorder()
+	if err := s.grantAuthorization(rr, httptest.NewRequest(http.MethodPost, s.absolute("/oauth/authorize"), nil), "redirect-pending", ownerID); err == nil {
+		t.Fatal("authorization grant ignored changed client redirect binding")
+	}
+	s.mu.Lock()
+	client := s.clients["redirect-client"]
+	_, pendingExists := s.pending["redirect-pending"]
+	codes := len(s.codes)
+	s.mu.Unlock()
+	if client.Approved || pendingExists || codes != 0 {
+		t.Fatalf("redirect mismatch left grant artifacts: approved=%v pending=%v codes=%d", client.Approved, pendingExists, codes)
+	}
+}
+
+func TestDirtyRecoveryGuardCannotBeConsumedByOrdinaryPersistence(t *testing.T) {
+	stateDir := t.TempDir()
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19166", Password: "dirty-ordinary-password-12345", StateDir: stateDir, Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ownerID := s.usernames["owner"]
+	s.registrationEnabled = true
+	s.persistenceFault = true
+	if err := writeStateGuard(s.stateGuard, stateGuardDirty); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+
+	if _, err, _ := s.register("ordinary-new-user", "ordinary-new-user-password-12345"); !errors.Is(err, errAuthorizationRecoveryRequired) {
+		t.Fatalf("public registration was able to persist during dirty recovery: %v", err)
+	}
+	s.mu.Lock()
+	_, registered := s.usernames["ordinary-new-user"]
+	s.mu.Unlock()
+	if registered {
+		t.Fatal("failed dirty-recovery registration remained in memory")
+	}
+	guard, err := os.ReadFile(filepath.Join(stateDir, "oauth-state.guard"))
+	if err != nil || string(guard) != stateGuardDirty {
+		t.Fatalf("ordinary registration consumed dirty guard: guard=%q err=%v", guard, err)
+	}
+
+	session, err := s.createSession(ownerID)
+	if err != nil || session == "" {
+		t.Fatalf("recovery administrator could not obtain an ephemeral session: token=%q err=%v", session, err)
+	}
+	guard, err = os.ReadFile(filepath.Join(stateDir, "oauth-state.guard"))
+	if err != nil || string(guard) != stateGuardDirty {
+		t.Fatalf("recovery login session consumed dirty guard: guard=%q err=%v", guard, err)
+	}
+
+	owner := s.users[ownerID]
+	if err := s.applyAdminAction("set-agent", "", "off", owner, httptest.NewRequest(http.MethodPost, s.absolute("/admin/action"), nil)); err != nil {
+		t.Fatalf("explicit authority-reducing recovery transaction failed: %v", err)
+	}
+	guard, err = os.ReadFile(filepath.Join(stateDir, "oauth-state.guard"))
+	if err != nil || string(guard) != stateGuardClean {
+		t.Fatalf("explicit recovery action did not complete guard transaction: guard=%q err=%v", guard, err)
+	}
+	if !s.persistenceFault || !s.killSwitch || s.agentEnabled {
+		t.Fatalf("post-recovery in-memory safety state wrong: fault=%v kill=%v agent=%v", s.persistenceFault, s.killSwitch, s.agentEnabled)
 	}
 }

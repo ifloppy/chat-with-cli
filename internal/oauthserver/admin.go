@@ -200,6 +200,7 @@ func (s *Server) handleAdminReauthPOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	recovering := s.persistenceFault
 	snapshot := s.snapshotMutableStateLocked()
 	handle := tokenKey(cookie.Value)
 	record, exists := s.sessions[handle]
@@ -211,7 +212,14 @@ func (s *Server) handleAdminReauthPOST(w http.ResponseWriter, r *http.Request) {
 	record.LastReauthAt = time.Now().Unix()
 	s.sessions[handle] = record
 	s.recordSecurityLocked(SecurityEvent{Event: "admin_reauth", User: current.Username, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
-	err = s.saveOrRollbackLocked(snapshot)
+	if recovering {
+		// Fresh authentication is kept process-local during recovery. It may
+		// authorize a subsequent authority-reducing recovery action, but must
+		// not consume the dirty authorization-state guard by itself.
+		err = nil
+	} else {
+		err = s.saveOrRollbackLocked(snapshot)
+	}
 	s.mu.Unlock()
 	if err != nil {
 		http.Error(w, "failed to persist re-authentication", http.StatusServiceUnavailable)
@@ -456,10 +464,31 @@ func parseToggle(value string) (bool, bool) {
 	}
 }
 
+func persistenceRecoveryActionAllowed(action, value string) bool {
+	switch action {
+	case "rotate-password", "revoke-device", "delete-user", "logout-user", "logout-all", "logout-session", "revoke-client", "revoke-token":
+		return true
+	case "disable-device", "disable-user":
+		disabled, valid := parseToggle(value)
+		return valid && disabled
+	case "set-registration", "set-dcr", "set-mcp", "set-agent":
+		enabled, valid := parseToggle(value)
+		return valid && !enabled
+	case "set-kill-switch":
+		enabled, valid := parseToggle(value)
+		return valid && enabled
+	default:
+		return false
+	}
+}
+
 func (s *Server) applyAdminAction(action, target, value string, current User, r *http.Request) error {
 	if action == "create-user" {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if s.persistenceFault {
+			return errPersistenceRecoveryOnly
+		}
 		snapshot := s.snapshotMutableStateLocked()
 		user, err := s.createUserLocked(target, value)
 		if err != nil {
@@ -478,6 +507,10 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		recovering := s.persistenceFault
+		if recovering && !persistenceRecoveryActionAllowed(action, value) {
+			return errPersistenceRecoveryOnly
+		}
 		snapshot := s.snapshotMutableStateLocked()
 		user, exists := s.users[target]
 		if !exists || user.Disabled {
@@ -491,11 +524,18 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		s.resetOwnedAgentSessionsLocked(target)
 		s.revokeUserCredentialsLocked(target)
 		s.recordSecurityLocked(SecurityEvent{Event: action, User: user.Username, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
+		if recovering {
+			return s.saveRecoveryOrRollbackLocked(snapshot)
+		}
 		return s.saveOrRollbackLocked(snapshot)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	recovering := s.persistenceFault
+	if recovering && !persistenceRecoveryActionAllowed(action, value) {
+		return errPersistenceRecoveryOnly
+	}
 	snapshot := s.snapshotMutableStateLocked()
 	changed := true
 	switch action {
@@ -674,6 +714,9 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		eventTarget = shortHandle(target)
 	}
 	s.recordSecurityLocked(SecurityEvent{Event: action, User: current.Username, Device: eventTarget, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
+	if recovering {
+		return s.saveRecoveryOrRollbackLocked(snapshot)
+	}
 	return s.saveOrRollbackLocked(snapshot)
 }
 
@@ -865,14 +908,15 @@ func (s *Server) renameDeviceTokensLocked(old, new string) {
 }
 
 var (
-	errInvalidAdminAction = &adminError{"invalid administrator action"}
-	errUnknownUser        = &adminError{"unknown user"}
-	errUnknownDevice      = &adminError{"unknown device"}
-	errUnknownClient      = &adminError{"unknown OAuth client"}
-	errUnknownToken       = &adminError{"unknown token record"}
-	errUnknownSession     = &adminError{"unknown browser session"}
-	errDeviceNameTaken    = &adminError{"device name is already in use"}
-	errCannotDeleteSelf   = &adminError{"cannot delete the current administrator"}
+	errInvalidAdminAction      = &adminError{"invalid administrator action"}
+	errUnknownUser             = &adminError{"unknown user"}
+	errUnknownDevice           = &adminError{"unknown device"}
+	errUnknownClient           = &adminError{"unknown OAuth client"}
+	errUnknownToken            = &adminError{"unknown token record"}
+	errUnknownSession          = &adminError{"unknown browser session"}
+	errDeviceNameTaken         = &adminError{"device name is already in use"}
+	errCannotDeleteSelf        = &adminError{"cannot delete the current administrator"}
+	errPersistenceRecoveryOnly = &adminError{"authorization recovery mode only permits authority-reducing actions; complete recovery and restart before expanding access"}
 )
 
 type adminError struct{ message string }
