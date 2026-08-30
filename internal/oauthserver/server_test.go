@@ -4525,3 +4525,95 @@ func TestAccountMCPProtectedResourceMetadata(t *testing.T) {
 		t.Fatalf("authorization metadata does not advertise RFC 8707 resource indicators: %#v", authMetadata)
 	}
 }
+
+func TestGenericDCRResponseUsesStandardOAuthFields(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19135", Password: "dcr-standard-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"client_name":                "ChatGPT",
+		"redirect_uris":              []string{"https://chatgpt.com/connector_platform_oauth_redirect"},
+		"token_endpoint_auth_method": "none",
+		"grant_types":                []string{"authorization_code"},
+		"response_types":             []string{"code"},
+		"scope":                      "mcp offline_access",
+	})
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.handleRegister(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("DCR status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"scope", "chat_with_cli_device_id", "chat_with_cli_device_public_key", "chat_with_cli_device_key_verified"} {
+		if _, ok := response[forbidden]; ok {
+			t.Fatalf("generic DCR leaked non-standard field %q: %s", forbidden, rr.Body.String())
+		}
+	}
+	var grants []string
+	if err := json.Unmarshal(response["grant_types"], &grants); err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 || grants[0] != "authorization_code" {
+		t.Fatalf("DCR expanded requested grants: %v", grants)
+	}
+}
+
+func TestOAuthAuthorizationRequestAcceptsFormPOST(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19136", Password: "authorize-post-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const redirect = "https://chatgpt.com/connector_platform_oauth_redirect"
+	const clientID = "chatgpt-post-authorization"
+	s.mu.Lock()
+	s.clients[clientID] = Client{ID: clientID, Name: "ChatGPT", RedirectURIs: []string{redirect}, IssuedAt: time.Now().Unix()}
+	s.mu.Unlock()
+	values := url.Values{
+		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {redirect},
+		"code_challenge": {strings.Repeat("a", 43)}, "code_challenge_method": {"S256"},
+		"scope": {"mcp offline_access"}, "resource": {s.absolute("/mcp")}, "state": {"post-state"},
+	}
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/authorize"), strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	s.handleAuthorizePOST(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Authorize chat-with-cli") {
+		t.Fatalf("POST authorization status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) != 1 {
+		t.Fatalf("POST authorization did not create pending request: %d", len(s.pending))
+	}
+	for _, pending := range s.pending {
+		if pending.ClientID != clientID || pending.Resource != s.absolute("/mcp") || pending.Scope != "mcp offline_access" {
+			t.Fatalf("unexpected POST authorization binding: %+v", pending)
+		}
+	}
+}
+
+func TestGenericDCRRejectsUnsupportedGrantInsteadOfEchoingIt(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19137", Password: "dcr-grant-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"redirect_uris":              []string{"https://chatgpt.com/connector_platform_oauth_redirect"},
+		"token_endpoint_auth_method": "none",
+		"grant_types":                []string{"authorization_code", "client_credentials"},
+		"response_types":             []string{"code"},
+	})
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/register"), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.handleRegister(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_client_metadata") {
+		t.Fatalf("unsupported DCR grant status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}

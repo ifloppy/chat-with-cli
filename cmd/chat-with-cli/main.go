@@ -478,6 +478,39 @@ func (w *diagnosticResponseWriter) Write(data []byte) (int, error) {
 	return w.ResponseWriter.Write(data)
 }
 
+func protocolHTTPDiagnosticHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !diagnosticProtocolPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		recorder := &diagnosticResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		// Deliberately exclude query strings, headers and bodies. OAuth codes,
+		// PKCE values, bearer tokens, passwords and MCP arguments never enter this log.
+		log.Printf("OAuth/MCP HTTP request: method=%s path=%s status=%d", r.Method, r.URL.Path, status)
+	})
+}
+
+func diagnosticProtocolPath(path string) bool {
+	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") {
+		return true
+	}
+	if strings.HasPrefix(path, "/.well-known/oauth-") {
+		return true
+	}
+	switch path {
+	case "/oauth/register", "/oauth/authorize", "/oauth/token", "/oauth/revoke":
+		return true
+	default:
+		return false
+	}
+}
+
 func diagnosticMCPMethod(method string) bool {
 	switch method {
 	case "initialize", "tools/list", "server/discover":
@@ -946,7 +979,11 @@ func runRelay(args []string) error {
 	})
 	ctx, cancel := signalContext()
 	defer cancel()
-	return serveHTTP(ctx, *listen, oauthserver.SecurityHeaders(mux))
+	var relayHandler http.Handler = mux
+	if diagnosticsEnabled {
+		relayHandler = protocolHTTPDiagnosticHandler(relayHandler)
+	}
+	return serveHTTP(ctx, *listen, oauthserver.SecurityHeaders(relayHandler))
 }
 
 const (

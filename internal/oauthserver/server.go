@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -1423,6 +1424,26 @@ func contains(values []string, want string) bool {
 	return false
 }
 
+func normalizeRegistrationValues(values, defaults []string, supported map[string]bool) ([]string, bool) {
+	if len(values) == 0 {
+		values = defaults
+	}
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" || !supported[value] {
+			return nil, false
+		}
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out, true
+}
+
 func (s *Server) handleRegistrationChallenge(w http.ResponseWriter, r *http.Request) {
 	if !s.allowRate(r, "dcr-challenge", 60, time.Minute) {
 		rateLimited(w, 60)
@@ -1609,12 +1630,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		deviceID = canonicalID
 		deviceKeyVerified = true
 	}
-	if len(req.ResponseTypes) > 0 && !contains(req.ResponseTypes, "code") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "response_types must include code"})
+	grantTypes, ok := normalizeRegistrationValues(req.GrantTypes, []string{"authorization_code"}, map[string]bool{"authorization_code": true, "refresh_token": true})
+	if !ok || !contains(grantTypes, "authorization_code") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "grant_types may contain only authorization_code and refresh_token, and must include authorization_code"})
 		return
 	}
-	if len(req.GrantTypes) > 0 && !contains(req.GrantTypes, "authorization_code") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "grant_types must include authorization_code"})
+	responseTypes, ok := normalizeRegistrationValues(req.ResponseTypes, []string{"code"}, map[string]bool{"code": true})
+	if !ok || !contains(responseTypes, "code") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_client_metadata", "error_description": "response_types may contain only code"})
 		return
 	}
 
@@ -1660,19 +1683,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusInternalServerError, "server_error", "failed to persist client registration")
 		return
 	}
-	registeredScope := "mcp offline_access"
-	if client.DeviceKeyVerified {
-		registeredScope = "agent:connect offline_access"
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"client_id": clientID, "client_id_issued_at": client.IssuedAt, "client_name": client.Name,
+	// Keep the public RFC 7591 response strictly standards-shaped for generic
+	// MCP clients such as ChatGPT. Agent-specific proof fields are an input
+	// extension used to bind the stored client record; clients do not need them
+	// echoed back, and some OAuth clients reject unexpected registration fields.
+	response := map[string]any{
+		"client_id": clientID, "client_id_issued_at": client.IssuedAt,
 		"redirect_uris": client.RedirectURIs, "token_endpoint_auth_method": "none",
-		"chat_with_cli_device_id":           client.DeviceID,
-		"chat_with_cli_device_public_key":   client.DevicePublicKey,
-		"chat_with_cli_device_key_verified": client.DeviceKeyVerified,
-		"grant_types":                       []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
-		"scope": registeredScope,
-	})
+		"grant_types": grantTypes, "response_types": responseTypes,
+	}
+	if client.Name != "" {
+		response["client_name"] = client.Name
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) resourceParts(raw string) (kind, device, canonical string, ok bool) {
@@ -1986,13 +2009,41 @@ func (s *Server) failAuthorization(requestID string) (int, bool) {
 }
 
 func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
-	if !s.allowRate(r, "authorize-post", 30, time.Minute) {
-		rateLimited(w, 60)
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/x-www-form-urlencoded" {
+		s.oauthPageError(w, http.StatusBadRequest, "OAuth authorization POST must use application/x-www-form-urlencoded")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	if err := r.ParseForm(); err != nil {
 		s.oauthPageError(w, http.StatusBadRequest, "invalid form")
+		return
+	}
+	if r.PostForm.Get("request_id") != "" || r.PostForm.Get("decision") != "" {
+		s.handleAuthorizeDecisionPOST(w, r)
+		return
+	}
+	// OAuth authorization requests may be submitted as form POSTs. Translate
+	// only the body parameters into the same validation path as GET. This keeps
+	// our consent form POST separate while matching clients such as AgentDock.
+	for _, name := range []string{"response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "scope", "resource", "state", "chat_with_cli_authorization_challenge", "chat_with_cli_device_proof"} {
+		if len(r.URL.Query()[name]) != 0 {
+			s.oauthPageError(w, http.StatusBadRequest, "OAuth authorization parameters must be supplied in either the request body or query, not both")
+			return
+		}
+	}
+	clone := r.Clone(r.Context())
+	u := *r.URL
+	u.RawQuery = r.PostForm.Encode()
+	clone.URL = &u
+	clone.Method = http.MethodGet
+	clone.Body = http.NoBody
+	s.handleAuthorizeGET(w, clone)
+}
+
+func (s *Server) handleAuthorizeDecisionPOST(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(r, "authorize-post", 30, time.Minute) {
+		rateLimited(w, 60)
 		return
 	}
 	requestID := r.Form.Get("request_id")
