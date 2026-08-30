@@ -102,12 +102,13 @@ func uiPrompt(reader *bufio.Reader, writer io.Writer, label, defaultValue string
 }
 
 type configuredOAuthContext struct {
-	Manager     *oauthclient.Manager
-	Resource    string
-	Credentials string
-	Relay       string
-	Device      string
-	DeviceID    string
+	Manager         *oauthclient.Manager
+	Resource        string
+	Credentials     string
+	Relay           string
+	Device          string
+	DeviceID        string
+	IdentityMissing bool
 }
 
 func configuredOAuthFromFile(configPath string) (configuredOAuthContext, error) {
@@ -127,6 +128,7 @@ func configuredOAuthFromFile(configPath string) (configuredOAuthContext, error) 
 		credentials = override
 	}
 	var identity *deviceidentity.Identity
+	identityMissing := false
 	if identityPath := values.String("", "agent.identity"); identityPath != "" {
 		identityPath, err = normalizeUserPath(identityPath)
 		if err != nil {
@@ -134,12 +136,18 @@ func configuredOAuthFromFile(configPath string) (configuredOAuthContext, error) 
 		}
 		identity, err = deviceidentity.Load(identityPath)
 		if err != nil {
-			return configuredOAuthContext{}, fmt.Errorf("load device identity: %w", err)
+			if !errors.Is(err, os.ErrNotExist) {
+				return configuredOAuthContext{}, fmt.Errorf("load device identity: %w", err)
+			}
+			identityMissing = true
+			identity = nil
 		}
-		if deviceID == "" {
-			deviceID = identity.ID()
-		} else if canonical, ok := protocol.NormalizeDeviceID(deviceID); !ok || canonical != identity.ID() {
-			return configuredOAuthContext{}, errors.New("configured device ID does not match the local Ed25519 identity")
+		if identity != nil {
+			if deviceID == "" {
+				deviceID = identity.ID()
+			} else if canonical, ok := protocol.NormalizeDeviceID(deviceID); !ok || canonical != identity.ID() {
+				return configuredOAuthContext{}, errors.New("configured device ID does not match the local Ed25519 identity")
+			}
 		}
 	}
 	manager := &oauthclient.Manager{RelayURL: relay, Device: device, DeviceID: deviceID, DeviceIdentity: identity, CredentialsPath: credentials}
@@ -147,10 +155,13 @@ func configuredOAuthFromFile(configPath string) (configuredOAuthContext, error) 
 	if err != nil {
 		return configuredOAuthContext{}, err
 	}
-	return configuredOAuthContext{Manager: manager, Resource: resource, Credentials: credentials, Relay: relay, Device: device, DeviceID: deviceID}, nil
+	return configuredOAuthContext{Manager: manager, Resource: resource, Credentials: credentials, Relay: relay, Device: device, DeviceID: deviceID, IdentityMissing: identityMissing}, nil
 }
 
 func accountSessionStatus(ctx context.Context, auth configuredOAuthContext) string {
+	if auth.IdentityMissing {
+		return "Local device identity is missing; Login or Connect will generate a replacement identity and open OAuth"
+	}
 	credential, found, err := oauthclient.LoadCredential(auth.Credentials, auth.Resource)
 	if err != nil {
 		return "Error reading local OAuth session"
@@ -282,24 +293,53 @@ func configPathFromArgs(args []string) string {
 	return path
 }
 
-func rotateRetiredAgentIdentity(configPath string) (string, string, error) {
+func configuredIdentityState(configPath string) (identityPath, oldID string, missing bool, err error) {
+	values, err := config.Load(configPath)
+	if err != nil {
+		return "", "", false, err
+	}
+	identityPath = values.String("", "agent.identity")
+	if identityPath == "" {
+		return "", "", false, errors.New("configured device has no Ed25519 identity path")
+	}
+	identityPath, err = normalizeUserPath(identityPath)
+	if err != nil {
+		return "", "", false, fmt.Errorf("invalid configured identity path: %w", err)
+	}
+	configuredID := values.String("", "agent.device_id")
+	if configuredID != "" {
+		canonical, ok := protocol.NormalizeDeviceID(configuredID)
+		if !ok {
+			return "", "", false, errors.New("configured immutable device ID is invalid")
+		}
+		oldID = canonical
+	}
+	identity, loadErr := deviceidentity.Load(identityPath)
+	if loadErr == nil {
+		if oldID != "" && oldID != identity.ID() {
+			return "", "", false, errors.New("configured device ID does not match the local Ed25519 identity")
+		}
+		return identityPath, identity.ID(), false, nil
+	}
+	if errors.Is(loadErr, os.ErrNotExist) {
+		return identityPath, oldID, true, nil
+	}
+	return "", "", false, fmt.Errorf("load device identity: %w", loadErr)
+}
+
+// rotateConfiguredAgentIdentity replaces the cryptographic identity referenced
+// by config while preserving the rest of the workstation settings. A missing
+// old key is recoverable because there is no private key left to prove the old
+// immutable ID. Corrupt, insecure, or mismatched keys still fail closed.
+func rotateConfiguredAgentIdentity(configPath string) (string, string, error) {
 	values, err := config.Load(configPath)
 	if err != nil {
 		return "", "", err
 	}
-	identityPath := values.String("", "agent.identity")
-	if identityPath == "" {
-		return "", "", errors.New("configured device has no Ed25519 identity to rotate")
-	}
-	identityPath, err = normalizeUserPath(identityPath)
+	identityPath, oldID, _, err := configuredIdentityState(configPath)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid configured identity path: %w", err)
+		return "", "", err
 	}
-	oldIdentity, err := deviceidentity.Load(identityPath)
-	if err != nil {
-		return "", "", fmt.Errorf("load retired device identity: %w", err)
-	}
-	oldID := oldIdentity.ID()
 	newIdentity, err := deviceidentity.Generate()
 	if err != nil {
 		return "", "", fmt.Errorf("generate replacement device identity: %w", err)
@@ -356,11 +396,30 @@ func rotateRetiredAgentIdentity(configPath string) (string, string, error) {
 		return "", "", err
 	}
 	cleanupNew = false
-	oldResource := strings.TrimRight(relay, "/") + "/agent/id/" + oldID
-	if _, err := oauthclient.DeleteCredential(credentials, oldResource); err != nil {
-		return oldID, newID, fmt.Errorf("remove retired device credential: %w", err)
+	if oldID != "" {
+		oldResource := strings.TrimRight(relay, "/") + "/agent/id/" + oldID
+		if _, err := oauthclient.DeleteCredential(credentials, oldResource); err != nil {
+			return oldID, newID, fmt.Errorf("remove obsolete device credential: %w", err)
+		}
 	}
 	return oldID, newID, nil
+}
+
+func recoverMissingConfiguredIdentity(configPath string) (oldID, newID string, recovered bool, err error) {
+	if _, statErr := os.Lstat(configPath); errors.Is(statErr, os.ErrNotExist) {
+		return "", "", false, nil
+	} else if statErr != nil {
+		return "", "", false, statErr
+	}
+	_, _, missing, err := configuredIdentityState(configPath)
+	if err != nil {
+		return "", "", false, err
+	}
+	if !missing {
+		return "", "", false, nil
+	}
+	oldID, newID, err = rotateConfiguredAgentIdentity(configPath)
+	return oldID, newID, err == nil, err
 }
 
 func promptCapabilityProfile(reader *bufio.Reader, writer io.Writer, currentProfile string, current config.Values) (string, []string, error) {

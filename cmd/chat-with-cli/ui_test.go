@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -136,7 +137,7 @@ func TestRotateRetiredAgentIdentityPreservesOldKeyAndUpdatesConfig(t *testing.T)
 		t.Fatal(err)
 	}
 	oldID := oldIdentity.ID()
-	gotOld, newID, err := rotateRetiredAgentIdentity(configPath)
+	gotOld, newID, err := rotateConfiguredAgentIdentity(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,6 +205,92 @@ func TestInteractiveSetupUpdatesExistingConfigInsteadOfFailing(t *testing.T) {
 	}
 	if after.String("", "agent.profile") != "all" || !after.Bool(false, "agent.allow_computer_use") {
 		t.Fatalf("settings update lost profile/capabilities: %#v", after)
+	}
+}
+
+func TestMissingConfiguredIdentityIsRecoverableAndAccountDoesNotFail(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	stateDir := filepath.Join(dir, "state")
+	credentials := filepath.Join(dir, "credentials.json")
+	if err := runAgentSetup([]string{
+		"--config", configPath, "--state-dir", stateDir, "--credentials", credentials,
+		"--relay", "https://relay.example.test", "--root", dir,
+		"--device", "missing-key-device", "--profile", "A",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := before.String("", "agent.device_id")
+	oldPath := before.String("", "agent.identity")
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := configuredOAuthFromFile(configPath)
+	if err != nil {
+		t.Fatalf("account context should tolerate a missing key: %v", err)
+	}
+	if !auth.IdentityMissing || auth.DeviceID != oldID {
+		t.Fatalf("missing identity state=%v deviceID=%q want %q", auth.IdentityMissing, auth.DeviceID, oldID)
+	}
+	status := accountSessionStatus(context.Background(), auth)
+	if !strings.Contains(status, "identity is missing") || !strings.Contains(status, "OAuth") {
+		t.Fatalf("missing identity account status=%q", status)
+	}
+	gotOld, newID, recovered, err := recoverMissingConfiguredIdentity(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered || gotOld != oldID || newID == "" || newID == oldID {
+		t.Fatalf("recovery recovered=%v old=%q new=%q want old=%q and a fresh ID", recovered, gotOld, newID, oldID)
+	}
+	after, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.String("", "agent.device_id") != newID {
+		t.Fatalf("config device_id=%q want %q", after.String("", "agent.device_id"), newID)
+	}
+	newPath := after.String("", "agent.identity")
+	if newPath == oldPath {
+		t.Fatal("missing-key recovery reused the vanished identity path")
+	}
+	identity, err := deviceidentity.Load(newPath)
+	if err != nil || identity.ID() != newID {
+		t.Fatalf("replacement identity invalid: id=%v err=%v", identity, err)
+	}
+	for _, key := range []string{"agent.allow_file_write", "agent.allow_exec", "agent.allow_screen", "agent.allow_accessibility", "agent.allow_computer_use"} {
+		if !after.Bool(false, key) {
+			t.Fatalf("missing-key recovery lost capability %s", key)
+		}
+	}
+}
+
+func TestCorruptConfiguredIdentityDoesNotAutoRotate(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	stateDir := filepath.Join(dir, "state")
+	if err := runAgentSetup([]string{
+		"--config", configPath, "--state-dir", stateDir,
+		"--relay", "https://relay.example.test", "--root", dir,
+		"--device", "corrupt-key-device", "--profile", "R",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	values, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityPath := values.String("", "agent.identity")
+	if err := os.WriteFile(identityPath, []byte("not-an-ed25519-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, recovered, err := recoverMissingConfiguredIdentity(configPath)
+	if err == nil || recovered {
+		t.Fatalf("corrupt identity was silently recovered: recovered=%v err=%v", recovered, err)
 	}
 }
 

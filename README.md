@@ -59,7 +59,9 @@ The interactive **Connect this workstation** path performs first-time setup and
 connection as one flow. `connect` automatically refreshes OAuth or opens browser
 OAuth when needed. In a foreground terminal it then asks whether to use
 interactive local approvals, allow all capabilities for this process only, or
-stay with the configured profile:
+stay with the configured profile. Missing or remotely expired OAuth credentials
+are re-authorized automatically; a genuinely missing local device identity is
+replaced with a new immutable identity before OAuth continues:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ifloppy/chat-with-cli/main/install.sh | sh

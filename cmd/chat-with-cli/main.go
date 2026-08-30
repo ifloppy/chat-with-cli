@@ -1002,7 +1002,22 @@ const (
 
 func runConnect(args []string) error {
 	for _, arg := range args {
-		if arg == "-h" || arg == "--help" || arg == "--approval-mode" || strings.HasPrefix(arg, "--approval-mode=") {
+		if arg == "-h" || arg == "--help" {
+			return runAgentCommand("connect", args)
+		}
+	}
+	autoRepairIdentity := connectUsesConfiguredIdentity(args)
+	if autoRepairIdentity {
+		oldID, newID, recovered, err := recoverMissingConfiguredIdentity(configPathFromArgs(args))
+		if err != nil {
+			return fmt.Errorf("check configured device identity: %w", err)
+		}
+		if recovered {
+			fmt.Fprintf(os.Stderr, "Local device identity for %s is missing. Generated replacement identity %s; browser OAuth will authorize this workstation again.\n", displayDeviceID(oldID), newID)
+		}
+	}
+	for _, arg := range args {
+		if arg == "--approval-mode" || strings.HasPrefix(arg, "--approval-mode=") {
 			return runAgentCommand("connect", args)
 		}
 	}
@@ -1015,14 +1030,38 @@ func runConnect(args []string) error {
 	if !oauthclient.IsHTTPStatus(err, http.StatusGone) && !agent.IsChallengeHTTPStatus(err, http.StatusGone) {
 		return err
 	}
+	if !autoRepairIdentity {
+		return err
+	}
 	configPath := configPathFromArgs(args)
 	fmt.Fprintln(os.Stderr, "The Relay reports that this device identity was permanently revoked. Rotating the local device identity and starting OAuth again...")
-	oldID, newID, rotateErr := rotateRetiredAgentIdentity(configPath)
+	oldID, newID, rotateErr := rotateConfiguredAgentIdentity(configPath)
 	if rotateErr != nil {
 		return fmt.Errorf("recover permanently revoked device identity: %w", rotateErr)
 	}
 	fmt.Fprintf(os.Stderr, "Replaced retired device identity %s with %s. Browser OAuth will re-authorize this workstation.\n", oldID, newID)
 	return runAgentCommand("connect", connectArgs)
+}
+
+func connectUsesConfiguredIdentity(args []string) bool {
+	for _, arg := range args {
+		name := strings.TrimSpace(arg)
+		if before, _, ok := strings.Cut(name, "="); ok {
+			name = before
+		}
+		switch name {
+		case "--identity", "--device-id", "--token":
+			return false
+		}
+	}
+	return true
+}
+
+func displayDeviceID(id string) string {
+	if strings.TrimSpace(id) == "" {
+		return "the previous device"
+	}
+	return id
 }
 
 func chooseConnectApprovalMode() (string, error) {
@@ -1340,6 +1379,19 @@ func runLogin(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load agent config: %w", err)
 	}
+	if !flagWasSet(fs, "device-id") && !flagWasSet(fs, "identity") {
+		oldID, newID, recovered, recoverErr := recoverMissingConfiguredIdentity(*configPath)
+		if recoverErr != nil {
+			return fmt.Errorf("check configured device identity: %w", recoverErr)
+		}
+		if recovered {
+			fmt.Fprintf(os.Stderr, "Local device identity for %s is missing. Generated replacement identity %s; starting browser OAuth...\n", displayDeviceID(oldID), newID)
+			values, err = config.LoadOptional(*configPath)
+			if err != nil {
+				return fmt.Errorf("reload agent config after identity recovery: %w", err)
+			}
+		}
+	}
 	if !flagWasSet(fs, "relay") {
 		if _, configured := values.Raw("agent.relay_url"); configured {
 			*relayURL = values.String(*relayURL, "agent.relay_url")
@@ -1417,7 +1469,7 @@ func runLogin(args []string) error {
 	if _, err := manager.Login(ctx); err != nil {
 		if oauthclient.IsHTTPStatus(err, http.StatusGone) && !flagWasSet(fs, "device-id") && !flagWasSet(fs, "identity") {
 			fmt.Fprintln(os.Stderr, "The Relay reports that this device identity was permanently revoked. Rotating the local device identity and restarting browser OAuth...")
-			oldID, newID, rotateErr := rotateRetiredAgentIdentity(*configPath)
+			oldID, newID, rotateErr := rotateConfiguredAgentIdentity(*configPath)
 			if rotateErr != nil {
 				return fmt.Errorf("recover permanently revoked device identity: %w", rotateErr)
 			}

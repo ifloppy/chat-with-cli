@@ -82,6 +82,12 @@ identity private key and credential file. `chat-with-cli status` and `doctor`
 check identity-file permissions and ID/key consistency without printing key
 material.
 
+If the configured identity file is genuinely missing, `connect` and `login`
+treat the old immutable ID as unrecoverable locally: they generate a fresh
+0600 identity, update the config to its new ID, discard only the obsolete
+device credential, and continue with browser OAuth. Corrupt, insecure, or
+mismatched identity files are not auto-replaced and still fail closed.
+
 Legacy alpha Agents that have no Ed25519 identity are rejected by a current
 Relay by default. For a controlled migration only, a Relay operator may enable
 `relay.allow_legacy_unbound_agents = true` (or
