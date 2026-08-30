@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,72 @@ func loginBrowser(t *testing.T, username, password, decision string, calls *int)
 	}
 }
 
+func manualLoginCallback(t *testing.T, username, password, decision string, calls *int, savedPath *string) func(context.Context, ManualAuthorization) (string, error) {
+	t.Helper()
+	return func(_ context.Context, manual ManualAuthorization) (string, error) {
+		*calls = *calls + 1
+		*savedPath = manual.AuthorizationURLFile
+		info, err := os.Stat(manual.AuthorizationURLFile)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("manual authorization URL mode=%o want 600", info.Mode().Perm())
+		}
+		data, err := os.ReadFile(manual.AuthorizationURLFile)
+		if err != nil {
+			return "", err
+		}
+		target := strings.TrimSpace(string(data))
+		cookieJar, err := cookiejar.New(nil)
+		if err != nil {
+			return "", err
+		}
+		finalURL := ""
+		client := &http.Client{Jar: cookieJar}
+		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+			if strings.HasPrefix(req.URL.String(), manual.RedirectURI) {
+				finalURL = req.URL.String()
+				return http.ErrUseLastResponse
+			}
+			return nil
+		}
+		resp, err := client.Get(target)
+		if err != nil {
+			return "", err
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", err
+		}
+		match := requestIDPattern.FindSubmatch(body)
+		csrf := csrfTokenPattern.FindSubmatch(body)
+		if len(match) != 2 || len(csrf) != 2 {
+			t.Fatalf("manual authorization page missing request_id/csrf")
+		}
+		u, _ := url.Parse(target)
+		form := url.Values{
+			"request_id": {string(match[1])}, "username": {username},
+			"password": {password}, "decision": {decision}, "csrf_token": {string(csrf[1])},
+		}
+		post, err := http.NewRequest(http.MethodPost, u.Scheme+"://"+u.Host+"/oauth/authorize", strings.NewReader(form.Encode()))
+		if err != nil {
+			return "", err
+		}
+		post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err = client.Do(post)
+		if err != nil {
+			return "", err
+		}
+		resp.Body.Close()
+		if finalURL == "" {
+			t.Fatalf("manual OAuth did not produce the loopback callback URL; status=%d", resp.StatusCode)
+		}
+		return finalURL, nil
+	}
+}
+
 func TestAgentBrowserOAuthPersistsAndRefreshes(t *testing.T) {
 	oauth, base, cleanup := startTestOAuthServer(t, oauthserver.ModePrivate)
 	defer cleanup()
@@ -161,6 +228,113 @@ func TestAgentBrowserOAuthPersistsAndRefreshes(t *testing.T) {
 	}
 	if store.Profiles[resource].RefreshToken == oldRefresh {
 		t.Fatal("refresh token was not rotated in credential store")
+	}
+}
+
+func TestAgentOAuthSupportsHeadlessCallbackPaste(t *testing.T) {
+	oauth, base, cleanup := startTestOAuthServer(t, oauthserver.ModePrivate)
+	defer cleanup()
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	manualPath := ""
+	manager := &Manager{
+		RelayURL: base, Device: "headless-laptop", DeviceID: identity.ID(), DeviceIdentity: identity,
+		CredentialsPath: filepath.Join(t.TempDir(), "credentials.json"), ForceManual: true,
+		OpenBrowser: func(string) error {
+			t.Fatal("ForceManual unexpectedly invoked the browser opener")
+			return nil
+		},
+		ManualCallback: manualLoginCallback(t, "owner", "owner-password-123456", "login", &calls, &manualPath),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	access, err := manager.Token(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource, _ := manager.Resource()
+	if !oauth.VerifyAccessScope(access, resource, "agent:connect") {
+		t.Fatal("headless callback paste did not authorize Agent resource")
+	}
+	if calls != 1 {
+		t.Fatalf("manual callback calls=%d want=1", calls)
+	}
+	if manualPath == "" {
+		t.Fatal("manual authorization URL file was not exposed to the prompt callback")
+	}
+	if _, err := os.Stat(manualPath); !os.IsNotExist(err) {
+		t.Fatalf("manual authorization URL file was not removed after OAuth: %v", err)
+	}
+}
+
+func TestAgentOAuthFallsBackToManualWhenBrowserOpenFails(t *testing.T) {
+	oauth, base, cleanup := startTestOAuthServer(t, oauthserver.ModePrivate)
+	defer cleanup()
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	manualPath := ""
+	openCalls := 0
+	manager := &Manager{
+		RelayURL: base, Device: "headless-auto", DeviceID: identity.ID(), DeviceIdentity: identity,
+		CredentialsPath: filepath.Join(t.TempDir(), "credentials.json"),
+		OpenBrowser: func(string) error {
+			openCalls++
+			return os.ErrNotExist
+		},
+		ManualCallback: manualLoginCallback(t, "owner", "owner-password-123456", "login", &calls, &manualPath),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	access, err := manager.Token(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource, _ := manager.Resource()
+	if !oauth.VerifyAccessScope(access, resource, "agent:connect") {
+		t.Fatal("browser-open failure did not fall back to manual OAuth")
+	}
+	if openCalls != 1 || calls != 1 {
+		t.Fatalf("browser calls=%d manual calls=%d want 1/1", openCalls, calls)
+	}
+}
+
+func TestLinuxWithoutGraphicalSessionUsesManualOAuthPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux graphical-session detection")
+	}
+	t.Setenv("DISPLAY", "")
+	t.Setenv("WAYLAND_DISPLAY", "")
+	if err := openBrowser("https://example.test/authorize"); err == nil || !strings.Contains(err.Error(), "graphical session") {
+		t.Fatalf("headless Linux browser detection err=%v", err)
+	}
+}
+
+func TestManualOAuthCallbackURLBinding(t *testing.T) {
+	redirect := "http://127.0.0.1:34567/callback"
+	state := "expected-state"
+	valid := redirect + "?code=one-time-code&state=" + url.QueryEscape(state)
+	if code, err := parseManualCallbackURL(valid, redirect, state); err != nil || code != "one-time-code" {
+		t.Fatalf("valid manual callback code=%q err=%v", code, err)
+	}
+	for name, raw := range map[string]string{
+		"wrong host":      "http://127.0.0.1:34568/callback?code=x&state=expected-state",
+		"wrong path":      "http://127.0.0.1:34567/other?code=x&state=expected-state",
+		"wrong state":     redirect + "?code=x&state=wrong",
+		"duplicate state": redirect + "?code=x&state=expected-state&state=expected-state",
+		"duplicate code":  redirect + "?code=x&code=y&state=expected-state",
+		"oauth error":     redirect + "?error=access_denied&state=expected-state",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseManualCallbackURL(raw, redirect, state); err == nil {
+				t.Fatalf("unsafe manual callback was accepted: %s", raw)
+			}
+		})
 	}
 }
 

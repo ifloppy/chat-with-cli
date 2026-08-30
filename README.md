@@ -61,7 +61,11 @@ OAuth when needed. In a foreground terminal it then asks whether to use
 interactive local approvals, allow all capabilities for this process only, or
 stay with the configured profile. Missing or remotely expired OAuth credentials
 are re-authorized automatically; a genuinely missing local device identity is
-replaced with a new immutable identity before OAuth continues:
+replaced with a new immutable identity before OAuth continues. Headless/SSH
+workstations are supported too: when no Linux graphical session is available,
+OAuth displays its one-time authorization URL on the controlling TTY and asks
+you to paste the final localhost callback URL after authorizing in any browser.
+Use `--manual-oauth` to force this flow:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ifloppy/chat-with-cli/main/install.sh | sh

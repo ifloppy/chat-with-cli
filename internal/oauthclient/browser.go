@@ -179,25 +179,27 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 	server.Handler = mux
 	go func() { _ = server.Serve(ln) }()
 
-	opener := m.OpenBrowser
-	if opener == nil {
-		opener = openBrowser
-	}
-	if err := opener(u.String()); err != nil {
-		manualPath, saveErr := saveManualAuthorizationURL(u.String())
-		if saveErr == nil {
-			defer os.Remove(manualPath)
-			_, _ = fmt.Fprintf(os.Stderr, "Could not open a browser automatically. The authorization URL was saved to a private temporary file: %s\nOpen that file locally in a browser; it will be removed after this OAuth attempt.\n", manualPath)
-		} else {
-			_, _ = fmt.Fprintln(os.Stderr, "Could not open a browser automatically and could not save the authorization URL privately. Fix the browser opener and retry.")
+	manual := m.ForceManual
+	if !manual {
+		opener := m.OpenBrowser
+		if opener == nil {
+			opener = openBrowser
+		}
+		if err := opener(u.String()); err != nil {
+			manual = true
 		}
 	}
+
 	var cb callbackResult
-	select {
-	case cb = <-result:
-	case <-ctx.Done():
-		_ = server.Close()
-		return Credential{}, ctx.Err()
+	if manual {
+		cb = m.readManualCallback(ctx, u.String(), redirect, state)
+	} else {
+		select {
+		case cb = <-result:
+		case <-ctx.Done():
+			_ = server.Close()
+			return Credential{}, ctx.Err()
+		}
 	}
 	_ = server.Close()
 	if cb.err != nil {
@@ -221,6 +223,50 @@ func (m *Manager) browserAuthorize(ctx context.Context, client *http.Client, res
 	return Credential{Issuer: meta.Issuer, Resource: resource, ClientID: reg.ClientID,
 		AccessToken: token.AccessToken, RefreshToken: token.RefreshToken,
 		ExpiresAt: time.Now().Add(time.Duration(token.ExpiresIn) * time.Second).Unix()}, nil
+}
+
+func (m *Manager) readManualCallback(ctx context.Context, authorizationURL, redirectURI, state string) callbackResult {
+	manualPath, err := saveManualAuthorizationURL(authorizationURL)
+	if err != nil {
+		return callbackResult{err: errors.New("could not save the OAuth authorization URL for manual login")}
+	}
+	defer os.Remove(manualPath)
+	if m.ManualCallback == nil {
+		return callbackResult{err: errors.New("no graphical browser is available and manual OAuth callback input is not configured")}
+	}
+	raw, err := m.ManualCallback(ctx, ManualAuthorization{AuthorizationURLFile: manualPath, RedirectURI: redirectURI})
+	if err != nil {
+		return callbackResult{err: err}
+	}
+	code, err := parseManualCallbackURL(raw, redirectURI, state)
+	return callbackResult{code: code, err: err}
+}
+
+func parseManualCallbackURL(raw, redirectURI, expectedState string) (string, error) {
+	callback, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !callback.IsAbs() || callback.Host == "" || callback.User != nil || callback.Fragment != "" {
+		return "", errors.New("invalid OAuth callback URL")
+	}
+	expected, err := url.Parse(redirectURI)
+	if err != nil {
+		return "", errors.New("invalid expected OAuth callback URL")
+	}
+	if !strings.EqualFold(callback.Scheme, expected.Scheme) || !strings.EqualFold(callback.Host, expected.Host) || callback.EscapedPath() != expected.EscapedPath() {
+		return "", errors.New("OAuth callback URL does not match this login attempt")
+	}
+	query := callback.Query()
+	states := query["state"]
+	if len(states) != 1 || states[0] != expectedState {
+		return "", errors.New("OAuth state mismatch")
+	}
+	if values := query["error"]; len(values) != 0 {
+		return "", errors.New("OAuth authorization denied")
+	}
+	codes := query["code"]
+	if len(codes) != 1 || strings.TrimSpace(codes[0]) == "" {
+		return "", errors.New("OAuth callback URL is missing a single authorization code")
+	}
+	return codes[0], nil
 }
 
 func saveManualAuthorizationURL(target string) (string, error) {
@@ -272,6 +318,9 @@ func randomURLToken(n int) string {
 }
 
 func openBrowser(target string) error {
+	if runtime.GOOS == "linux" && strings.TrimSpace(os.Getenv("DISPLAY")) == "" && strings.TrimSpace(os.Getenv("WAYLAND_DISPLAY")) == "" {
+		return errors.New("no graphical session is available")
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":

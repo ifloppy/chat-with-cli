@@ -32,7 +32,11 @@ chat-with-cli agent setup \
 chat-with-cli connect
 ```
 
-缺少、过期或被 Relay 拒绝的凭据会自动触发 OAuth；远端撤销了仍未过期的本地 token 时也不会再无限重试旧 token。显式 `chat-with-cli login` 会强制重新走浏览器 OAuth，`chat-with-cli logout` 会撤销当前工作站的 token family 并仅删除这台设备的本地凭据。若设备 identity 已被永久 Revoke，交互式 Connect 会保留旧 revoked key、生成新的 Ed25519 identity/immutable ID、更新配置后再进入 OAuth。前台连接时可以选择每次请求审批、当前进程全部允许，或仅使用配置文件中的权限。需要后台运行前，请先审阅生成的 unit：
+缺少、过期或被 Relay 拒绝的凭据会自动触发 OAuth；远端撤销了仍未过期的本地 token 时也不会再无限重试旧 token。显式 `chat-with-cli login` 会强制重新走浏览器 OAuth，`chat-with-cli logout` 会撤销当前工作站的 token family 并仅删除这台设备的本地凭据。若设备 identity 已被永久 Revoke，交互式 Connect 会保留旧 revoked key、生成新的 Ed25519 identity/immutable ID、更新配置后再进入 OAuth。
+
+纯 SSH/无头 Linux 主机也可以完成 OAuth：当没有 `DISPLAY` 和 `WAYLAND_DISPLAY` 时，CLI 会自动切换为手动模式；也可以用 `chat-with-cli connect --manual-oauth` 或 `chat-with-cli login --manual-oauth` 强制进入。CLI 只向当前 TTY 显示一次授权 URL，你可以在任意设备浏览器里打开并完成登录。最终跳到 `http://127.0.0.1:<port>/callback?...` 时，如果浏览器显示 localhost 无法连接属于正常现象；复制地址栏里的完整最终 URL，粘贴回 CLI 即可继续 PKCE 换取 token。CLI 会严格校验 callback 的 host、port、path、state 和单一 code。
+
+前台连接时可以选择每次请求审批、当前进程全部允许，或仅使用配置文件中的权限。需要后台运行前，请先审阅生成的 unit：
 
 前台 `connect`/`agent` 启动时会打印完整的 31 项 MCP 工具清单和本地能力摘要；每次入站工具调用也会按名称显示，即使选择“全部允许”（`--approval-mode=allow-all`）也不会关闭这条审计输出。参数、文件内容、命令和结果不会打印。
 

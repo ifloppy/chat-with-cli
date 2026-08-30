@@ -13,6 +13,11 @@ import (
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 )
 
+type ManualAuthorization struct {
+	AuthorizationURLFile string
+	RedirectURI          string
+}
+
 type Manager struct {
 	RelayURL        string
 	Device          string
@@ -21,6 +26,8 @@ type Manager struct {
 	CredentialsPath string
 	HTTPClient      *http.Client
 	OpenBrowser     func(string) error
+	ManualCallback  func(context.Context, ManualAuthorization) (string, error)
+	ForceManual     bool
 	mu              sync.Mutex
 }
 

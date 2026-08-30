@@ -1163,6 +1163,36 @@ func (a *requestApprover) authorize(ctx context.Context, request protocol.Reques
 	}
 }
 
+func manualOAuthCallbackPrompt(ctx context.Context, manual oauthclient.ManualAuthorization) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", errors.New("manual OAuth requires an interactive terminal; run the command from a TTY")
+	}
+	defer tty.Close()
+	authorizationURL, readURLerr := os.ReadFile(manual.AuthorizationURLFile)
+	if readURLerr != nil {
+		return "", errors.New("could not read the private OAuth authorization URL")
+	}
+	fmt.Fprintln(tty, "\nHeadless OAuth mode")
+	fmt.Fprintln(tty, "  Open this one-time authorization URL in a browser on any device (do not share it):")
+	fmt.Fprintf(tty, "  %s\n", strings.TrimSpace(string(authorizationURL)))
+	fmt.Fprintln(tty, "  The final localhost page may fail to load on that device; this is expected.")
+	fmt.Fprintln(tty, "  Copy the complete final URL from the browser address bar and paste it below.")
+	fmt.Fprint(tty, "  Final callback URL: ")
+	line, readErr := bufio.NewReader(tty).ReadString('\n')
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return "", readErr
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", errors.New("manual OAuth callback URL is empty")
+	}
+	return line, nil
+}
+
 func runAgent(args []string) error {
 	return runAgentCommand("agent", args)
 }
@@ -1178,9 +1208,13 @@ func runAgentCommand(command string, args []string) error {
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration file")
 	identityPath := fs.String("identity", "", "Ed25519 device identity path")
+	manualOAuth := fs.Bool("manual-oauth", false, "use headless OAuth and paste the final callback URL instead of opening a local browser")
 	approvalMode := fs.String("approval-mode", approvalConfigured, "configured, ask, or allow-all; ask/allow-all temporarily expose all capabilities for this process")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if !flagWasSet(fs, "manual-oauth") && envBool("CHAT_WITH_CLI_MANUAL_OAUTH") {
+		*manualOAuth = true
 	}
 	values, err := config.LoadOptional(*configPath)
 	if err != nil {
@@ -1342,7 +1376,7 @@ func runAgentCommand(command string, args []string) error {
 		if deviceIdentity == nil && *deviceID != "" {
 			log.Printf("WARNING: immutable device %s has no local Ed25519 identity; this is legacy bearer-only compatibility and should be migrated with `agent setup`", *deviceID)
 		}
-		manager := &oauthclient.Manager{RelayURL: *relayURL, Device: *device, DeviceID: *deviceID, DeviceIdentity: deviceIdentity, CredentialsPath: *credentials}
+		manager := &oauthclient.Manager{RelayURL: *relayURL, Device: *device, DeviceID: *deviceID, DeviceIdentity: deviceIdentity, CredentialsPath: *credentials, ManualCallback: manualOAuthCallbackPrompt, ForceManual: *manualOAuth}
 		client.TokenProvider = manager.Token
 		client.TokenRejected = func(context.Context) error {
 			_, err := manager.Forget()
@@ -1372,8 +1406,12 @@ func runLogin(args []string) error {
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration file")
 	identityPath := fs.String("identity", "", "Ed25519 device identity path")
+	manualOAuth := fs.Bool("manual-oauth", false, "use headless OAuth and paste the final callback URL instead of opening a local browser")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if !flagWasSet(fs, "manual-oauth") && envBool("CHAT_WITH_CLI_MANUAL_OAUTH") {
+		*manualOAuth = true
 	}
 	values, err := config.LoadOptional(*configPath)
 	if err != nil {
@@ -1459,7 +1497,7 @@ func runLogin(args []string) error {
 		*relayURL = defaultPublicRelayURL
 		log.Printf("no Relay was configured; using the default public Relay %s", defaultPublicRelayURL)
 	}
-	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, DeviceIdentity: deviceIdentity, CredentialsPath: *credentials}
+	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, DeviceIdentity: deviceIdentity, CredentialsPath: *credentials, ManualCallback: manualOAuthCallbackPrompt, ForceManual: *manualOAuth}
 	resource, err := manager.Resource()
 	if err != nil {
 		return err

@@ -70,7 +70,11 @@ The generated config stores the Relay URL and immutable device ID. Normal
 `connect` refreshes expired credentials and opens OAuth automatically when a
 saved credential is rejected. Explicit `login` always performs a fresh browser
 authorization; `logout` revokes that workstation token family and removes its
-exact local credential. Immutable IDs are canonicalized to
+exact local credential. For SSH/headless machines, `connect` automatically
+falls back to manual OAuth when no Linux graphical session is present;
+`--manual-oauth` forces this mode. Open the one-time URL shown on the TTY in
+any browser, authorize, then paste the browser's final localhost callback URL
+back into the CLI. Immutable IDs are canonicalized to
 lowercase and are the workstation identity; the device name is only a display
 label and legacy route. Use the stable account endpoint in normal MCP clients:
 

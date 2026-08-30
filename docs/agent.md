@@ -66,6 +66,19 @@ retired key, generates a fresh Ed25519 identity and immutable ID, updates the
 config, and starts OAuth for the replacement identity. Explicit `chat-with-cli
 login` remains available when re-authorization is desired even while the current
 credential is still valid.
+
+Headless workstations are supported without changing the Relay protocol. On
+Linux, if neither `DISPLAY` nor `WAYLAND_DISPLAY` is available, OAuth
+automatically switches to manual mode. You can also force it with
+`chat-with-cli connect --manual-oauth` or `chat-with-cli login --manual-oauth`
+(or `CHAT_WITH_CLI_MANUAL_OAUTH=1`). The CLI shows the one-time authorization
+URL only on the controlling TTY. Open it in a browser on any device, complete
+authorization, then copy the complete final `http://127.0.0.1:<port>/callback`
+URL from that browser back into the CLI. A failed localhost page on the browser
+device is expected. The pasted callback is accepted only when its loopback
+host, port, path, OAuth state, and single authorization code exactly match the
+current PKCE flow.
+
 Before DCR, the CLI obtains a short-lived one-time registration challenge from
 the Relay, signs it with the device private key, and submits that proof with
 the DCR request. Device-bound Agent DCR accepts only loopback HTTP callbacks;
