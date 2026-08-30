@@ -226,3 +226,65 @@ func TestIdleAgentIsDisconnectedAfterAuthorizationRevoke(t *testing.T) {
 	}
 	t.Fatalf("idle revoked Agent remained connected: %v", broker.Devices())
 }
+
+func TestBrokerReportsForwardedPayloadTraffic(t *testing.T) {
+	broker := NewBroker()
+	var total atomic.Int64
+	broker.SetTrafficObserver(func(device string, bytes int64) {
+		if device == "metered-laptop" {
+			total.Add(bytes)
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle("/agent/{device}", broker.AgentHandler())
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http") + "/agent/metered-laptop"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer agent-secret"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	broker.SetAgentConnectionAuthorizer(func(_ string, fingerprint string) bool {
+		return fingerprint == TokenFingerprint("agent-secret")
+	})
+	deadline := time.Now().Add(time.Second)
+	for len(broker.Devices()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(broker.Devices()) != 1 {
+		t.Fatal("agent did not connect")
+	}
+
+	responseDone := make(chan error, 1)
+	go func() {
+		_, data, readErr := conn.Read(ctx)
+		if readErr != nil {
+			responseDone <- readErr
+			return
+		}
+		var request protocol.Request
+		if unmarshalErr := json.Unmarshal(data, &request); unmarshalErr != nil {
+			responseDone <- unmarshalErr
+			return
+		}
+		response, marshalErr := json.Marshal(protocol.Response{ID: request.ID, Result: json.RawMessage(`{"ok":true}`)})
+		if marshalErr != nil {
+			responseDone <- marshalErr
+			return
+		}
+		responseDone <- conn.Write(ctx, websocket.MessageText, response)
+	}()
+	if _, err := broker.Call(ctx, "metered-laptop", "system_info", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-responseDone; err != nil {
+		t.Fatal(err)
+	}
+	if total.Load() <= 0 {
+		t.Fatal("broker did not report forwarded payload bytes")
+	}
+}

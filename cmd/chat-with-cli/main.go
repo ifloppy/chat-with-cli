@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -621,6 +622,8 @@ func runRelay(args []string) error {
 	admobRewardUnitID := fs.String("admob-reward-unit-id", "", "optional companion-app AdMob rewarded-ad unit ID")
 	usageUnlockEnabled := fs.Bool("usage-unlock-enabled", false, "enable the signed, provider-verified rewarded usage entitlement link")
 	usageUnlockEndpoint := fs.String("usage-unlock-endpoint", "", "HTTPS companion-app/backend URL for provider-verified usage entitlements")
+	usageMeteringEnabled := fs.Bool("usage-metering-enabled", false, "enable per-account Relay payload quota metering (disabled by default)")
+	usageDefaultQuotaBytes := fs.Int64("usage-default-quota-bytes", 100<<20, "default per-account Relay quota in payload bytes")
 	configPath := fs.String("config", defaultRelayConfigPath(), "relay TOML configuration file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -684,6 +687,9 @@ func runRelay(args []string) error {
 	if !flagWasSet(fs, "usage-unlock-endpoint") {
 		*usageUnlockEndpoint = values.String(*usageUnlockEndpoint, "relay.usage_unlock_endpoint")
 	}
+	if !flagWasSet(fs, "usage-metering-enabled") {
+		*usageMeteringEnabled = values.Bool(*usageMeteringEnabled, "relay.usage_metering_enabled")
+	}
 	*clientToken = envOr(*clientToken, "CHAT_WITH_CLI_CLIENT_TOKEN")
 	*agentToken = envOr(*agentToken, "CHAT_WITH_CLI_AGENT_TOKEN")
 	*publicURL = envOr(*publicURL, "CHAT_WITH_CLI_PUBLIC_URL")
@@ -730,12 +736,34 @@ func runRelay(args []string) error {
 		*usageUnlockEnabled = true
 	}
 	*usageUnlockEndpoint = envOr(*usageUnlockEndpoint, "CHAT_WITH_CLI_USAGE_UNLOCK_ENDPOINT")
+	if !flagWasSet(fs, "usage-metering-enabled") && envBool("CHAT_WITH_CLI_USAGE_METERING_ENABLED") {
+		*usageMeteringEnabled = true
+	}
+	if !flagWasSet(fs, "usage-default-quota-bytes") {
+		if raw := strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_USAGE_DEFAULT_QUOTA_BYTES")); raw != "" {
+			parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil {
+				return fmt.Errorf("invalid CHAT_WITH_CLI_USAGE_DEFAULT_QUOTA_BYTES: %w", parseErr)
+			}
+			*usageDefaultQuotaBytes = parsed
+		} else if raw, ok := values.Raw("relay.usage_default_quota_bytes"); ok {
+			parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil {
+				return fmt.Errorf("invalid relay.usage_default_quota_bytes in %s: %w", *configPath, parseErr)
+			}
+			*usageDefaultQuotaBytes = parsed
+		}
+	}
+	admobVerifierSecret := strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET"))
 	*usageUnlockEndpoint, err = normalizeUsageUnlockEndpoint(*usageUnlockEndpoint)
 	if err != nil {
 		return fmt.Errorf("invalid usage unlock endpoint: %w", err)
 	}
 	if *usageUnlockEnabled && *usageUnlockEndpoint == "" {
 		return errors.New("--usage-unlock-enabled requires --usage-unlock-endpoint")
+	}
+	if *usageDefaultQuotaBytes < 0 {
+		return errors.New("--usage-default-quota-bytes must not be negative")
 	}
 	if *ownerPassword == "" {
 		*ownerPassword, err = readPrivateCredential(*ownerPasswordFile)
@@ -797,7 +825,7 @@ func runRelay(args []string) error {
 	mux := http.NewServeMux()
 	var oauthHealth *oauthserver.Server
 	if oauthEnabled {
-		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, ModeConfigured: modeConfigured, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), EnforceSingleWriter: true, AllowLegacyUnboundAgents: *allowLegacyUnboundAgents, SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL, AdSenseClientID: *adsenseClientID, AdSenseSlot: *adsenseSlot, AdMobAppID: *admobAppID, AdMobRewardUnitID: *admobRewardUnitID, UsageUnlockEnabled: *usageUnlockEnabled, UsageUnlockEndpoint: *usageUnlockEndpoint}
+		cfg := oauthserver.Config{PublicURL: *publicURL, StateDir: *stateDir, Mode: *mode, ModeConfigured: modeConfigured, OwnerUsername: *ownerUsername, OwnerPassword: *ownerPassword, RegistrationDisabled: *disableRegistration, TrustedProxyCIDRs: append([]string(nil), *trustedProxies...), EnforceSingleWriter: true, AllowLegacyUnboundAgents: *allowLegacyUnboundAgents, SetupToken: setupToken, SetupTokenPath: *setupTokenFile, Version: mcpserver.Version, GitHubURL: *githubURL, AdSenseClientID: *adsenseClientID, AdSenseSlot: *adsenseSlot, AdMobAppID: *admobAppID, AdMobRewardUnitID: *admobRewardUnitID, UsageUnlockEnabled: *usageUnlockEnabled, UsageUnlockEndpoint: *usageUnlockEndpoint, UsageMeteringEnabled: *usageMeteringEnabled, UsageDefaultQuotaBytes: *usageDefaultQuotaBytes, AdMobVerifierSecret: admobVerifierSecret}
 		oauth, err := oauthserver.New(cfg)
 		if err != nil {
 			return err
@@ -806,6 +834,9 @@ func runRelay(args []string) error {
 		oauthHealth = oauth
 		broker.SetAgentConnectionAuthorizer(func(device, credentialHash string) bool {
 			return oauth.VerifyAgentConnection(credentialHash, device)
+		})
+		broker.SetTrafficObserver(func(device string, bytes int64) {
+			oauth.RecordRelayTraffic(device, bytes)
 		})
 		oauth.SetAgentSessionResetter(broker.DisconnectDevice)
 		oauth.SetDeviceStatusProvider(func() map[string]oauthserver.DeviceStatus {

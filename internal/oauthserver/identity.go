@@ -141,6 +141,11 @@ func (s *Server) createUserLocked(username, password string, admin ...bool) (Use
 	user := User{ID: randomToken(18), Username: strings.TrimSpace(username), PasswordHash: hash, CreatedAt: time.Now().Unix(), Admin: isAdmin}
 	s.users[user.ID] = user
 	s.usernames[normalized] = user.ID
+	if s.usageMeteringEnabled {
+		// Lock the account to the default quota in effect when it is created;
+		// later default changes are for future accounts only.
+		s.ensureUsageRecordLocked(user.ID)
+	}
 	return user, nil
 }
 

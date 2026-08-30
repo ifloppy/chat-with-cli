@@ -1,21 +1,23 @@
 # Backup and restore
 
-The Relay state file is normally:
+The Relay state files are normally:
 
 ```text
 <state-dir>/oauth-state.json
+<state-dir>/usage-state.json
 ```
 
-It contains Argon2id password hashes, one-way token/session identifiers,
-device/user/client metadata, settings, and bounded security events. It does
-not contain raw OAuth bearer tokens or browser cookies. Treat it as sensitive
-nonetheless.
+`oauth-state.json` contains Argon2id password hashes, one-way token/session identifiers,
+device/user/client metadata, settings, and bounded security events.
+`usage-state.json` contains per-user quota counters, activation-code hashes,
+and redeemed reward IDs. Neither file contains raw OAuth bearer tokens or
+browser cookies. Treat both as sensitive nonetheless.
 
 Stop the Relay before taking a filesystem backup so the copy is a consistent
-application snapshot. Preserve the state directory mode 0700, state file mode
-0600, owner, and the `.lock` file's directory. Include the TOML config only if
-its contents are appropriate for the backup; secrets should remain in the
-environment or a separate secret store.
+application snapshot and pending usage counters are flushed. Preserve the state
+directory mode 0700, state file modes 0600, owner, and lock/guard files. Include
+the TOML config only if its contents are appropriate for the backup; secrets
+should remain in the environment or a separate secret store.
 
 The workstation credential file is separate, normally
 `~/.config/chat-with-cli/credentials.json`. It contains raw access/refresh

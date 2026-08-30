@@ -43,29 +43,38 @@ type accountGrantView struct {
 }
 
 type accountPageData struct {
-	Username       string
-	PublicURL      string
-	PublicInstance bool
-	Devices        []accountDeviceView
-	Sessions       []accountSessionView
-	Grants         []accountGrantView
-	CSRFToken      string
+	Username              string
+	Admin                 bool
+	PublicURL             string
+	PublicInstance        bool
+	UsageMeteringEnabled  bool
+	UsageQuotaBytes       int64
+	UsageUsedBytes        int64
+	UsageRemainingBytes   int64
+	UsageRewardConfigured bool
+	UsageRewardReady      bool
+	UsageUnlockURL        string
+	Devices               []accountDeviceView
+	Sessions              []accountSessionView
+	Grants                []accountGrantView
+	CSRFToken             string
 }
 
 var accountLoginTemplate = template.Must(template.New("account-login").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Account · Chat with CLI</title></head>
+<html lang="en" data-admin="false"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Account · Chat with CLI</title></head>
 <body><div class="page compact"><header class="topbar"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">⌁</span><span class="brand-name">Chat with CLI</span></a><nav class="nav"><a href="/" data-i18n="Home">Home</a><div class="ui-controls" data-ui-controls></div></nav></header>
 <main><div class="page-header"><span class="eyebrow" data-i18n="Account">Account</span><h1 data-i18n="Chat with CLI account">Chat with CLI account</h1><p data-i18n="Sign in to manage your connected workstations and authorizations.">Sign in to manage your connected workstations and authorizations.</p></div>
 {{if .PublicInstance}}<div class="warning"><b data-i18n="Do not trust a public Relay with sensitive access.">Do not trust a public Relay with sensitive access.</b><span data-i18n="The operator controls the server code and can observe or alter MCP traffic. This service isolates users from each other, not from its operator. Self-host a private Relay for high-trust use.">The operator controls the server code and can observe or alter MCP traffic. This service isolates users from each other, not from its operator. Self-host a private Relay for high-trust use.</span></div>{{end}}
 <section class="auth-card"><form class="auth-form" method="post" action="/account/login"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><label><span data-i18n="Username">Username</span><input name="username" autocomplete="username" required></label><label><span data-i18n="Password">Password</span><input type="password" name="password" autocomplete="current-password" required></label><button class="primary" type="submit" data-i18n="Sign in">Sign in</button></form></section>
 <p class="auth-footer"><a href="/" data-i18n="Back to home">Back to home</a></p></main></div></body></html>`))
 
-var accountTemplate = template.Must(template.New("account").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My account · Chat with CLI</title></head>
+var accountTemplate = template.Must(template.New("account").Funcs(template.FuncMap{"formatBytes": formatUsageBytes}).Parse(`<!doctype html>
+<html lang="en" data-admin="{{.Admin}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My account · Chat with CLI</title></head>
 <body><div class="page"><header class="topbar"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">⌁</span><span class="brand-name">Chat with CLI</span></a><nav class="nav"><a href="/" data-i18n="Home">Home</a><a href="/docs" data-i18n="Docs">Docs</a><form class="inline" method="post" action="/account/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="text" type="submit" data-i18n="Sign out">Sign out</button></form><div class="ui-controls" data-ui-controls></div></nav></header>
 <main><div class="page-header"><span class="eyebrow" data-i18n="Account">Account</span><h1 data-i18n="My Chat with CLI">My Chat with CLI</h1><p><span data-i18n="Signed in as">Signed in as</span> <strong>{{.Username}}</strong></p></div>
 {{if .PublicInstance}}<div class="warning"><b data-i18n="Public Relay operator is trusted by design.">Public Relay operator is trusted by design.</b><span data-i18n="This page can prove that other normal users are isolated from your devices. It cannot prove that the operator is harmless: the operator can run modified Relay code and observe or alter MCP traffic. Do not grant sensitive computer access to any public instance, including one operated by the software author; self-host when trust matters.">This page can prove that other normal users are isolated from your devices. It cannot prove that the operator is harmless: the operator can run modified Relay code and observe or alter MCP traffic. Do not grant sensitive computer access to any public instance, including one operated by the software author; self-host when trust matters.</span></div>{{end}}
 <section class="surface table-card"><div class="section-heading table-intro"><div><span class="eyebrow" data-i18n="Devices">Devices</span><h2 data-i18n="My devices">My devices</h2></div><p data-i18n="Only devices owned by your account are shown. Disabling immediately revokes current device tokens; permanent revocation retires the cryptographic identity.">Only devices owned by your account are shown. Disabling immediately revokes current device tokens; permanent revocation retires the cryptographic identity.</p></div><div class="table-wrap"><table><thead><tr><th data-i18n="Device">Device</th><th data-i18n="Status">Status</th><th data-i18n="Capabilities">Capabilities</th><th data-i18n="MCP URL">MCP URL</th><th data-i18n="Actions">Actions</th></tr></thead><tbody>{{range .Devices}}<tr><td><b>{{.Name}}</b><br><code>{{.ID}}</code><br>{{if .ProofBound}}<span class="status ok" data-i18n="PoP bound">PoP bound</span>{{else}}<span class="status bad" data-i18n="legacy unbound">legacy unbound</span>{{end}}</td><td>{{if .Online}}<span class="status ok" data-i18n="online">online</span>{{else}}<span data-i18n="offline">offline</span>{{end}}{{if .Disabled}}<br><span class="status bad" data-i18n="disabled">disabled</span>{{end}}{{if not .LastSeen.IsZero}}<br><small><span data-i18n="last seen">last seen</span> {{.LastSeen}}</small>{{end}}</td><td><small>{{if .Capabilities.FilesystemRead}}<span data-i18n="filesystem read">filesystem read</span><br>{{end}}{{if .Capabilities.FilesystemWrite}}<span data-i18n="filesystem write">filesystem write</span><br>{{end}}{{if .Capabilities.Exec}}<span data-i18n="exec">exec</span>{{if .Capabilities.ExecSandbox}} ({{.Capabilities.ExecSandbox}}){{end}}<br>{{end}}{{if .Capabilities.ScreenRead}}<span data-i18n="screen read">screen read</span><br>{{end}}{{if .Capabilities.AccessibilityRead}}<span data-i18n="accessibility read">accessibility read</span><br>{{end}}{{if .Capabilities.ComputerInput}}<span data-i18n="computer input">computer input</span>{{end}}</small></td><td><code>{{.MCPURL}}</code></td><td class="table-actions"><form class="inline" method="post" action="/account/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="rename-device"><input type="hidden" name="target" value="{{.Route}}"><input name="value" data-i18n-placeholder="new name" placeholder="new name" required><button type="submit" data-i18n="Rename">Rename</button></form><form class="inline" method="post" action="/account/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="disable-device"><input type="hidden" name="target" value="{{.Route}}"><input type="hidden" name="value" value="{{if .Disabled}}off{{else}}on{{end}}">{{if .Disabled}}<input type="password" name="password" data-i18n-placeholder="password to enable" placeholder="password to enable" required>{{end}}<button type="submit">{{if .Disabled}}<span data-i18n="Enable">Enable</span>{{else}}<span data-i18n="Disable">Disable</span>{{end}}</button></form><form class="inline" method="post" action="/account/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-device"><input type="hidden" name="target" value="{{.Route}}"><input name="confirm" data-i18n-placeholder="REVOKE" placeholder="REVOKE" required><button class="danger" type="submit" data-i18n="Revoke permanently">Revoke permanently</button></form></td></tr>{{else}}<tr><td colspan="5" class="muted" data-i18n="No devices are owned by this account yet. Pair an Agent first.">No devices are owned by this account yet. Pair an Agent first.</td></tr>{{end}}</tbody></table></div></section>
+{{if .UsageMeteringEnabled}}<section class="surface usage-card" id="relay-usage"><div class="section-heading"><div><span class="eyebrow" data-i18n="Relay usage">Relay usage</span><h2 data-i18n="Support the maintainer">Support the maintainer</h2></div><p data-i18n="MCP and Agent request/response payload bytes are counted at the Relay. Add quota with an activation code or a verified rewarded ad.">MCP and Agent request/response payload bytes are counted at the Relay. Add quota with an activation code or a verified rewarded ad.</p></div><div class="usage-meter"><div><span data-i18n="Remaining traffic">Remaining traffic</span><strong>{{formatBytes .UsageRemainingBytes}}</strong></div><div><span data-i18n="Used">Used</span><strong>{{formatBytes .UsageUsedBytes}}</strong></div><div><span data-i18n="Granted">Granted</span><strong>{{formatBytes .UsageQuotaBytes}}</strong></div></div><div class="usage-actions"><form class="setting-form" method="post" action="/account/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="redeem-activation-code"><input name="value" autocomplete="one-time-code" data-i18n-placeholder="activation code" placeholder="activation code" required><button class="tonal" type="submit" data-i18n="Redeem activation code">Redeem activation code</button></form>{{if .UsageRewardReady}}<a class="button primary" href="{{.UsageUnlockURL}}" rel="noreferrer" data-i18n="Watch an ad for quota">Watch an ad for quota</a>{{else if .UsageRewardConfigured}}<span class="field-help" data-i18n="Rewarded ads are awaiting server-side verifier configuration.">Rewarded ads are awaiting server-side verifier configuration.</span>{{end}}</div></section>{{end}}
 <section class="surface table-card"><div class="section-heading table-intro"><div><span class="eyebrow" data-i18n="Authorizations">Authorizations</span><h2 data-i18n="Connected authorizations">Connected authorizations</h2></div><p data-i18n="These are your token families, not globally shared OAuth client registrations. Revoking one cannot revoke another user's access.">These are your token families, not globally shared OAuth client registrations. Revoking one cannot revoke another user's access.</p></div><div class="table-wrap"><table><thead><tr><th data-i18n="Client">Client</th><th data-i18n="Resource">Resource</th><th data-i18n="Expires">Expires</th><th data-i18n="Action">Action</th></tr></thead><tbody>{{range .Grants}}<tr><td>{{.ClientName}}<br><code>{{.Label}}</code></td><td><code>{{.Resource}}</code></td><td>{{.Expires}}</td><td><form class="inline" method="post" action="/account/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-family"><input type="hidden" name="target" value="{{.FamilyHandle}}"><button type="submit" data-i18n="Revoke my authorization">Revoke my authorization</button></form></td></tr>{{else}}<tr><td colspan="4" class="muted" data-i18n="No active OAuth token families.">No active OAuth token families.</td></tr>{{end}}</tbody></table></div></section>
 <section class="surface table-card"><div class="section-heading table-intro"><div><span class="eyebrow" data-i18n="Sessions">Sessions</span><h2 data-i18n="Browser sessions">Browser sessions</h2></div><form class="inline" method="post" action="/account/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="logout-others"><button type="submit" data-i18n="Sign out all other sessions">Sign out all other sessions</button></form></div><div class="table-wrap"><table><thead><tr><th data-i18n="Session">Session</th><th data-i18n="Created">Created</th><th data-i18n="Last seen">Last seen</th><th data-i18n="Expires">Expires</th><th data-i18n="Action">Action</th></tr></thead><tbody>{{range .Sessions}}<tr><td><code>{{.Label}}</code>{{if .Current}}<br><span class="status" data-i18n="current">current</span>{{end}}</td><td>{{.Created}}</td><td>{{.LastSeen}}</td><td>{{.Expires}}</td><td>{{if not .Current}}<form class="inline" method="post" action="/account/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="logout-session"><input type="hidden" name="target" value="{{.Handle}}"><button type="submit" data-i18n="Sign out">Sign out</button></form>{{end}}</td></tr>{{end}}</tbody></table></div></section>
 <section class="surface"><div class="section-heading"><div><span class="eyebrow" data-i18n="Security">Security</span><h2 data-i18n="Change password">Change password</h2></div><p data-i18n="Changing your password revokes all OAuth credentials and browser sessions for this account. Reconnect devices and apps afterward.">Changing your password revokes all OAuth credentials and browser sessions for this account. Reconnect devices and apps afterward.</p></div><form class="setting-form" method="post" action="/account/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="change-password"><input type="password" name="password" autocomplete="current-password" data-i18n-placeholder="current password" placeholder="current password" required><input type="password" name="value" autocomplete="new-password" minlength="12" data-i18n-placeholder="new password" placeholder="new password" required><button class="danger" type="submit" data-i18n="Change password and revoke credentials">Change password and revoke credentials</button></form></section>
@@ -85,7 +94,7 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		public := s.cfg.Mode == ModePublic
 		s.mu.Unlock()
-		_ = executeUITemplate(w, r, accountLoginTemplate, map[string]any{"CSRFToken": csrf, "PublicInstance": public})
+		_ = executeUITemplate(w, r, accountLoginTemplate, map[string]any{"CSRFToken": csrf, "PublicInstance": public, "Admin": false})
 		return
 	}
 	data := s.accountData(r, user)
@@ -137,7 +146,15 @@ func (s *Server) accountData(r *http.Request, current User) accountPageData {
 	}
 	s.mu.Lock()
 	s.cleanupLocked(time.Now())
-	data := accountPageData{Username: current.Username, PublicURL: strings.TrimRight(s.base.String(), "/"), PublicInstance: s.cfg.Mode == ModePublic}
+	data := accountPageData{Username: current.Username, Admin: current.Admin, PublicURL: strings.TrimRight(s.base.String(), "/"), PublicInstance: s.cfg.Mode == ModePublic}
+	data.UsageMeteringEnabled = s.usageMeteringEnabled
+	if data.UsageMeteringEnabled {
+		usage := s.ensureUsageRecordLocked(current.ID)
+		data.UsageQuotaBytes, data.UsageUsedBytes, data.UsageRemainingBytes = usage.QuotaBytes, usage.UsedBytes, usageRemaining(usage)
+	}
+	data.UsageRewardConfigured = s.rewardedUsageEnabledLocked() && strings.TrimSpace(s.cfg.UsageUnlockEndpoint) != ""
+	data.UsageRewardReady = s.rewardedUsageReadyLocked()
+	data.UsageUnlockURL = s.usageUnlockURL(current.ID)
 	provider := s.statusProvider
 	for route, owner := range s.devices {
 		if owner != current.ID {
@@ -217,6 +234,10 @@ func (s *Server) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 		rateLimited(w, 300)
 		return
 	}
+	if action == "redeem-activation-code" && !s.allowRate(r, "account-activation", 12, time.Hour) {
+		rateLimited(w, 300)
+		return
+	}
 	if action == "change-password" {
 		s.changeOwnPassword(w, r, current, r.Form.Get("password"), value)
 		return
@@ -228,6 +249,35 @@ func (s *Server) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "revoke-device" && subtle.ConstantTimeCompare([]byte(r.Form.Get("confirm")), []byte("REVOKE")) != 1 {
 		http.Error(w, "type REVOKE to permanently retire this device", http.StatusBadRequest)
+		return
+	}
+	if action == "redeem-activation-code" {
+		s.mu.Lock()
+		if s.persistenceFault {
+			s.mu.Unlock()
+			http.Error(w, "authorization state is frozen; contact the Relay operator", http.StatusServiceUnavailable)
+			return
+		}
+		live, exists := s.users[current.ID]
+		if !exists || live.Disabled || live.PasswordHash != current.PasswordHash {
+			s.mu.Unlock()
+			http.Error(w, errUnknownUser.Error(), http.StatusBadRequest)
+			return
+		}
+		snapshot := s.snapshotUsageStateLocked()
+		err := s.redeemActivationCodeLocked(value, current.ID, time.Now())
+		if err == nil {
+			err = s.saveUsageOrRollbackLocked(snapshot)
+		}
+		if err == nil {
+			s.recordSecurityLocked(SecurityEvent{Event: "account_redeem-activation-code", User: current.Username, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
+		}
+		s.mu.Unlock()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
 		return
 	}
 	s.mu.Lock()

@@ -97,6 +97,16 @@ type Config struct {
 	AdMobRewardUnitID   string
 	UsageUnlockEnabled  bool
 	UsageUnlockEndpoint string
+	// UsageMeteringEnabled is deliberately false by default. When enabled, the
+	// Relay accounts request/response payload bytes for each user and blocks
+	// newly authorized traffic after that user's quota is exhausted.
+	UsageMeteringEnabled   bool
+	UsageDefaultQuotaBytes int64
+	// AdMobVerifierSecret is supplied out of band (normally an environment
+	// variable). It is never written to oauth-state.json. A companion app must
+	// use it to sign a provider-verified, single-use entitlement before the
+	// Relay will grant quota.
+	AdMobVerifierSecret string
 	// Password is the legacy private-instance bootstrap password alias.
 	Password string
 }
@@ -128,6 +138,19 @@ type inviteRecord struct {
 	CreatedBy     string `json:"created_by,omitempty"`
 }
 
+type usageRecord struct {
+	QuotaBytes int64 `json:"quota_bytes"`
+	UsedBytes  int64 `json:"used_bytes"`
+}
+
+type activationCodeRecord struct {
+	CreatedAt     int64  `json:"created_at"`
+	Expires       int64  `json:"expires"`
+	QuotaBytes    int64  `json:"quota_bytes"`
+	UsesRemaining int    `json:"uses_remaining"`
+	CreatedBy     string `json:"created_by,omitempty"`
+}
+
 type diskState struct {
 	Clients         map[string]Client        `json:"clients"`
 	Access          map[string]tokenRecord   `json:"access"`
@@ -140,17 +163,32 @@ type diskState struct {
 	DeviceRecords   map[string]DeviceRecord  `json:"device_records,omitempty"`
 	Sessions        map[string]sessionRecord `json:"sessions"`
 	Invites         map[string]inviteRecord  `json:"invites,omitempty"`
-	Settings        *settingsState           `json:"settings,omitempty"`
-	SecurityEvents  []SecurityEvent          `json:"security_events,omitempty"`
+	// Read only for one-time migration from the short-lived format that kept
+	// metering data in oauth-state.json. New OAuth state writes leave these nil.
+	Usage           map[string]usageRecord          `json:"usage,omitempty"`
+	ActivationCodes map[string]activationCodeRecord `json:"activation_codes,omitempty"`
+	RedeemedRewards map[string]int64                `json:"redeemed_rewards,omitempty"`
+	Settings        *settingsState                  `json:"settings,omitempty"`
+	SecurityEvents  []SecurityEvent                 `json:"security_events,omitempty"`
 }
 
 type settingsState struct {
-	Mode                string `json:"mode"`
-	RegistrationEnabled bool   `json:"registration_enabled"`
-	DCREnabled          bool   `json:"dcr_enabled"`
-	MCPEnabled          bool   `json:"mcp_enabled"`
-	AgentEnabled        bool   `json:"agent_enabled"`
-	KillSwitch          bool   `json:"kill_switch"`
+	Mode                   string `json:"mode"`
+	RegistrationEnabled    bool   `json:"registration_enabled"`
+	DCREnabled             bool   `json:"dcr_enabled"`
+	MCPEnabled             bool   `json:"mcp_enabled"`
+	AgentEnabled           bool   `json:"agent_enabled"`
+	KillSwitch             bool   `json:"kill_switch"`
+	UsageConfigured        bool   `json:"usage_configured,omitempty"`
+	UsageMeteringEnabled   bool   `json:"usage_metering_enabled,omitempty"`
+	UsageDefaultQuotaBytes int64  `json:"usage_default_quota_bytes,omitempty"`
+	MonetizationConfigured bool   `json:"monetization_configured,omitempty"`
+	AdSenseClientID        string `json:"adsense_client_id,omitempty"`
+	AdSenseSlot            string `json:"adsense_slot,omitempty"`
+	AdMobAppID             string `json:"admob_app_id,omitempty"`
+	AdMobRewardUnitID      string `json:"admob_reward_unit_id,omitempty"`
+	UsageUnlockEnabled     bool   `json:"usage_unlock_enabled,omitempty"`
+	UsageUnlockEndpoint    string `json:"usage_unlock_endpoint,omitempty"`
 }
 
 type SecurityEvent struct {
@@ -209,6 +247,16 @@ type Server struct {
 	sessions                        map[string]sessionRecord
 	ephemeralSessions               map[string]struct{}
 	invites                         map[string]inviteRecord
+	usage                           map[string]usageRecord
+	activationCodes                 map[string]activationCodeRecord
+	redeemedRewards                 map[string]int64
+	usageFile                       string
+	usageDirty                      bool
+	usageGates                      map[string]*sync.Mutex
+	usageStop                       chan struct{}
+	usageDone                       chan struct{}
+	closeOnce                       sync.Once
+	closeErr                        error
 	passwordSlots                   chan struct{}
 	stateFile                       string
 	registrationEnabled             bool
@@ -216,6 +264,10 @@ type Server struct {
 	mcpEnabled                      bool
 	agentEnabled                    bool
 	killSwitch                      bool
+	usageMeteringEnabled            bool
+	usageDefaultQuotaBytes          int64
+	usageConfigured                 bool
+	monetizationConfigured          bool
 	trustedProxies                  []*net.IPNet
 	rateMu                          sync.Mutex
 	rates                           map[string]rateWindow
@@ -249,29 +301,43 @@ type DeviceStatus struct {
 }
 
 type mutableStateSnapshot struct {
-	clients             map[string]Client
-	access              map[string]tokenRecord
-	refresh             map[string]tokenRecord
-	refreshUsed         map[string]tokenRecord
-	pending             map[string]pendingAuth
-	codes               map[string]authCode
-	users               map[string]User
-	usernames           map[string]string
-	devices             map[string]string
-	disabledDevices     map[string]bool
-	retiredDevices      map[string]bool
-	deviceRecords       map[string]DeviceRecord
-	sessions            map[string]sessionRecord
-	ephemeralSessions   map[string]struct{}
-	invites             map[string]inviteRecord
-	registrationEnabled bool
-	dcrEnabled          bool
-	mcpEnabled          bool
-	agentEnabled        bool
-	killSwitch          bool
-	setupTokenHash      string
-	securityEvents      []SecurityEvent
-	mode                string
+	clients                map[string]Client
+	access                 map[string]tokenRecord
+	refresh                map[string]tokenRecord
+	refreshUsed            map[string]tokenRecord
+	pending                map[string]pendingAuth
+	codes                  map[string]authCode
+	users                  map[string]User
+	usernames              map[string]string
+	devices                map[string]string
+	disabledDevices        map[string]bool
+	retiredDevices         map[string]bool
+	deviceRecords          map[string]DeviceRecord
+	sessions               map[string]sessionRecord
+	ephemeralSessions      map[string]struct{}
+	invites                map[string]inviteRecord
+	usage                  map[string]usageRecord
+	activationCodes        map[string]activationCodeRecord
+	redeemedRewards        map[string]int64
+	usageDirty             bool
+	registrationEnabled    bool
+	dcrEnabled             bool
+	mcpEnabled             bool
+	agentEnabled           bool
+	killSwitch             bool
+	setupTokenHash         string
+	securityEvents         []SecurityEvent
+	mode                   string
+	usageMeteringEnabled   bool
+	usageDefaultQuotaBytes int64
+	usageConfigured        bool
+	monetizationConfigured bool
+	adsenseClientID        string
+	adsenseSlot            string
+	admobAppID             string
+	admobRewardUnitID      string
+	usageUnlockEnabled     bool
+	usageUnlockEndpoint    string
 }
 
 func cloneMap[K comparable, V any](src map[K]V) map[K]V {
@@ -295,9 +361,9 @@ func (s *Server) snapshotMutableStateLocked() mutableStateSnapshot {
 	return mutableStateSnapshot{
 		clients: cloneClients(s.clients), access: cloneMap(s.access), refresh: cloneMap(s.refresh), refreshUsed: cloneMap(s.refreshUsed),
 		pending: cloneMap(s.pending), codes: cloneMap(s.codes), users: cloneMap(s.users), usernames: cloneMap(s.usernames),
-		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), retiredDevices: cloneMap(s.retiredDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions), ephemeralSessions: cloneMap(s.ephemeralSessions), invites: cloneMap(s.invites),
+		devices: cloneMap(s.devices), disabledDevices: cloneMap(s.disabledDevices), retiredDevices: cloneMap(s.retiredDevices), deviceRecords: cloneMap(s.deviceRecords), sessions: cloneMap(s.sessions), ephemeralSessions: cloneMap(s.ephemeralSessions), invites: cloneMap(s.invites), usage: cloneMap(s.usage), activationCodes: cloneMap(s.activationCodes), redeemedRewards: cloneMap(s.redeemedRewards), usageDirty: s.usageDirty,
 		registrationEnabled: s.registrationEnabled, dcrEnabled: s.dcrEnabled, mcpEnabled: s.mcpEnabled, agentEnabled: s.agentEnabled,
-		killSwitch: s.killSwitch, setupTokenHash: s.setupTokenHash, securityEvents: append([]SecurityEvent(nil), s.securityEvents...), mode: s.cfg.Mode,
+		killSwitch: s.killSwitch, usageMeteringEnabled: s.usageMeteringEnabled, usageDefaultQuotaBytes: s.usageDefaultQuotaBytes, usageConfigured: s.usageConfigured, monetizationConfigured: s.monetizationConfigured, adsenseClientID: s.cfg.AdSenseClientID, adsenseSlot: s.cfg.AdSenseSlot, admobAppID: s.cfg.AdMobAppID, admobRewardUnitID: s.cfg.AdMobRewardUnitID, usageUnlockEnabled: s.cfg.UsageUnlockEnabled, usageUnlockEndpoint: s.cfg.UsageUnlockEndpoint, setupTokenHash: s.setupTokenHash, securityEvents: append([]SecurityEvent(nil), s.securityEvents...), mode: s.cfg.Mode,
 	}
 }
 
@@ -305,8 +371,12 @@ func (s *Server) restoreMutableStateLocked(snapshot mutableStateSnapshot) {
 	s.clients, s.access, s.refresh, s.refreshUsed = snapshot.clients, snapshot.access, snapshot.refresh, snapshot.refreshUsed
 	s.pending, s.codes, s.users, s.usernames = snapshot.pending, snapshot.codes, snapshot.users, snapshot.usernames
 	s.devices, s.disabledDevices, s.retiredDevices, s.deviceRecords, s.sessions, s.ephemeralSessions, s.invites = snapshot.devices, snapshot.disabledDevices, snapshot.retiredDevices, snapshot.deviceRecords, snapshot.sessions, snapshot.ephemeralSessions, snapshot.invites
+	s.usage, s.activationCodes, s.redeemedRewards, s.usageDirty = snapshot.usage, snapshot.activationCodes, snapshot.redeemedRewards, snapshot.usageDirty
 	s.registrationEnabled, s.dcrEnabled, s.mcpEnabled, s.agentEnabled = snapshot.registrationEnabled, snapshot.dcrEnabled, snapshot.mcpEnabled, snapshot.agentEnabled
-	s.killSwitch, s.setupTokenHash, s.securityEvents, s.cfg.Mode = snapshot.killSwitch, snapshot.setupTokenHash, snapshot.securityEvents, snapshot.mode
+	s.killSwitch, s.usageMeteringEnabled, s.usageDefaultQuotaBytes, s.usageConfigured, s.monetizationConfigured = snapshot.killSwitch, snapshot.usageMeteringEnabled, snapshot.usageDefaultQuotaBytes, snapshot.usageConfigured, snapshot.monetizationConfigured
+	s.cfg.AdSenseClientID, s.cfg.AdSenseSlot, s.cfg.AdMobAppID, s.cfg.AdMobRewardUnitID = snapshot.adsenseClientID, snapshot.adsenseSlot, snapshot.admobAppID, snapshot.admobRewardUnitID
+	s.cfg.UsageUnlockEnabled, s.cfg.UsageUnlockEndpoint = snapshot.usageUnlockEnabled, snapshot.usageUnlockEndpoint
+	s.setupTokenHash, s.securityEvents, s.cfg.Mode = snapshot.setupTokenHash, snapshot.securityEvents, snapshot.mode
 }
 
 func (s *Server) saveOrRollbackLocked(snapshot mutableStateSnapshot) error {
@@ -339,6 +409,14 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	cfg.Mode = mode
+	usageDefaultQuotaBytes := cfg.UsageDefaultQuotaBytes
+	if usageDefaultQuotaBytes == 0 {
+		usageDefaultQuotaBytes = defaultUsageQuotaBytes
+	}
+	if usageDefaultQuotaBytes < 0 || usageDefaultQuotaBytes > maxUsageQuotaBytes {
+		return nil, fmt.Errorf("usage default quota must be between 0 and %d bytes", maxUsageQuotaBytes)
+	}
+	cfg.UsageDefaultQuotaBytes = usageDefaultQuotaBytes
 	if cfg.OwnerUsername == "" {
 		cfg.OwnerUsername = "owner"
 	}
@@ -395,11 +473,16 @@ func New(cfg Config) (*Server, error) {
 		clients: make(map[string]Client), access: make(map[string]tokenRecord),
 		refresh: make(map[string]tokenRecord), refreshUsed: make(map[string]tokenRecord), pending: make(map[string]pendingAuth),
 		codes: make(map[string]authCode), users: make(map[string]User), usernames: make(map[string]string),
-		devices: make(map[string]string), disabledDevices: make(map[string]bool), retiredDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), ephemeralSessions: make(map[string]struct{}), invites: make(map[string]inviteRecord), passwordSlots: make(chan struct{}, 4),
+		devices: make(map[string]string), disabledDevices: make(map[string]bool), retiredDevices: make(map[string]bool), deviceRecords: make(map[string]DeviceRecord), sessions: make(map[string]sessionRecord), ephemeralSessions: make(map[string]struct{}), invites: make(map[string]inviteRecord), usage: make(map[string]usageRecord), activationCodes: make(map[string]activationCodeRecord), redeemedRewards: make(map[string]int64), passwordSlots: make(chan struct{}, 4),
 		stateFile:           filepath.Join(cfg.StateDir, "oauth-state.json"),
+		usageFile:           filepath.Join(cfg.StateDir, "usage-state.json"),
+		usageGates:          make(map[string]*sync.Mutex),
+		usageStop:           make(chan struct{}),
+		usageDone:           make(chan struct{}),
 		registrationEnabled: mode == ModePublic && !cfg.RegistrationDisabled,
 		dcrEnabled:          true,
 		mcpEnabled:          true, agentEnabled: true, trustedProxies: trustedProxies,
+		usageMeteringEnabled: cfg.UsageMeteringEnabled, usageDefaultQuotaBytes: usageDefaultQuotaBytes,
 		rates: make(map[string]rateWindow), consumedRegistrationChallenges: make(map[string]map[string]int64), registrationChallengeKey: registrationChallengeKey, consumedAuthorizationChallenges: make(map[string]map[string]int64), authorizationChallengeKey: authorizationChallengeKey, consumedAgentChallenges: make(map[string]map[string]int64), agentChallengeKey: agentChallengeKey, setupTokenPath: cfg.SetupTokenPath,
 		stateLease: lease, stateGuard: guard,
 		persistenceFault: guardDirty,
@@ -436,31 +519,39 @@ func New(cfg Config) (*Server, error) {
 			}
 		}
 	}
+	go s.usageCheckpointLoop()
 	keepResources = true
 	return s, nil
 }
 
-// Close releases the production single-writer state lease. It does not alter
-// OAuth state or revoke credentials; normal process shutdown simply relinquishes
-// the exclusive writer authority for the next Relay process.
+// Close checkpoints pending usage accounting, then releases the production
+// single-writer state lease. It does not alter OAuth state or revoke credentials.
 func (s *Server) Close() error {
 	if s == nil {
 		return nil
 	}
-	var first error
-	if s.stateGuard != nil {
-		if err := s.stateGuard.Close(); err != nil {
-			first = err
+	s.closeOnce.Do(func() {
+		close(s.usageStop)
+		<-s.usageDone
+		s.mu.Lock()
+		if err := s.checkpointUsageLocked(); err != nil {
+			s.closeErr = err
 		}
-		s.stateGuard = nil
-	}
-	if s.stateLease != nil {
-		if err := s.stateLease.Close(); err != nil && first == nil {
-			first = err
+		s.mu.Unlock()
+		if s.stateGuard != nil {
+			if err := s.stateGuard.Close(); err != nil && s.closeErr == nil {
+				s.closeErr = err
+			}
+			s.stateGuard = nil
 		}
-		s.stateLease = nil
-	}
-	return first
+		if s.stateLease != nil {
+			if err := s.stateLease.Close(); err != nil && s.closeErr == nil {
+				s.closeErr = err
+			}
+			s.stateLease = nil
+		}
+	})
+	return s.closeErr
 }
 
 func validatePublicURL(raw string) (*url.URL, error) {
@@ -748,6 +839,22 @@ func (s *Server) load() error {
 					s.cfg.Mode = persistedMode
 				}
 			}
+			if state.Settings.UsageConfigured {
+				s.usageMeteringEnabled = state.Settings.UsageMeteringEnabled
+				if state.Settings.UsageDefaultQuotaBytes > 0 {
+					s.usageDefaultQuotaBytes = state.Settings.UsageDefaultQuotaBytes
+				}
+				s.usageConfigured = true
+			}
+			if state.Settings.MonetizationConfigured {
+				s.cfg.AdSenseClientID = state.Settings.AdSenseClientID
+				s.cfg.AdSenseSlot = state.Settings.AdSenseSlot
+				s.cfg.AdMobAppID = state.Settings.AdMobAppID
+				s.cfg.AdMobRewardUnitID = state.Settings.AdMobRewardUnitID
+				s.cfg.UsageUnlockEnabled = state.Settings.UsageUnlockEnabled
+				s.cfg.UsageUnlockEndpoint = state.Settings.UsageUnlockEndpoint
+				s.monetizationConfigured = true
+			}
 			s.registrationEnabled = state.Settings.RegistrationEnabled && s.cfg.Mode == ModePublic && !s.cfg.RegistrationDisabled
 			s.dcrEnabled = state.Settings.DCREnabled
 			s.mcpEnabled = state.Settings.MCPEnabled
@@ -767,6 +874,14 @@ func (s *Server) load() error {
 			if !user.Admin && strings.EqualFold(user.Username, s.cfg.OwnerUsername) && s.cfg.Mode == ModePrivate {
 				user.Admin = true
 				s.users[id] = user
+			}
+		}
+		if err := s.loadUsageLocked(state.Usage, state.ActivationCodes, state.RedeemedRewards); err != nil {
+			return err
+		}
+		if s.usageMeteringEnabled {
+			for id := range s.users {
+				s.ensureUsageRecordLocked(id)
 			}
 		}
 		for route, ownerID := range s.devices {
@@ -826,7 +941,7 @@ func (s *Server) saveLockedUnlocked() error {
 	state := diskState{
 		Clients: s.clients, Access: s.access, Refresh: s.refresh, RefreshUsed: s.refreshUsed,
 		Users: s.users, Devices: s.devices, DisabledDevices: s.disabledDevices, RetiredDevices: s.retiredDevices, DeviceRecords: s.deviceRecords, Sessions: s.sessions, Invites: s.invites,
-		Settings:       &settingsState{Mode: s.cfg.Mode, RegistrationEnabled: registrationEnabled, DCREnabled: s.dcrEnabled, MCPEnabled: s.mcpEnabled, AgentEnabled: s.agentEnabled, KillSwitch: s.killSwitch},
+		Settings:       &settingsState{Mode: s.cfg.Mode, RegistrationEnabled: registrationEnabled, DCREnabled: s.dcrEnabled, MCPEnabled: s.mcpEnabled, AgentEnabled: s.agentEnabled, KillSwitch: s.killSwitch, UsageConfigured: s.usageConfigured, UsageMeteringEnabled: s.usageMeteringEnabled, UsageDefaultQuotaBytes: s.usageDefaultQuotaBytes, MonetizationConfigured: s.monetizationConfigured, AdSenseClientID: s.cfg.AdSenseClientID, AdSenseSlot: s.cfg.AdSenseSlot, AdMobAppID: s.cfg.AdMobAppID, AdMobRewardUnitID: s.cfg.AdMobRewardUnitID, UsageUnlockEnabled: s.cfg.UsageUnlockEnabled, UsageUnlockEndpoint: s.cfg.UsageUnlockEndpoint},
 		SecurityEvents: append([]SecurityEvent(nil), s.securityEvents...),
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -884,6 +999,18 @@ func (s *Server) cleanupLocked(now time.Time) {
 	for key, invite := range s.invites {
 		if invite.Expires <= unix || invite.UsesRemaining <= 0 {
 			delete(s.invites, key)
+		}
+	}
+	for key, code := range s.activationCodes {
+		if code.Expires <= unix || code.UsesRemaining <= 0 {
+			delete(s.activationCodes, key)
+			s.usageDirty = true
+		}
+	}
+	for key, expires := range s.redeemedRewards {
+		if expires <= unix {
+			delete(s.redeemedRewards, key)
+			s.usageDirty = true
 		}
 	}
 	for key, rec := range s.access {
@@ -1007,6 +1134,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /account/login", s.handleAccountLogin)
 	mux.HandleFunc("POST /account/logout", s.handleAccountLogout)
 	mux.HandleFunc("POST /account/action", s.handleAccountAction)
+	mux.HandleFunc("GET /account/admob/redeem", s.handleAccountAdMobRedeem)
+	mux.HandleFunc("POST /account/admob/redeem", s.handleAccountAdMobRedeem)
 	mux.HandleFunc("GET /admin", s.handleAdmin)
 	mux.HandleFunc("GET /admin/reauth", s.handleAdminReauthGET)
 	mux.HandleFunc("POST /admin/reauth", s.handleAdminReauthPOST)
@@ -1014,6 +1143,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
 	mux.HandleFunc("POST /admin/action", s.handleAdminAction)
 	mux.HandleFunc("POST /admin/invite", s.handleAdminInvite)
+	mux.HandleFunc("POST /admin/activation-code", s.handleAdminActivationCode)
+	mux.HandleFunc("POST /admin/monetization", s.handleAdminMonetization)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleAuthorizationMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleRootResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/{device}", s.handleMCPResourceMetadata)
@@ -2752,6 +2883,36 @@ func (s *Server) ProtectScopedResource(requiredScope string, next http.Handler) 
 				http.Error(w, "authorization revoked", http.StatusUnauthorized)
 				return
 			}
+			var userID string
+			var usage usageRecord
+			usageEnabled, usageAuthorized := false, true
+			var releaseUsageGate func()
+			if requiredScope == "agent:connect" {
+				// Agent WebSockets must not hold the per-user HTTP request gate for
+				// their connection lifetime, but a newly established Agent session
+				// still has to respect an already-exhausted Relay traffic quota.
+				userID, usage, usageEnabled, usageAuthorized = s.usageForCredential(credentialHash, resource, requiredScope)
+			} else {
+				userID, usage, usageEnabled, usageAuthorized, releaseUsageGate = s.acquireUsageRequest(credentialHash, resource, requiredScope)
+				if releaseUsageGate != nil {
+					defer releaseUsageGate()
+				}
+			}
+			if !usageAuthorized {
+				w.Header().Set("Cache-Control", "no-store")
+				http.Error(w, "authorization revoked", http.StatusUnauthorized)
+				return
+			}
+			if usageEnabled {
+				remaining := usageRemaining(usage)
+				if remaining <= 0 || (r.ContentLength > remaining && r.ContentLength >= 0) {
+					w.Header().Set("Cache-Control", "no-store")
+					w.Header().Set("Retry-After", "0")
+					w.Header().Set("X-Relay-Usage-Remaining", "0")
+					http.Error(w, "Relay traffic quota exhausted; redeem an activation code or verified reward", http.StatusPaymentRequired)
+					return
+				}
+			}
 			ctx, cancel := context.WithCancel(authzctx.WithChecker(r.Context(), checker))
 			defer cancel()
 			go func() {
@@ -2769,7 +2930,26 @@ func (s *Server) ProtectScopedResource(requiredScope string, next http.Handler) 
 					}
 				}
 			}()
-			next.ServeHTTP(w, r.WithContext(ctx))
+			if !usageEnabled {
+				// Agent WebSockets are intentionally not held behind the HTTP
+				// request gate. The broker meters their payload frames in memory;
+				// gating the connection lifetime would block same-user MCP calls.
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+			requestBody := &usageReadCloser{ReadCloser: r.Body}
+			if r.Body == nil {
+				requestBody = nil
+			} else {
+				r.Body = requestBody
+			}
+			meteredWriter := &usageResponseWriter{ResponseWriter: w}
+			next.ServeHTTP(meteredWriter, r.WithContext(ctx))
+			var requestBytes int64
+			if requestBody != nil {
+				requestBytes = requestBody.bytes
+			}
+			s.recordUsageBytes(userID, requestBytes+meteredWriter.bytes)
 			return
 		}
 		resourceURL, _ := url.Parse(resource)

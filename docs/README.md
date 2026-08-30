@@ -76,6 +76,38 @@ the Relay may link to a reward flow, but it must accept usage unlocks only from
 a server-side verifier using a short-lived signed entitlement. A browser
 button or an unverified receipt must never grant MCP/Agent authority.
 
+When `--usage-metering-enabled` is enabled, the Relay maintains a per-account
+payload quota. Authenticated MCP HTTP request/response bytes and brokered Agent
+WebSocket payload bytes are counted, and new requests are rejected with HTTP
+`402` after the account is exhausted. The default is 100 MiB for each account;
+use `--usage-default-quota-bytes` or the admin console to change the default.
+The admin console can add quota directly or create a single-use activation code;
+users redeem codes from `/account`. These grants are additive and survive a
+restart. Counters, activation-code hashes, and redeemed reward IDs are stored
+in the private `usage-state.json`, separately from authorization data in
+`oauth-state.json`. Traffic increments are checkpointed in batches and flushed
+on clean Relay shutdown; grants and redemptions are persisted synchronously.
+
+Rewarded usage is deliberately split between the Relay and a companion app.
+Configure the AdMob app/unit IDs and an HTTPS `--usage-unlock-endpoint`, then
+set `CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET` on the Relay. The companion app must
+verify the AdMob reward with the provider, sign a short-lived entitlement using
+that shared secret, and redirect the user to the Relay's redeem URL. The Relay
+checks the account subject, expiry, quota limit, and one-time ID before granting
+traffic. Never put the verifier secret in TOML, browser code, or the Relay state
+file.
+
+The entitlement wire format is `base64url(json).base64url(hmac)`, where the
+HMAC is SHA-256 over the first part using the verifier secret. The JSON claims
+are `{ "sub": "<user ID>", "quota_bytes": <positive integer>, "exp":
+<Unix seconds>, "jti": "<unique ID>" }`; the Relay accepts it for at most 24
+hours and records `jti` as single-use.
+
+AdSense is separate from usage credits: when both the publisher client ID and
+slot are configured, the public landing page renders optional top, inline, and
+bottom responsive placements. No ad script is loaded while either value is
+empty.
+
 Relevant Relay options are available on `relay` and `relay setup`:
 
 ```bash
@@ -85,7 +117,7 @@ chat-with-cli relay setup --help
 
 The public, non-secret configuration is also available at
 `/api/monetization/config` for a companion app. The endpoint intentionally
-does not mint entitlements.
+does not mint entitlements or expose the verifier secret.
 
 ## Language and appearance
 

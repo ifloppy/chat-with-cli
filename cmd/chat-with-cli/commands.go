@@ -454,6 +454,8 @@ func runRelaySetup(args []string) error {
 	admobRewardUnitID := fs.String("admob-reward-unit-id", "", "optional companion-app AdMob rewarded-ad unit ID")
 	usageUnlockEnabled := fs.Bool("usage-unlock-enabled", false, "enable the signed rewarded usage entitlement link")
 	usageUnlockEndpoint := fs.String("usage-unlock-endpoint", "", "HTTPS companion-app/backend URL for verified usage entitlements")
+	usageMeteringEnabled := fs.Bool("usage-metering-enabled", false, "enable per-account Relay payload quota metering")
+	usageDefaultQuotaBytes := fs.Int64("usage-default-quota-bytes", 100<<20, "default per-account Relay quota in payload bytes")
 	force := fs.Bool("force", false, "replace existing config/token after symlink checks")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -465,6 +467,9 @@ func runRelaySetup(args []string) error {
 	}
 	if *usageUnlockEnabled && *usageUnlockEndpoint == "" {
 		return errors.New("--usage-unlock-enabled requires --usage-unlock-endpoint")
+	}
+	if *usageDefaultQuotaBytes < 0 {
+		return errors.New("--usage-default-quota-bytes must not be negative")
 	}
 	if strings.TrimSpace(*publicURL) == "" {
 		return errors.New("--public-url is required, for example https://relay.example.com")
@@ -519,6 +524,8 @@ func runRelaySetup(args []string) error {
 		"relay.admob_reward_unit_id":        strings.TrimSpace(*admobRewardUnitID),
 		"relay.usage_unlock_enabled":        *usageUnlockEnabled,
 		"relay.usage_unlock_endpoint":       strings.TrimSpace(*usageUnlockEndpoint),
+		"relay.usage_metering_enabled":      *usageMeteringEnabled,
+		"relay.usage_default_quota_bytes":   *usageDefaultQuotaBytes,
 	}
 	if err := writeConfigFile(*configPath, values, *force); err != nil {
 		return fmt.Errorf("write relay config: %w", err)

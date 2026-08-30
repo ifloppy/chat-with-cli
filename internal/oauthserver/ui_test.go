@@ -10,16 +10,18 @@ import (
 
 func TestLocalUIAssetsAndMonetizationContract(t *testing.T) {
 	s, err := New(Config{
-		PublicURL:           "http://127.0.0.1:19301",
-		StateDir:            t.TempDir(),
-		Mode:                ModePublic,
-		AdSenseClientID:     "ca-pub-test",
-		AdSenseSlot:         "1234567890",
-		AdMobAppID:          "ca-app-pub-test~123",
-		AdMobRewardUnitID:   "ca-app-pub-test/456",
-		UsageUnlockEnabled:  true,
-		UsageUnlockEndpoint: "https://rewards.example/unlock",
-		Version:             "test-version",
+		PublicURL:            "http://127.0.0.1:19301",
+		StateDir:             t.TempDir(),
+		Mode:                 ModePublic,
+		AdSenseClientID:      "ca-pub-test",
+		AdSenseSlot:          "1234567890",
+		AdMobAppID:           "ca-app-pub-test~123",
+		AdMobRewardUnitID:    "ca-app-pub-test/456",
+		UsageUnlockEnabled:   true,
+		UsageUnlockEndpoint:  "https://rewards.example/unlock",
+		UsageMeteringEnabled: true,
+		AdMobVerifierSecret:  "test-reward-secret",
+		Version:              "test-version",
 	})
 	if err != nil {
 		t.Fatal(err)

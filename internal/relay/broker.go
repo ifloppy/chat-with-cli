@@ -20,12 +20,14 @@ import (
 )
 
 type Broker struct {
-	mu             sync.RWMutex
-	peers          map[string]*peer
-	callSlots      chan struct{}
-	maxConnections int
-	authMu         sync.RWMutex
-	authorizer     func(device, credentialHash string) bool
+	mu              sync.RWMutex
+	peers           map[string]*peer
+	callSlots       chan struct{}
+	maxConnections  int
+	authMu          sync.RWMutex
+	authorizer      func(device, credentialHash string) bool
+	trafficMu       sync.RWMutex
+	trafficObserver func(device string, bytes int64)
 }
 
 const (
@@ -35,6 +37,7 @@ const (
 
 type peer struct {
 	device         string
+	broker         *Broker
 	conn           *websocket.Conn
 	writeMu        sync.Mutex
 	pendingMu      sync.Mutex
@@ -67,6 +70,28 @@ func (b *Broker) SetAgentConnectionAuthorizer(authorizer func(device, credential
 	b.authMu.Lock()
 	b.authorizer = authorizer
 	b.authMu.Unlock()
+}
+
+// SetTrafficObserver installs an optional callback for WebSocket payloads
+// forwarded through the broker. The callback is deliberately expressed in
+// payload bytes, rather than transport framing bytes, so the OAuth server can
+// meter the same user-visible request/response traffic as its HTTP handler.
+func (b *Broker) SetTrafficObserver(observer func(device string, bytes int64)) {
+	b.trafficMu.Lock()
+	b.trafficObserver = observer
+	b.trafficMu.Unlock()
+}
+
+func (b *Broker) recordTraffic(device string, bytes int64) {
+	if bytes <= 0 {
+		return
+	}
+	b.trafficMu.RLock()
+	observer := b.trafficObserver
+	b.trafficMu.RUnlock()
+	if observer != nil {
+		observer(device, bytes)
+	}
 }
 
 func (b *Broker) peerAuthorized(p *peer) bool {
@@ -162,7 +187,13 @@ func (p *peer) writeJSON(ctx context.Context, value any) error {
 	}
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
-	return p.conn.Write(ctx, websocket.MessageText, data)
+	if err := p.conn.Write(ctx, websocket.MessageText, data); err != nil {
+		return err
+	}
+	if p.broker != nil {
+		p.broker.recordTraffic(p.device, int64(len(data)))
+	}
+	return nil
 }
 
 func (p *peer) readLoop(onClose func()) {
@@ -187,6 +218,9 @@ func (p *peer) readLoop(onClose func()) {
 				p.stateMu.Unlock()
 			}
 			continue
+		}
+		if p.broker != nil {
+			p.broker.recordTraffic(p.device, int64(len(data)))
 		}
 		var response protocol.Response
 		if json.Unmarshal(data, &response) != nil || response.ID == "" {
@@ -300,7 +334,7 @@ func (b *Broker) acceptAgent(w http.ResponseWriter, r *http.Request, device stri
 	}
 	conn.SetReadLimit(32 << 20)
 	now := time.Now()
-	p := &peer{device: device, conn: conn, credentialHash: TokenFingerprint(bearerToken(r.Header.Get("Authorization"))), pending: make(map[string]chan protocol.Response), done: make(chan struct{}), connectedAt: now, lastSeen: now}
+	p := &peer{device: device, broker: b, conn: conn, credentialHash: TokenFingerprint(bearerToken(r.Header.Get("Authorization"))), pending: make(map[string]chan protocol.Response), done: make(chan struct{}), connectedAt: now, lastSeen: now}
 	if !b.peerAuthorized(p) {
 		_ = conn.Close(websocket.StatusPolicyViolation, "authorization revoked")
 		return

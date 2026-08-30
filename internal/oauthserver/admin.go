@@ -3,6 +3,7 @@ package oauthserver
 import (
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"html/template"
 	"net/http"
 	"sort"
@@ -73,60 +74,86 @@ type adminInviteView struct {
 	CreatedBy     string
 }
 
+type adminUsageView struct {
+	ID        string
+	Username  string
+	Quota     int64
+	Used      int64
+	Remaining int64
+}
+
+type adminActivationCodeView struct {
+	Label         string
+	Quota         int64
+	Expires       time.Time
+	UsesRemaining int
+	CreatedBy     string
+}
+
 type adminPageData struct {
-	Version              string
-	Mode                 string
-	ModeConfigured       bool
-	RegistrationDisabled bool
-	PublicURL            string
-	PersistenceFault     bool
-	RegistrationEnabled  bool
-	DCREnabled           bool
-	MCPEnabled           bool
-	AgentEnabled         bool
-	KillSwitch           bool
-	LegacyUnboundAgents  bool
-	Uptime               string
-	OnlineAgents         int
-	RegisteredDevices    int
-	RetiredDevices       int
-	Users                int
-	OAuthClients         int
-	Sessions             int
-	Devices              []adminDeviceView
-	UserList             []adminUserView
-	Clients              []Client
-	Tokens               []adminTokenView
-	SessionList          []adminSessionView
-	Invites              []adminInviteView
-	Events               []SecurityEvent
-	CSRFToken            string
-	Username             string
+	Version                string
+	Mode                   string
+	ModeConfigured         bool
+	RegistrationDisabled   bool
+	PublicURL              string
+	PersistenceFault       bool
+	RegistrationEnabled    bool
+	DCREnabled             bool
+	MCPEnabled             bool
+	AgentEnabled           bool
+	KillSwitch             bool
+	LegacyUnboundAgents    bool
+	Uptime                 string
+	OnlineAgents           int
+	RegisteredDevices      int
+	RetiredDevices         int
+	Users                  int
+	OAuthClients           int
+	Sessions               int
+	Devices                []adminDeviceView
+	UserList               []adminUserView
+	Clients                []Client
+	Tokens                 []adminTokenView
+	SessionList            []adminSessionView
+	Invites                []adminInviteView
+	UsageMeteringEnabled   bool
+	UsageDefaultQuotaBytes int64
+	AdSenseClientID        string
+	AdSenseSlot            string
+	AdMobAppID             string
+	AdMobRewardUnitID      string
+	UsageUnlockEnabled     bool
+	UsageUnlockEndpoint    string
+	UsageRewardReady       bool
+	UsageUsers             []adminUsageView
+	ActivationCodes        []adminActivationCodeView
+	Events                 []SecurityEvent
+	CSRFToken              string
+	Username               string
 }
 
 var adminLoginTemplate = template.Must(template.New("admin-login").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin sign in · Chat with CLI</title></head>
+<html lang="en" data-admin="false"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin sign in · Chat with CLI</title></head>
 <body><div class="page compact"><header class="topbar"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">⌁</span><span class="brand-name">Chat with CLI</span></a><nav class="nav"><a href="/" data-i18n="Home">Home</a><div class="ui-controls" data-ui-controls></div></nav></header>
 <main><div class="page-header"><span class="eyebrow" data-i18n="Administration">Administration</span><h1 data-i18n="Chat with CLI admin">Chat with CLI admin</h1><p data-i18n="Sign in to manage devices, users, sessions, and emergency capability switches.">Sign in to manage devices, users, sessions, and emergency capability switches.</p></div>
 <section class="auth-card"><form class="auth-form" method="post" action="/admin/login"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><label><span data-i18n="Username">Username</span><input name="username" autocomplete="username" required></label><label><span data-i18n="Password">Password</span><input type="password" name="password" autocomplete="current-password" required></label><button class="primary" type="submit" data-i18n="Sign in">Sign in</button></form></section>
 <p class="auth-footer"><a href="/" data-i18n="Back to home">Back to home</a></p></main></div></body></html>`))
 
 var adminReauthTemplate = template.Must(template.New("admin-reauth").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Re-authenticate · Chat with CLI</title></head>
+<html lang="en" data-admin="false"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Re-authenticate · Chat with CLI</title></head>
 <body><div class="page compact"><header class="topbar"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">⌁</span><span class="brand-name">Chat with CLI</span></a><nav class="nav"><a href="/admin" data-i18n="Return to admin">Admin</a><div class="ui-controls" data-ui-controls></div></nav></header>
 <main><div class="page-header"><span class="eyebrow" data-i18n="Security">Security</span><h1 data-i18n="Confirm it’s you">Confirm it’s you</h1><p data-i18n="High-risk administration actions require a password check within the last 15 minutes. This refreshes only the current browser session.">High-risk administration actions require a password check within the last 15 minutes. This refreshes only the current browser session.</p></div>
 <section class="auth-card"><form class="auth-form" method="post" action="/admin/reauth"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><label><span data-i18n="Password for">Password for</span> {{.Username}}<input type="password" name="password" autocomplete="current-password" required autofocus></label><button class="primary" type="submit" data-i18n="Re-authenticate">Re-authenticate</button></form></section>
 <p class="auth-footer"><a href="/admin" data-i18n="Cancel and return to admin">Cancel and return to admin</a></p></main></div></body></html>`))
 
-var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"join": strings.Join}).Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin · Chat with CLI</title></head>
+var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"join": strings.Join, "formatBytes": formatUsageBytes}).Parse(`<!doctype html>
+<html lang="en" data-admin="true"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin · Chat with CLI</title></head>
 <body><div class="page admin-page"><header class="topbar"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">⌁</span><span class="brand-name">Chat with CLI</span></a><nav class="nav"><a href="/" data-i18n="Home">Home</a><a href="/account" data-i18n="My account">My account</a><a href="/docs" data-i18n="Docs">Docs</a><a class="button outlined" href="/admin/reauth" data-i18n="Re-authenticate">Re-authenticate</a><form class="inline" method="post" action="/admin/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="text" type="submit" data-i18n="Sign out">Sign out</button></form><div class="ui-controls" data-ui-controls></div></nav></header>
 <main><div class="page-header"><span class="eyebrow" data-i18n="Administration">Administration</span><h1 data-i18n="Operator admin">Operator admin</h1><p data-i18n="Review the Relay state and change high-impact controls from one auditable surface.">Review the Relay state and change high-impact controls from one auditable surface.</p></div>
 <div class="admin-summary"><p><span data-i18n="Signed in as">Signed in as</span> <strong>{{.Username}}</strong> · <span data-i18n="Version">version</span> <strong>{{.Version}}</strong> · <strong data-i18n="{{.Mode}}">{{.Mode}}</strong> <span data-i18n="instance">instance</span> · <span data-i18n="Uptime">uptime</span> <strong>{{.Uptime}}</strong>.</p></div>
 {{if .PersistenceFault}}<div class="banner critical"><b data-i18n="Authorization is frozen">Authorization is frozen</b><span data-i18n="The Relay detected an incomplete authorization-state transaction. MCP and Agent access remain fail-closed across restarts. Repair storage, repeat the intended revoke/disable action, and persist it successfully; recovery writes force the emergency kill switch on. Restart, verify the security state, then explicitly release the kill switch. Do not delete">The Relay detected an incomplete authorization-state transaction. MCP and Agent access remain fail-closed across restarts. Repair storage, repeat the intended revoke/disable action, and persist it successfully; recovery writes force the emergency kill switch on. Restart, verify the security state, then explicitly release the kill switch. Do not delete</span> <code>oauth-state.guard</code> <span data-i18n="to bypass recovery.">to bypass recovery.</span></div>{{end}}
 {{if .KillSwitch}}<div class="banner critical"><b data-i18n="Emergency kill switch is active">Emergency kill switch is active</b><span data-i18n="MCP and Agent authorization is globally blocked. Releasing it requires recent administrator authentication.">MCP and Agent authorization is globally blocked. Releasing it requires recent administrator authentication.</span></div>{{end}}
 {{if .LegacyUnboundAgents}}<div class="banner critical"><b data-i18n="Legacy bearer-only Agent migration mode is ENABLED">Legacy bearer-only Agent migration mode is ENABLED</b><span data-i18n="Unbound alpha Agents can connect using only an Agent bearer token. This weakens device impersonation resistance and must be used only long enough to migrate old devices to new Ed25519 identities, then disabled in the Relay configuration.">Unbound alpha Agents can connect using only an Agent bearer token. This weakens device impersonation resistance and must be used only long enough to migrate old devices to new Ed25519 identities, then disabled in the Relay configuration.</span></div>{{end}}
-{{if eq .Mode "public"}}<div class="banner warning"><b data-i18n="Public Relay trust boundary">Public Relay trust boundary</b><span data-i18n="This instance isolates users from each other, not users from the operator. An operator controls the server software and can modify it to observe or alter MCP traffic. Do not promise end-to-end privacy; sensitive users should self-host a private Relay.">This instance isolates users from each other, not users from the operator. An operator controls the server software and can modify it to observe or alter MCP traffic. Do not promise end-to-end privacy; sensitive users should self-host a private Relay.</span></div>{{end}}
 <div class="stats-grid" aria-label="Relay overview"><div class="stat-card"><span class="stat-value">{{.OnlineAgents}}</span><span class="stat-label" data-i18n="online agents">online agents</span></div><div class="stat-card"><span class="stat-value">{{.RegisteredDevices}}</span><span class="stat-label" data-i18n="registered devices">registered devices</span></div><div class="stat-card"><span class="stat-value">{{.RetiredDevices}}</span><span class="stat-label" data-i18n="retired identities">retired identities</span></div><div class="stat-card"><span class="stat-value">{{.Users}}</span><span class="stat-label" data-i18n="users">users</span></div><div class="stat-card"><span class="stat-value">{{.OAuthClients}}</span><span class="stat-label" data-i18n="OAuth clients">OAuth clients</span></div><div class="stat-card"><span class="stat-value">{{.Sessions}}</span><span class="stat-label" data-i18n="sessions">sessions</span></div></div>
 
 <section class="surface" id="security-controls"><div class="section-heading"><div><span class="eyebrow" data-i18n="Security">Security</span><h2 data-i18n="Security controls">Security controls</h2></div><p data-i18n="Keep registration and runtime capabilities closed unless this Relay is intentionally operating them.">Keep registration and runtime capabilities closed unless this Relay is intentionally operating them.</p></div><div class="control-grid">
@@ -138,9 +165,14 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"
 <div class="control-card"><div class="control-card-header"><div><h3 data-i18n="Emergency stop">Emergency stop</h3><p data-i18n="Block all MCP and Agent authorization immediately.">Block all MCP and Agent authorization immediately.</p></div>{{if .KillSwitch}}<span class="status bad" data-i18n="ACTIVE">ACTIVE</span>{{else}}<span class="status ok" data-i18n="Off">Off</span>{{end}}</div><form class="setting-form" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="set-kill-switch"><input type="hidden" name="value" value="{{if .KillSwitch}}off{{else}}on{{end}}">{{if .KillSwitch}}<input name="confirm" data-i18n-placeholder="type RELEASE" placeholder="type RELEASE" required>{{end}}<button class="danger" type="submit">{{if .KillSwitch}}<span data-i18n="Release kill switch">Release kill switch</span>{{else}}<span data-i18n="Emergency disable now">Emergency disable now</span>{{end}}</button></form></div>
 </div></section>
 
+<section class="surface" id="usage-controls"><div class="section-heading"><div><span class="eyebrow" data-i18n="Support">Support</span><h2 data-i18n="Relay usage and support">Relay usage and support</h2></div><p data-i18n="This optional system accounts request and response payload bytes through the Relay. It is disabled by default and never grants authority by itself.">This optional system accounts request and response payload bytes through the Relay. It is disabled by default and never grants authority by itself.</p></div><div class="control-grid"><div class="control-card"><div class="control-card-header"><div><h3 data-i18n="Traffic quota">Traffic quota</h3><p><span data-i18n="Default for new accounts">Default for new accounts</span>: <strong>{{formatBytes .UsageDefaultQuotaBytes}}</strong></p></div>{{if .UsageMeteringEnabled}}<span class="status ok" data-i18n="Enabled">Enabled</span>{{else}}<span class="status" data-i18n="Disabled by default">Disabled by default</span>{{end}}</div><div class="field-help" data-i18n="Only authenticated, user-owned MCP and Agent traffic is counted. Existing accounts keep their granted quota when this default changes.">Only authenticated, user-owned MCP and Agent traffic is counted. Existing accounts keep their granted quota when this default changes.</div><form class="setting-form" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="set-usage"><input type="hidden" name="value" value="{{if .UsageMeteringEnabled}}off{{else}}on{{end}}"><button class="tonal" type="submit">{{if .UsageMeteringEnabled}}<span data-i18n="Disable traffic quotas">Disable traffic quotas</span>{{else}}<span data-i18n="Enable traffic quotas">Enable traffic quotas</span>{{end}}</button></form><form class="setting-form" method="post" action="/admin/monetization"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="set-monetization"><input name="default_quota_bytes" type="number" min="1" max="1125899906842624" value="{{.UsageDefaultQuotaBytes}}" data-i18n-placeholder="default quota in bytes" placeholder="default quota in bytes" required><input type="text" name="adsense_client_id" value="{{.AdSenseClientID}}" data-i18n-placeholder="AdSense client ID" placeholder="AdSense client ID"><input type="text" name="adsense_slot" value="{{.AdSenseSlot}}" data-i18n-placeholder="AdSense slot ID" placeholder="AdSense slot ID"><input type="text" name="admob_app_id" value="{{.AdMobAppID}}" data-i18n-placeholder="AdMob app ID" placeholder="AdMob app ID"><input type="text" name="admob_reward_unit_id" value="{{.AdMobRewardUnitID}}" data-i18n-placeholder="AdMob rewarded unit ID" placeholder="AdMob rewarded unit ID"><input type="url" name="usage_unlock_endpoint" value="{{.UsageUnlockEndpoint}}" data-i18n-placeholder="reward endpoint (HTTPS)" placeholder="reward endpoint (HTTPS)"><button class="tonal" type="submit" data-i18n="Edit advertising settings">Edit advertising settings</button></form></div><div class="control-card"><div class="control-card-header"><div><h3 data-i18n="Rewarded ads">Rewarded ads</h3><p data-i18n="AdMob companion verification">AdMob companion verification</p></div>{{if .UsageRewardReady}}<span class="status ok" data-i18n="Ready">Ready</span>{{else if .UsageUnlockEnabled}}<span class="status warn" data-i18n="Needs verifier">Needs verifier</span>{{else}}<span class="status" data-i18n="Off">Off</span>{{end}}</div><div class="field-help" data-i18n="AdMob must be verified server-side. Store the verifier secret in CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET; it is never shown or persisted in Relay state.">AdMob must be verified server-side. Store the verifier secret in CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET; it is never shown or persisted in Relay state.</div><form class="setting-form" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="set-reward"><input type="hidden" name="value" value="{{if .UsageUnlockEnabled}}off{{else}}on{{end}}"><button class="tonal" type="submit">{{if .UsageUnlockEnabled}}<span data-i18n="Disable rewarded ads">Disable rewarded ads</span>{{else}}<span data-i18n="Enable rewarded ads">Enable rewarded ads</span>{{end}}</button></form></div></div></section>
+
+<section class="surface table-card"><div class="section-heading table-intro"><div><span class="eyebrow" data-i18n="Activation codes">Activation codes</span><h2 data-i18n="Support codes">Support codes</h2></div><p data-i18n="Create a single-use code that adds traffic quota to one account. The plaintext is shown once and only its hash is persisted.">Create a single-use code that adds traffic quota to one account. The plaintext is shown once and only its hash is persisted.</p></div><div class="table-wrap"><form class="setting-form" method="post" action="/admin/activation-code"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><input type="hidden" name="action" value="create-activation-code"><input name="value" type="number" min="1" max="1125899906842624" data-i18n-placeholder="quota in bytes" placeholder="quota in bytes" required><button class="tonal" type="submit" data-i18n="Create activation code">Create activation code</button></form><table><thead><tr><th data-i18n="Code hash">Code hash</th><th data-i18n="Quota">Quota</th><th data-i18n="Expires">Expires</th><th data-i18n="Uses">Uses</th><th data-i18n="Created by">Created by</th></tr></thead><tbody>{{range .ActivationCodes}}<tr><td><code>{{.Label}}</code></td><td>{{formatBytes .Quota}}</td><td>{{.Expires}}</td><td>{{.UsesRemaining}}</td><td>{{.CreatedBy}}</td></tr>{{else}}<tr><td colspan="5" class="muted" data-i18n="No active activation codes.">No active activation codes.</td></tr>{{end}}</tbody></table></div></section>
+
+<section class="surface table-card"><div class="section-heading table-intro"><div><span class="eyebrow" data-i18n="Account quotas">Account quotas</span><h2 data-i18n="Grant quota to users">Grant quota to users</h2></div><p data-i18n="Add quota manually for a user. Grants are additive and are recorded as administrator security events.">Add quota manually for a user. Grants are additive and are recorded as administrator security events.</p></div><div class="table-wrap"><table><thead><tr><th data-i18n="User">User</th><th data-i18n="Granted">Granted</th><th data-i18n="Used">Used</th><th data-i18n="Remaining">Remaining</th><th data-i18n="Action">Action</th></tr></thead><tbody>{{range .UsageUsers}}<tr><td>{{.Username}}</td><td>{{formatBytes .Quota}}</td><td>{{formatBytes .Used}}</td><td>{{formatBytes .Remaining}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="grant-quota"><input type="hidden" name="target" value="{{.ID}}"><input name="value" type="number" min="1" max="1125899906842624" data-i18n-placeholder="quota to add in bytes" placeholder="quota to add in bytes" required><button class="tonal" type="submit" data-i18n="Add quota">Add quota</button></form></td></tr>{{else}}<tr><td colspan="5" class="muted" data-i18n="No user quotas yet.">No user quotas yet.</td></tr>{{end}}</tbody></table></div></section>
+
 {{if eq .Mode "public"}}<section class="surface table-card"><div class="section-heading table-intro"><div><span class="eyebrow" data-i18n="Invites">Invites</span><h2 data-i18n="Invite-only access">Invite-only access</h2></div><p data-i18n="Single-use invites allow registration while open self-registration is disabled. Invite plaintext is shown once; only a one-way hash is persisted.">Single-use invites allow registration while open self-registration is disabled. Invite plaintext is shown once; only a one-way hash is persisted.</p></div><div class="table-wrap"><form class="inline" method="post" action="/admin/invite"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="tonal" type="submit" data-i18n="Create 24-hour invite">Create 24-hour invite</button></form><table><thead><tr><th data-i18n="Handle">Handle</th><th data-i18n="Expires">Expires</th><th data-i18n="Uses">Uses</th><th data-i18n="Created by">Created by</th><th data-i18n="Action">Action</th></tr></thead><tbody>{{range .Invites}}<tr><td><code>{{.Label}}</code></td><td>{{.Expires}}</td><td>{{.UsesRemaining}}</td><td>{{.CreatedBy}}</td><td><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-invite"><input type="hidden" name="target" value="{{.Handle}}"><button type="submit" data-i18n="Revoke">Revoke</button></form></td></tr>{{else}}<tr><td colspan="5" class="muted" data-i18n="No active invites.">No active invites.</td></tr>{{end}}</tbody></table></div></section>{{end}}
 
-{{if eq .RegisteredDevices 0}}<section class="onboarding"><div class="section-heading"><div><span class="eyebrow" data-i18n="Get started">Get started</span><h2 data-i18n="Connect your first workstation">Connect your first workstation</h2></div><p data-i18n="No device is registered yet. Start with the read-only profile; nothing is started automatically.">No device is registered yet. Start with the read-only profile; nothing is started automatically.</p></div><div class="steps"><div class="step"><b data-i18n="1. On the workstation">1. On the workstation</b><code class="command">chat-with-cli agent setup --relay {{.PublicURL}} --root /path/to/workspace --profile read-only --install-systemd</code></div><div class="step"><b data-i18n="2. Connect the immutable device ID">2. Connect the immutable device ID</b><span data-i18n="Run chat-with-cli connect. Browser OAuth opens automatically when needed and foreground sessions can require local capability approval.">Run chat-with-cli connect. Browser OAuth opens automatically when needed and foreground sessions can require local capability approval.</span></div><div class="step"><b data-i18n="3. Review unattended mode separately">3. Review unattended mode separately</b><span data-i18n="The generated systemd service still uses the configured profile only; enable it explicitly only when those persistent capabilities are acceptable.">The generated systemd service still uses the configured profile only; enable it explicitly only when those persistent capabilities are acceptable.</span></div></div></section>{{end}}
 
 <section class="surface table-card"><div class="section-heading table-intro"><div><span class="eyebrow" data-i18n="Devices">Devices</span><h2 data-i18n="Registered devices">Registered devices</h2></div><p data-i18n="Disable is reversible. Revoke permanently retires the device identity so the same private key can never claim this ID again; reconnecting requires a newly generated device identity.">Disable is reversible. Revoke permanently retires the device identity so the same private key can never claim this ID again; reconnecting requires a newly generated device identity.</p></div><div class="table-wrap"><table><thead><tr><th data-i18n="Display name">Display name</th><th data-i18n="Immutable ID / route">Immutable ID / route</th><th data-i18n="Owner">Owner</th><th data-i18n="Connection">Connection</th><th data-i18n="Capabilities">Capabilities</th><th data-i18n="Actions">Actions</th></tr></thead><tbody>{{range .Devices}}<tr><td><b>{{.Name}}</b></td><td><code>{{.ID}}</code><br><small>{{.Route}}</small><br>{{if .ProofBound}}<span class="status ok" data-i18n="PoP bound">PoP bound</span>{{else}}<span class="status bad" data-i18n="legacy unbound">legacy unbound</span>{{end}}</td><td>{{.Owner}}</td><td>{{if .Online}}<span class="status ok" data-i18n="online">online</span>{{else}}<span class="muted" data-i18n="offline">offline</span>{{end}}{{if .Disabled}}<br><span class="status bad" data-i18n="disabled">disabled</span>{{end}}{{if not .LastSeen.IsZero}}<br><small><span data-i18n="last seen">last seen</span> {{.LastSeen}}</small>{{end}}{{if .InFlight}}<br><small><span data-i18n="in flight">in flight</span> {{.InFlight}}</small>{{end}}</td><td>{{if .Online}}<small>{{if .Capabilities.FilesystemRead}}<span data-i18n="filesystem read">filesystem read</span><br>{{end}}{{if .Capabilities.FilesystemWrite}}<span data-i18n="filesystem write">filesystem write</span><br>{{end}}{{if .Capabilities.Exec}}<span data-i18n="exec">exec</span>{{if .Capabilities.ExecSandbox}} ({{.Capabilities.ExecSandbox}}){{end}}<br>{{end}}{{if .Capabilities.ScreenRead}}<span data-i18n="screen read">screen read</span><br>{{end}}{{if .Capabilities.AccessibilityRead}}<span data-i18n="accessibility read">accessibility read</span><br>{{end}}{{if .Capabilities.ComputerInput}}<span data-i18n="computer input">computer input</span>{{end}}</small>{{else}}<span class="muted" data-i18n="not reported">not reported</span>{{end}}</td><td class="table-actions"><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="rename-device"><input type="hidden" name="target" value="{{.Route}}"><input name="value" data-i18n-placeholder="new display name" placeholder="new display name" required><button type="submit" data-i18n="Rename">Rename</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="disable-device"><input type="hidden" name="target" value="{{.Route}}"><input type="hidden" name="value" value="{{if .Disabled}}off{{else}}on{{end}}"><button type="submit">{{if .Disabled}}<span data-i18n="Enable">Enable</span>{{else}}<span data-i18n="Disable">Disable</span>{{end}}</button></form><form class="inline" method="post" action="/admin/action"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="action" value="revoke-device"><input type="hidden" name="target" value="{{.Route}}"><input name="confirm" data-i18n-placeholder="REVOKE" placeholder="REVOKE" required><button class="danger" type="submit" data-i18n="Revoke permanently">Revoke permanently</button></form></td></tr>{{else}}<tr><td colspan="6" class="muted" data-i18n="No devices have been claimed.">No devices have been claimed.</td></tr>{{end}}</tbody></table></div></section>
 
@@ -308,7 +340,7 @@ func (s *Server) adminData(current User) adminPageData {
 	if uptime < 0 {
 		uptime = 0
 	}
-	data := adminPageData{Version: s.cfg.Version, Mode: s.cfg.Mode, ModeConfigured: s.cfg.ModeConfigured, RegistrationDisabled: s.cfg.RegistrationDisabled, PublicURL: strings.TrimRight(s.base.String(), "/"), PersistenceFault: s.persistenceFault, Uptime: uptime.Round(time.Second).String(), RegistrationEnabled: s.registrationEnabled, DCREnabled: s.dcrEnabled, MCPEnabled: s.mcpEnabled, AgentEnabled: s.agentEnabled, KillSwitch: s.killSwitch, LegacyUnboundAgents: s.cfg.AllowLegacyUnboundAgents, RetiredDevices: len(s.retiredDevices), Users: len(s.users), OAuthClients: len(s.clients), Sessions: len(s.sessions), Username: current.Username, Events: append([]SecurityEvent(nil), s.securityEvents...)}
+	data := adminPageData{Version: s.cfg.Version, Mode: s.cfg.Mode, ModeConfigured: s.cfg.ModeConfigured, RegistrationDisabled: s.cfg.RegistrationDisabled, PublicURL: strings.TrimRight(s.base.String(), "/"), PersistenceFault: s.persistenceFault, Uptime: uptime.Round(time.Second).String(), RegistrationEnabled: s.registrationEnabled, DCREnabled: s.dcrEnabled, MCPEnabled: s.mcpEnabled, AgentEnabled: s.agentEnabled, KillSwitch: s.killSwitch, LegacyUnboundAgents: s.cfg.AllowLegacyUnboundAgents, RetiredDevices: len(s.retiredDevices), Users: len(s.users), OAuthClients: len(s.clients), Sessions: len(s.sessions), Username: current.Username, Events: append([]SecurityEvent(nil), s.securityEvents...), UsageMeteringEnabled: s.usageMeteringEnabled, UsageDefaultQuotaBytes: s.usageDefaultQuotaBytes, AdSenseClientID: s.cfg.AdSenseClientID, AdSenseSlot: s.cfg.AdSenseSlot, AdMobAppID: s.cfg.AdMobAppID, AdMobRewardUnitID: s.cfg.AdMobRewardUnitID, UsageUnlockEnabled: s.rewardedUsageEnabledLocked(), UsageUnlockEndpoint: s.cfg.UsageUnlockEndpoint, UsageRewardReady: s.rewardedUsageReadyLocked()}
 	provider := s.statusProvider
 	devices := make(map[string]string, len(s.devices))
 	for name, userID := range s.devices {
@@ -334,6 +366,8 @@ func (s *Server) adminData(current User) adminPageData {
 			view.LastLoginAt = time.Unix(user.LastLoginAt, 0)
 		}
 		data.UserList = append(data.UserList, view)
+		usage := s.ensureUsageRecordLocked(user.ID)
+		data.UsageUsers = append(data.UsageUsers, adminUsageView{ID: user.ID, Username: user.Username, Quota: usage.QuotaBytes, Used: usage.UsedBytes, Remaining: usageRemaining(usage)})
 	}
 	for _, client := range s.clients {
 		if client.Approved {
@@ -357,6 +391,11 @@ func (s *Server) adminData(current User) adminPageData {
 			data.Invites = append(data.Invites, adminInviteView{Handle: handle, Label: shortHandle(handle), Expires: time.Unix(record.Expires, 0), UsesRemaining: record.UsesRemaining, CreatedBy: record.CreatedBy})
 		}
 	}
+	for handle, record := range s.activationCodes {
+		if record.Expires > time.Now().Unix() && record.UsesRemaining > 0 {
+			data.ActivationCodes = append(data.ActivationCodes, adminActivationCodeView{Label: shortHandle(handle), Quota: record.QuotaBytes, Expires: time.Unix(record.Expires, 0), UsesRemaining: record.UsesRemaining, CreatedBy: record.CreatedBy})
+		}
+	}
 	data.RegisteredDevices = len(data.Devices)
 	s.mu.Unlock()
 	if provider != nil {
@@ -375,6 +414,8 @@ func (s *Server) adminData(current User) adminPageData {
 	sort.Slice(data.Clients, func(i, j int) bool { return data.Clients[i].IssuedAt > data.Clients[j].IssuedAt })
 	sort.Slice(data.Tokens, func(i, j int) bool { return data.Tokens[i].Expires.Before(data.Tokens[j].Expires) })
 	sort.Slice(data.SessionList, func(i, j int) bool { return data.SessionList[i].LastSeen.After(data.SessionList[j].LastSeen) })
+	sort.Slice(data.UsageUsers, func(i, j int) bool { return data.UsageUsers[i].Username < data.UsageUsers[j].Username })
+	sort.Slice(data.ActivationCodes, func(i, j int) bool { return data.ActivationCodes[i].Expires.Before(data.ActivationCodes[j].Expires) })
 	if len(data.Events) > 50 {
 		data.Events = data.Events[len(data.Events)-50:]
 	}
@@ -421,12 +462,12 @@ func (s *Server) handleAdminAction(w http.ResponseWriter, r *http.Request) {
 
 func requiresFreshAdminAuth(action, value string) bool {
 	switch action {
-	case "revoke-device", "delete-user", "revoke-client", "revoke-token", "rotate-password", "rename-device", "create-user":
+	case "revoke-device", "delete-user", "revoke-client", "revoke-token", "rotate-password", "rename-device", "create-user", "grant-quota":
 		return true
 	case "disable-device", "disable-user":
 		disabled, valid := parseToggle(value)
 		return valid && !disabled
-	case "set-registration", "set-dcr", "set-mcp", "set-agent":
+	case "set-registration", "set-dcr", "set-mcp", "set-agent", "set-usage", "set-reward":
 		enabled, valid := parseToggle(value)
 		return valid && enabled
 	case "set-mode":
@@ -504,7 +545,7 @@ func persistenceRecoveryActionAllowed(action, value string) bool {
 	case "disable-device", "disable-user":
 		disabled, valid := parseToggle(value)
 		return valid && disabled
-	case "set-registration", "set-dcr", "set-mcp", "set-agent":
+	case "set-registration", "set-dcr", "set-mcp", "set-agent", "set-usage", "set-reward":
 		enabled, valid := parseToggle(value)
 		return valid && !enabled
 	case "set-mode":
@@ -519,6 +560,29 @@ func persistenceRecoveryActionAllowed(action, value string) bool {
 }
 
 func (s *Server) applyAdminAction(action, target, value string, current User, r *http.Request) error {
+	if action == "grant-quota" {
+		quota, err := parseUsageQuota(value)
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if !s.liveAdminLocked(current) {
+			return errInvalidAdminAction
+		}
+		if s.persistenceFault {
+			return errPersistenceRecoveryOnly
+		}
+		snapshot := s.snapshotUsageStateLocked()
+		if err := s.grantQuotaLocked(target, quota); err != nil {
+			return err
+		}
+		if err := s.saveUsageOrRollbackLocked(snapshot); err != nil {
+			return err
+		}
+		s.recordSecurityLocked(SecurityEvent{Event: action, User: current.Username, Device: target, RemoteIP: requestIP(r, s.trustedProxies), Success: true})
+		return nil
+	}
 	if action == "create-user" {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -635,6 +699,28 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 		if !state {
 			s.resetAllAgentSessionsLocked()
 		}
+	case "set-usage":
+		state, valid := parseToggle(value)
+		if !valid {
+			return errInvalidAdminAction
+		}
+		s.usageMeteringEnabled = state
+		s.usageConfigured = true
+		if state {
+			for userID := range s.users {
+				s.ensureUsageRecordLocked(userID)
+			}
+		}
+	case "set-reward":
+		state, valid := parseToggle(value)
+		if !valid {
+			return errInvalidAdminAction
+		}
+		if state && (!s.usageMeteringEnabled || strings.TrimSpace(s.cfg.AdMobAppID) == "" || strings.TrimSpace(s.cfg.AdMobRewardUnitID) == "" || strings.TrimSpace(s.cfg.UsageUnlockEndpoint) == "" || strings.TrimSpace(s.cfg.AdMobVerifierSecret) == "") {
+			return errors.New("enable traffic quotas and configure AdMob IDs, the reward endpoint, and CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET before enabling rewarded usage")
+		}
+		s.cfg.UsageUnlockEnabled = state
+		s.monetizationConfigured = true
 	case "set-kill-switch":
 		state, valid := parseToggle(value)
 		if !valid {
@@ -737,6 +823,9 @@ func (s *Server) applyAdminAction(action, target, value string, current User, r 
 			delete(s.deviceRecords, device)
 		}
 		s.revokeUserCredentialsLocked(target)
+		delete(s.usage, target)
+		delete(s.usageGates, target)
+		s.usageDirty = true
 	case "logout-user":
 		if _, exists := s.users[target]; !exists {
 			return errUnknownUser

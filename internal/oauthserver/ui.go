@@ -175,7 +175,9 @@ button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
 .ui-controls select { padding: 6px 27px 6px 11px; }
 .icon-button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; cursor: pointer; }
 .icon-button:hover { background: var(--md-surface-container-high); color: var(--md-on-surface); }
-.theme-icon { font-size: 17px; line-height: 1; }
+.icon-button, md-icon-button { display: inline-flex; align-items: center; justify-content: center; width: 40px; min-width: 40px; height: 40px; min-height: 40px; padding: 0; line-height: 0; }
+.icon-button .theme-icon, md-icon-button .theme-icon, .language-button svg { display: grid; place-items: center; width: 20px; height: 20px; }
+.theme-icon svg, .language-button svg { display: block; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 .hero { padding: 46px 0 42px; }
 .hero-grid { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(300px, .88fr); gap: 48px; align-items: center; }
@@ -310,7 +312,7 @@ details[open] > summary::after { content: "−"; }
   .topbar .nav { width: 100%; justify-content: flex-start; }
   .hero { padding-top: 25px; }
   h1 { font-size: 42px; }
-  .feature-grid, .grid, .stats, .support-card { grid-template-columns: 1fr; }
+  .feature-grid, .grid, .stats, .support-card, .usage-meter { grid-template-columns: 1fr; }
   .stats { gap: 8px; }
   .card, section, details, form.surface, .meta { padding: 16px; }
   .copy-row { display: block; }
@@ -374,7 +376,8 @@ body {
   background: var(--md-surface);
 }
 .ui-controls select { padding: 7px 30px 7px 12px; }
-.icon-button { position: relative; overflow: hidden; padding: 8px 11px; }
+.icon-button { position: relative; overflow: hidden; padding: 0; }
+.language-button { gap: 0; }
 .hero {
   margin-top: 12px;
   border: 1px solid var(--md-outline-variant);
@@ -478,6 +481,56 @@ th { background: var(--md-surface-container); }
 .topbar .button { min-height: 36px; padding: 7px 14px; }
 .onboarding { padding: 24px; }
 .onboarding > p { margin-top: 0; color: var(--md-on-surface-variant); }
+.banner { margin: 18px 0; }
+.admin-page > main > .banner.warning, .admin-page > main > .onboarding { display: none; }
+.page-header-row { display: flex; align-items: end; justify-content: space-between; gap: 24px; }
+.page-header-copy { min-width: 0; }
+.page-header-actions { display: flex; flex: 0 0 auto; gap: 8px; flex-wrap: wrap; }
+.account-avatar, .admin-avatar {
+  position: relative; display: inline-flex !important; align-items: center; justify-content: center;
+  width: 40px; height: 40px; min-height: 40px; padding: 0 !important; border-radius: 50% !important;
+  overflow: hidden; text-decoration: none; transition: background .16s ease, box-shadow .16s ease, transform .12s ease;
+}
+.account-avatar { background: var(--md-primary-container); color: var(--md-on-primary-container) !important; }
+.admin-avatar { background: var(--md-surface-container); border: 1px solid var(--md-outline-variant); color: var(--md-primary) !important; }
+.account-avatar:hover, .admin-avatar:hover { box-shadow: 0 2px 8px color-mix(in srgb, var(--md-on-surface) 16%, transparent); }
+.account-avatar svg, .admin-avatar svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.language-picker { position: relative; }
+.language-button { width: 40px; height: 40px; padding: 0 !important; }
+.language-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.language-menu {
+  position: absolute; z-index: 30; top: calc(100% + 8px); right: 0; min-width: 152px; padding: 8px;
+  border: 1px solid var(--md-outline-variant); border-radius: 16px; background: var(--md-surface-container-low);
+  box-shadow: var(--md-shadow);
+}
+.language-menu[hidden] { display: none; }
+.language-menu button, .language-menu md-text-button { display: flex; width: 100%; min-height: 38px; justify-content: flex-start; margin: 0; padding: 7px 12px; border-radius: 10px; }
+.language-menu [aria-checked="true"] { background: var(--md-secondary-container); color: var(--md-on-surface); }
+dialog.action-dialog {
+  width: min(520px, calc(100vw - 32px)); max-width: calc(100vw - 32px); margin: auto; padding: 0;
+  border: 1px solid var(--md-outline-variant); border-radius: 28px; color: var(--md-on-surface);
+  background: var(--md-surface-container-low); box-shadow: 0 24px 64px rgba(46, 33, 71, .24);
+}
+dialog.action-dialog::backdrop { background: rgba(20, 18, 24, .32); backdrop-filter: blur(2px); }
+.dialog-form { display: grid; gap: 0; margin: 0; padding: 28px; }
+.dialog-heading h2 { margin: 8px 0 8px; font-size: 28px; }
+.dialog-heading p { margin: 0; color: var(--md-on-surface-variant); }
+.dialog-fields { display: grid; gap: 4px; margin-top: 20px; }
+.dialog-field { margin: 0; }
+.dialog-field span { display: block; margin: 0 0 6px; color: var(--md-on-surface); font-weight: 700; }
+.dialog-field[hidden] { display: none; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+.dialog-actions button, .dialog-actions md-filled-button, .dialog-actions md-filled-tonal-button,
+.dialog-actions md-outlined-button, .dialog-actions md-text-button { margin-top: 0; }
+.dialog-form > input[type="hidden"] { display: none; }
+.usage-card { padding: 24px; }
+.usage-meter { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }
+.usage-meter > div { display: grid; gap: 5px; padding: 14px; border-radius: 12px; background: var(--md-surface-container); }
+.usage-meter span { color: var(--md-on-surface-variant); font-size: 13px; }
+.usage-meter strong { color: var(--md-primary); font-size: 18px; }
+.usage-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.usage-actions .setting-form { margin-top: 0; }
+.dialog-field input[type="checkbox"] { width: auto; min-height: auto; }
 
 /* The controls below are upgraded to the official Material Web elements when
    the local bundle is ready. These host rules keep the no-JS fallback and the
@@ -499,7 +552,9 @@ md-filled-button.primary { --md-filled-button-container-color: var(--md-primary)
 md-filled-tonal-button.tonal { --md-filled-tonal-button-container-color: var(--md-secondary-container); }
 md-outlined-button.outlined { --md-outlined-button-outline-color: var(--md-outline); }
 md-text-button.text { --md-text-button-label-text-color: var(--md-primary); }
-md-icon-button { --md-icon-button-icon-color: var(--md-on-surface-variant); }
+md-icon-button { --md-icon-button-icon-color: var(--md-on-surface-variant); --md-icon-button-icon-size: 20px; display: inline-flex; align-items: center; justify-content: center; width: 40px; min-width: 40px; height: 40px; min-height: 40px; padding: 0; line-height: 0; }
+md-icon-button .theme-icon, md-icon-button.language-button svg { display: grid; place-items: center; width: 20px; height: 20px; line-height: 0; }
+md-icon-button .theme-icon svg { display: block; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .setting-form md-outlined-select { min-width: 150px; }
 .setting-form md-filled-button, .setting-form md-filled-tonal-button,
 .setting-form md-outlined-button, .setting-form md-text-button { margin-top: 0; }
@@ -525,7 +580,7 @@ md-icon-button { --md-icon-button-icon-color: var(--md-on-surface-variant); }
   .table-wrap { padding-inline: 20px; }
   .disclosure > summary { padding: 18px 20px; }
   .disclosure > table, .disclosure > p, .disclosure > .table-wrap { margin-inline: 20px; }
-  .disclosure > table { width: calc(100% - 40px); }
+.disclosure > table { width: calc(100% - 40px); }
 }
 `
 
@@ -541,7 +596,7 @@ const appJS = `
     "zh-CN": {
       "Home": "首页", "Docs": "文档", "Documentation": "文档", "GitHub": "GitHub",
       "Connect": "连接", "Connect a computer": "连接电脑", "Connect a workstation": "连接工作站", "Connect my computer": "连接我的电脑",
-      "Manage my account": "管理我的账户", "My account": "我的账户", "Operator admin": "管理员控制台",
+      "Manage my account": "管理我的账户", "My account": "我的账户", "Operator admin": "管理员控制台", "Admin console": "管理员控制台", "Account entry": "账户入口",
       "Open admin console": "打开管理控制台", "Finish first-run setup": "完成首次设置",
       "Back to home": "返回首页", "Sign in": "登录", "Sign out": "退出登录", "Re-authenticate": "重新认证",
       "Authorize": "授权", "Deny": "拒绝", "Create account": "创建账户", "Register and authorize": "注册并授权",
@@ -550,6 +605,16 @@ const appJS = `
       "My Chat with CLI": "我的 Chat with CLI", "Invite created": "邀请已创建",
       "Install": "安装", "Security": "安全", "Ready": "就绪", "Configured": "已配置",
       "Language": "语言", "Theme": "主题", "Automatic": "自动", "English": "English", "中文": "中文",
+      "Confirm action": "确认操作", "Cancel": "取消", "Confirm": "确认", "Connect a workstation": "连接工作站",
+      "Rename device": "重命名设备", "Choose a display name for this workstation.": "为此工作站设置显示名称。", "New display name": "新的显示名称", "Rename": "重命名",
+      "Enable device": "启用设备", "Enter your current account password to re-enable this workstation.": "请输入当前账户密码以重新启用此工作站。", "Current password": "当前密码", "Enable": "启用",
+      "Revoke device": "撤销设备", "Type REVOKE to permanently revoke this device.": "请输入 REVOKE 以永久撤销此设备。", "Revoke permanently": "永久撤销",
+      "Change password": "修改密码", "Create user": "创建用户", "Create a tenant account with a temporary password.": "使用临时密码创建租户账户。", "Temporary password": "临时密码",
+      "Rotate password": "轮换密码", "Set a new password for this user. Existing credentials will be revoked.": "为此用户设置新密码。现有凭据将被撤销。", "New password": "新密码",
+      "Delete user": "删除用户", "Type DELETE to permanently delete this user.": "请输入 DELETE 以永久删除此用户。", "Confirmation": "确认文本",
+      "Release kill switch": "释放停止开关", "Type RELEASE to release the emergency stop.": "请输入 RELEASE 以释放紧急停止。",
+      "Revoke client": "撤销客户端", "Revoke token": "撤销令牌", "Type REVOKE to confirm this revocation.": "请输入 REVOKE 以确认撤销。",
+      "Activation code": "激活码", "Add the quota attached to a one-time support code.": "加入一次性支持码附带的额度。", "Quota to add in bytes": "要增加的额度（字节）", "Add Relay traffic quota to this account.": "为此账户增加 Relay 流量额度。", "Quota in bytes": "额度（字节）", "Create a single-use code for the selected quota.": "为选定额度创建一次性代码。",
       "Light": "浅色", "Dark": "深色", "Copied": "已复制", "Copy": "复制",
       "Read-only by default": "默认只读", "Private by design": "隐私优先", "Open source": "开放源代码",
       "Install once. Connect everywhere.": "安装一次，随处连接。",
@@ -637,7 +702,9 @@ const appJS = `
       "Connect your first workstation": "连接你的第一台工作站", "No device is registered yet. Start with the read-only profile; nothing is started automatically.": "还没有注册设备。请从只读 profile 开始；任何服务都不会自动启动。", "1. On the workstation": "1. 在工作站上", "2. Connect the immutable device ID": "2. 连接不可变设备 ID", "3. Review unattended mode separately": "3. 单独审阅无人值守模式", "Run chat-with-cli connect. Browser OAuth opens automatically when needed and foreground sessions can require local capability approval.": "运行 chat-with-cli connect。需要时会自动打开浏览器 OAuth，前台会话可能需要本地能力批准。", "The generated systemd service still uses the configured profile only; enable it explicitly only when those persistent capabilities are acceptable.": "生成的 systemd 服务仍只使用已配置的 profile；只有确认长期能力可接受时才明确启用它。",
       "Disable is reversible. Revoke permanently retires the device identity so the same private key can never claim this ID again; reconnecting requires a newly generated device identity.": "停用可以恢复。永久撤销会废弃设备身份，使同一私钥永远无法再次认领此 ID；重新连接需要生成新的设备身份。", "Display name": "显示名称", "Immutable ID / route": "不可变 ID / 路由", "Owner": "所有者", "Connection": "连接", "Capabilities": "能力", "No devices have been claimed.": "还没有设备被认领。",
       "Users": "用户", "Create user": "创建用户", "Username": "用户名", "Role / state": "角色 / 状态", "Created / last login": "创建时间 / 最后登录", "admin": "管理员", "active": "活跃", "never": "从未", "device(s)": "台设备", "Logout all": "全部退出", "Rotate password": "轮换密码", "Delete": "删除", "Browser sessions": "浏览器会话", "Session handles are one-way identifiers; browser cookie values are never displayed.": "会话句柄是单向标识符；浏览器 Cookie 值永远不会显示。", "Log out": "退出登录", "OAuth clients and token metadata": "OAuth 客户端和令牌元数据", "Name / redirects": "名称 / 重定向地址", "No approved clients.": "没有已批准的客户端。", "active token records (metadata only; bearer values are never displayed).": "条活跃令牌记录（只有元数据，绝不显示 bearer 值）。", "Kind": "类型", "No active tokens.": "没有活跃令牌。", "Revoke client": "撤销客户端", "Recent security events": "最近的安全事件", "Time": "时间", "Event": "事件", "User / device": "用户 / 设备", "Result": "结果", "success": "成功", "failure": "失败", "No events recorded.": "没有记录的事件。",
-      "new username": "新用户名", "temporary password": "临时密码", "new password": "新密码", "DELETE": "输入 DELETE", "REVOKE": "输入 REVOKE", "type RELEASE": "输入 RELEASE", "Return to admin": "返回管理", "Operator admin": "管理员控制台"
+      "new username": "新用户名", "temporary password": "临时密码", "new password": "新密码", "DELETE": "输入 DELETE", "REVOKE": "输入 REVOKE", "type RELEASE": "输入 RELEASE", "Return to admin": "返回管理", "Operator admin": "管理员控制台",
+      "Support": "支持", "Relay usage": "Relay 用量", "Support the maintainer": "支持维护者", "MCP and Agent request/response payload bytes are counted at the Relay. Add quota with an activation code or a verified rewarded ad.": "Relay 会统计 MCP 和 Agent 请求/响应载荷流量。可通过激活码或经验证的激励广告增加额度。", "Remaining traffic": "剩余流量", "Used": "已使用", "Granted": "已授予", "Watch an ad for quota": "看广告增加额度", "Redeem activation code": "兑换激活码", "activation code": "激活码", "Rewarded ads are awaiting server-side verifier configuration.": "激励广告正在等待服务端验证器配置。",
+      "Relay usage and support": "Relay 用量与支持", "This optional system accounts request and response payload bytes through the Relay. It is disabled by default and never grants authority by itself.": "此可选系统统计通过 Relay 的请求和响应载荷字节数。默认关闭，且不会单独授予任何权限。", "Traffic quota": "流量额度", "Default for new accounts": "新账户默认额度", "Disabled by default": "默认关闭", "Only authenticated, user-owned MCP and Agent traffic is counted. Existing accounts keep their granted quota when this default changes.": "只统计已认证且属于用户自己的 MCP 和 Agent 流量。更改默认值不会改变现有账户已授予的额度。", "Disable traffic quotas": "关闭流量额度", "Enable traffic quotas": "启用流量额度", "default quota in bytes": "默认额度（字节）", "Default quota in bytes": "默认额度（字节）", "Edit advertising settings": "编辑广告设置", "Rewarded ads": "激励广告", "AdMob companion verification": "AdMob 伴侣应用验证", "Needs verifier": "需要验证器", "AdMob must be verified server-side. Store the verifier secret in CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET; it is never shown or persisted in Relay state.": "AdMob 必须由服务端验证。请将验证器密钥放入 CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET；它不会显示或写入 Relay 状态。", "Advertising is optional. AdMob rewards require a server-side verifier secret.": "广告为可选项。AdMob 奖励需要服务端验证器密钥。", "Disable rewarded ads": "关闭激励广告", "Enable rewarded ads": "启用激励广告", "AdSense client ID": "AdSense 客户端 ID", "AdSense slot ID": "AdSense 广告位 ID", "AdMob app ID": "AdMob 应用 ID", "AdMob rewarded unit ID": "AdMob 激励广告单元 ID", "reward endpoint (HTTPS)": "奖励端点（HTTPS）", "Reward endpoint (HTTPS)": "奖励端点（HTTPS）", "Activation codes": "激活码", "Support codes": "支持码", "Create a single-use code that adds traffic quota to one account. The plaintext is shown once and only its hash is persisted.": "创建一个为账户增加流量额度的单次使用代码。明文只显示一次，持久化的只有哈希。", "quota in bytes": "额度（字节）", "Create activation code": "创建激活码", "Code hash": "代码哈希", "Quota": "额度", "No active activation codes.": "没有活跃激活码。", "Account quotas": "账户额度", "Grant quota to users": "为用户增加额度", "Add quota manually for a user. Grants are additive and are recorded as administrator security events.": "为用户手动增加额度。额度按累加计算，并记录为管理员安全事件。", "Remaining": "剩余", "quota to add in bytes": "要增加的额度（字节）", "Add quota": "增加额度", "No user quotas yet.": "还没有用户额度记录。", "Activation code created": "激活码已创建", "This code is shown once. Share it with the intended user and keep it private until then.": "此代码只显示一次。请分享给目标用户，并在此之前妥善保密。", "Claim rewarded usage": "领取广告奖励额度", "The companion app returned a server-verified reward. Confirm below to add it to this account.": "伴侣应用返回了经服务端验证的奖励。请在下方确认，将额度加入此账户。", "Add rewarded quota": "加入广告奖励额度"
     }
   };
 
@@ -780,13 +847,30 @@ const appJS = `
         if (original.title !== null) element.setAttribute("title", language === "zh-CN" && legacyAttributes[original.title] ? legacyAttributes[original.title] : original.title);
       });
     }
-    document.querySelectorAll("[data-language-select]").forEach((select) => {
-      const pageLocale = root.dataset.locale || "auto";
-      select.value = pageLocale === "zh-CN" || pageLocale === "en-US" ? pageLocale : stored(localeKey, pageLocale);
-      select.setAttribute("aria-label", language === "zh-CN" ? "语言" : "Language");
+    const pageLocale = root.dataset.locale || "auto";
+    const selectedLocale = pageLocale === "zh-CN" || pageLocale === "en-US" ? pageLocale : stored(localeKey, pageLocale);
+    document.querySelectorAll("[data-language-menu-toggle]").forEach((button) => {
+      button.setAttribute("aria-label", language === "zh-CN" ? "语言" : "Language");
+      button.title = language === "zh-CN" ? "语言" : "Language";
+    });
+    document.querySelectorAll("[data-language-option]").forEach((option) => {
+      const selected = option.dataset.languageOption === selectedLocale;
+      option.setAttribute("aria-checked", selected ? "true" : "false");
+      option.setAttribute("aria-selected", selected ? "true" : "false");
     });
     document.querySelectorAll("[data-theme-toggle] .sr-only").forEach((label) => { label.textContent = language === "zh-CN" ? "主题" : "Theme"; });
+    document.querySelectorAll("[data-account-entry]").forEach((entry) => {
+      const admin = entry.dataset.accountEntry === "admin";
+      const label = admin ? (language === "zh-CN" ? "管理员控制台" : "Admin console") : (language === "zh-CN" ? "我的账户" : "My account");
+      entry.setAttribute("aria-label", label);
+      entry.title = label;
+    });
   }
+  const themeIcons = {
+    auto: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"></rect><path d="M8 21h8M12 17v4"></path></svg>',
+    light: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>',
+    dark: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.5A8 8 0 1 1 8.5 4 6.5 6.5 0 0 0 20 15.5z"></path></svg>'
+  };
   function applyTheme(value) {
     if (value === "light" || value === "dark") root.dataset.theme = value;
     else delete root.dataset.theme;
@@ -798,31 +882,257 @@ const appJS = `
       const themeNames = language === "zh-CN" ? { auto: "自动", light: "浅色", dark: "深色" } : { auto: "automatic", light: "light", dark: "dark" };
       button.setAttribute("aria-label", (language === "zh-CN" ? "主题：" : "Theme: ") + themeNames[current] + (language === "zh-CN" ? "。切换到" : ". Switch to ") + themeNames[next] + (language === "zh-CN" ? "。" : "."));
       const icon = button.querySelector(".theme-icon");
-      if (icon) icon.textContent = current === "dark" ? "☾" : current === "light" ? "☀" : "◐";
+      if (icon) icon.innerHTML = themeIcons[current] || themeIcons.auto;
     });
   }
   function makeControls(host) {
-    host.innerHTML = '<label class="sr-only" for="cwc-language" data-i18n="Language">Language</label><select id="cwc-language" data-language-select data-i18n-label="Language" aria-label="Language"><option value="auto" data-i18n="Automatic">Auto</option><option value="en-US" data-i18n="English">English</option><option value="zh-CN" data-i18n="中文">中文</option></select><button class="icon-button" type="button" data-theme-toggle><span class="theme-icon" aria-hidden="true">◐</span><span class="sr-only">Theme</span></button>';
+    host.innerHTML = '<div class="language-picker"><button class="icon-button language-button" type="button" data-language-menu-toggle aria-expanded="false" aria-haspopup="menu" aria-label="Language"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9S9.5 5.5 12 3z"></path></svg><span class="sr-only" data-i18n="Language">Language</span></button><div class="language-menu" data-language-menu hidden role="menu"><button type="button" data-language-option="auto" role="menuitemradio" data-i18n="Automatic">Auto</button><button type="button" data-language-option="en-US" role="menuitemradio" data-i18n="English">English</button><button type="button" data-language-option="zh-CN" role="menuitemradio" data-i18n="中文">中文</button></div></div><button class="icon-button" type="button" data-theme-toggle><span class="theme-icon" aria-hidden="true"></span><span class="sr-only">Theme</span></button>';
   }
   function bindControls() {
-    document.querySelectorAll("[data-language-select]").forEach((select) => {
-      if (select.dataset.cwcBound) return;
-      select.dataset.cwcBound = "true";
-      select.addEventListener("change", (event) => { root.dataset.locale = event.target.value; persist(localeKey, event.target.value); translate(); applyTheme(stored(themeKey, "auto")); });
+    document.querySelectorAll("[data-language-menu-toggle]").forEach((button) => {
+      if (button.dataset.cwcLanguageBound) return;
+      button.dataset.cwcLanguageBound = "true";
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const menu = event.currentTarget.parentElement?.querySelector("[data-language-menu]");
+        if (!menu) return;
+        const open = menu.hidden;
+        closeLanguageMenus();
+        menu.hidden = !open;
+        event.currentTarget.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+    });
+    document.querySelectorAll("[data-language-option]").forEach((option) => {
+      if (option.dataset.cwcLanguageBound) return;
+      option.dataset.cwcLanguageBound = "true";
+      option.addEventListener("click", (event) => {
+        const value = event.currentTarget.dataset.languageOption || "auto";
+        root.dataset.locale = value;
+        persist(localeKey, value);
+        closeLanguageMenus();
+        translate();
+        applyTheme(stored(themeKey, "auto"));
+      });
     });
     document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
       if (button.dataset.cwcBound) return;
       button.dataset.cwcBound = "true";
       button.addEventListener("click", (event) => { const next = event.currentTarget.dataset.nextTheme || "dark"; persist(themeKey, next); applyTheme(next); });
     });
+    if (!root.dataset.cwcLanguageDocumentBound) {
+      root.dataset.cwcLanguageDocumentBound = "true";
+      document.addEventListener("click", (event) => { if (!event.target.closest(".language-picker")) closeLanguageMenus(); });
+    }
+  }
+  function closeLanguageMenus() {
+    document.querySelectorAll("[data-language-menu]").forEach((menu) => {
+      menu.hidden = true;
+      menu.parentElement?.querySelector("[data-language-menu-toggle]")?.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function makeAccountEntry(admin) {
+    const entry = document.createElement("a");
+    entry.className = admin ? "admin-avatar" : "account-avatar";
+    entry.href = admin ? "/admin" : "/account";
+    entry.dataset.accountEntry = admin ? "admin" : "account";
+    entry.setAttribute("aria-label", admin ? "Admin console" : "My account");
+    entry.innerHTML = admin
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4v5c0 4.8-3.3 7.8-8 9-4.7-1.2-8-4.2-8-9V7l8-4z"></path><path d="m9 12 2 2 4-4"></path></svg><span class="sr-only" data-i18n="Admin console">Admin console</span>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.2"></circle><path d="M5 20c.8-3.4 3.1-5.2 7-5.2s6.2 1.8 7 5.2"></path></svg><span class="sr-only" data-i18n="My account">My account</span>';
+    return entry;
+  }
+  function ensureAccountNavigation() {
+    if (document.querySelector(".admin-page")) root.dataset.admin = "true";
+    if (document.querySelector('form[action="/account/action"]')) {
+      document.querySelector(".page")?.classList.add("account-page");
+    }
+    const navs = Array.from(document.querySelectorAll(".nav"));
+    document.querySelectorAll(".topbar").forEach((topbar) => {
+      if (topbar.querySelector(".nav")) return;
+      const nav = document.createElement("nav");
+      nav.className = "nav";
+      const controls = topbar.querySelector(":scope > .ui-controls");
+      if (controls) nav.appendChild(controls);
+      topbar.appendChild(nav);
+      navs.push(nav);
+    });
+    navs.forEach((nav) => {
+      let account = nav.querySelector('[data-account-entry="account"]');
+      if (!account) {
+        const existing = nav.querySelector('a[href="/account"]');
+        account = makeAccountEntry(false);
+        if (existing) existing.replaceWith(account);
+        else nav.appendChild(account);
+      }
+      if (root.dataset.admin === "true" && !nav.closest(".admin-page") && !nav.querySelector('[data-account-entry="admin"]')) {
+        nav.appendChild(makeAccountEntry(true));
+      }
+    });
+  }
+  function ensureAccountActions() {
+    const header = document.querySelector(".account-page .page-header");
+    if (!header || header.dataset.accountActionsBound) return;
+    header.dataset.accountActionsBound = "true";
+    const copy = document.createElement("div");
+    copy.className = "page-header-copy";
+    while (header.firstChild) copy.appendChild(header.firstChild);
+    const actions = document.createElement("div");
+    actions.className = "page-header-actions";
+    const connect = document.createElement("a");
+    connect.className = "button primary";
+    connect.href = "/connect";
+    connect.dataset.accountConnect = "true";
+    connect.dataset.i18n = "Connect a workstation";
+    connect.textContent = "Connect a workstation";
+    actions.appendChild(connect);
+    header.classList.add("page-header-row");
+    header.append(copy, actions);
+  }
+  function dialogSpec(action, form) {
+    if (action === "rename-device") return {title: "Rename device", help: "Choose a display name for this workstation."};
+    if (action === "disable-device" && form.querySelector('input[name="password"]')) return {title: "Enable device", help: "Enter your current account password to re-enable this workstation."};
+    if (action === "revoke-device") return {title: "Revoke device", help: "Type REVOKE to permanently revoke this device."};
+    if (action === "change-password") return {title: "Change password", help: "Changing your password revokes all OAuth credentials and browser sessions for this account. Reconnect devices and apps afterward."};
+    if (action === "create-user") return {title: "Create user", help: "Create a tenant account with a temporary password."};
+    if (action === "rotate-password") return {title: "Rotate password", help: "Set a new password for this user. Existing credentials will be revoked."};
+    if (action === "delete-user") return {title: "Delete user", help: "Type DELETE to permanently delete this user."};
+    if (action === "set-kill-switch" && form.querySelector('input[name="confirm"]')) return {title: "Release kill switch", help: "Type RELEASE to release the emergency stop."};
+    if (action === "revoke-client") return {title: "Revoke client", help: "Type REVOKE to confirm this revocation."};
+    if (action === "revoke-token") return {title: "Revoke token", help: "Type REVOKE to confirm this revocation."};
+    if (action === "redeem-activation-code") return {title: "Redeem activation code", help: "Add the quota attached to a one-time support code."};
+    if (action === "grant-quota") return {title: "Add quota", help: "Add Relay traffic quota to this account."};
+    if (action === "create-activation-code") return {title: "Create activation code", help: "Create a single-use code for the selected quota."};
+    if (action === "set-monetization") return {title: "Edit advertising settings", help: "Advertising is optional. AdMob rewards require a server-side verifier secret."};
+    return null;
+  }
+  function dialogFieldLabel(action, input) {
+    if (input.name === "target" && action === "create-user") return "Username";
+    if (input.name === "value" && action === "rename-device") return "New display name";
+    if (input.name === "value" && action === "disable-device") return "Current password";
+    if (input.name === "value" && action === "create-user") return "Temporary password";
+    if (input.name === "value" && action === "rotate-password") return "New password";
+    if (input.name === "value" && action === "change-password") return "New password";
+    if (input.name === "value" && action === "redeem-activation-code") return "Activation code";
+    if (input.name === "value" && action === "grant-quota") return "Quota to add in bytes";
+    if (input.name === "value" && action === "create-activation-code") return "Quota in bytes";
+    if (input.name === "default_quota_bytes") return "Default quota in bytes";
+    if (input.name === "adsense_client_id") return "AdSense client ID";
+    if (input.name === "adsense_slot") return "AdSense slot ID";
+    if (input.name === "admob_app_id") return "AdMob app ID";
+    if (input.name === "admob_reward_unit_id") return "AdMob rewarded unit ID";
+    if (input.name === "usage_unlock_endpoint") return "Reward endpoint (HTTPS)";
+    if (input.name === "password") return "Current password";
+    if (input.name === "confirm") return "Confirmation";
+    return input.name;
+  }
+  function dialogElement(tag, className, text, key) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (key) element.dataset.i18n = key;
+    element.textContent = text || key || "";
+    return element;
+  }
+  function normalizeActionForms() {
+    let sequence = 0;
+    document.querySelectorAll('form[action="/account/action"], form[action="/admin/action"], form[action="/admin/activation-code"], form[action="/admin/monetization"]').forEach((form) => {
+      if (form.dataset.cwcDialogized) return;
+      const action = form.querySelector('input[name="action"]')?.value || "";
+      const spec = dialogSpec(action, form);
+      const visibleInputs = Array.from(form.querySelectorAll("input")).filter((input) => input.type !== "hidden" && !input.disabled);
+      const submit = form.querySelector('button[type="submit"], button:not([type])');
+      if (!spec || visibleInputs.length === 0 || !submit) return;
+      form.dataset.cwcDialogized = "true";
+      const dialog = document.createElement("dialog");
+      const dialogID = "cwc-action-dialog-" + (++sequence);
+      const titleID = dialogID + "-title";
+      const helpID = dialogID + "-help";
+      dialog.id = dialogID;
+      dialog.className = "action-dialog";
+      if (action === "set-monetization") dialog.dataset.preserveValues = "true";
+      dialog.setAttribute("aria-labelledby", titleID);
+      dialog.setAttribute("aria-describedby", helpID);
+      const heading = document.createElement("div");
+      heading.className = "dialog-heading";
+      heading.appendChild(dialogElement("span", "eyebrow", "Confirm action", "Confirm action"));
+      const title = dialogElement("h2", "", spec.title, spec.title);
+      title.id = titleID;
+      const help = dialogElement("p", "", spec.help, spec.help);
+      help.id = helpID;
+      heading.append(title, help);
+      const fields = document.createElement("div");
+      fields.className = "dialog-fields";
+      visibleInputs.forEach((input) => {
+        const label = document.createElement("label");
+        label.className = "dialog-field";
+        label.appendChild(dialogElement("span", "", dialogFieldLabel(action, input), dialogFieldLabel(action, input)));
+        input.remove();
+        label.appendChild(input);
+        fields.appendChild(label);
+      });
+      submit.remove();
+      submit.classList.add("primary");
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "text";
+      cancel.dataset.dialogCancel = "true";
+      cancel.dataset.i18n = "Cancel";
+      cancel.textContent = "Cancel";
+      const actions = document.createElement("div");
+      actions.className = "dialog-actions";
+      actions.append(cancel, submit);
+      form.className = "dialog-form";
+      form.insertBefore(heading, form.firstChild);
+      form.insertBefore(fields, form.firstChild);
+      form.appendChild(actions);
+      const trigger = document.createElement("button");
+      trigger.type = "button";
+      const triggerClasses = Array.from(submit.classList).filter((name) => name !== "primary");
+      if (!triggerClasses.some((name) => ["danger", "tonal", "outlined", "text"].includes(name))) triggerClasses.push("primary");
+      triggerClasses.push("dialog-trigger");
+      trigger.className = triggerClasses.join(" ");
+      trigger.dataset.dialogTrigger = "true";
+      trigger.dataset.dialogTarget = dialogID;
+      trigger.innerHTML = submit.innerHTML;
+      if (submit.dataset.i18n && !submit.querySelector("[data-i18n]")) trigger.dataset.i18n = submit.dataset.i18n;
+      form.replaceWith(trigger);
+      dialog.appendChild(form);
+      document.body.appendChild(dialog);
+    });
+  }
+  function bindDialogs() {
+    document.querySelectorAll("[data-dialog-trigger]").forEach((trigger) => {
+      if (trigger.dataset.cwcDialogBound) return;
+      trigger.dataset.cwcDialogBound = "true";
+      trigger.addEventListener("click", () => {
+        const dialog = document.getElementById(trigger.dataset.dialogTarget || "");
+        if (!dialog) return;
+        if (typeof dialog.showModal === "function") dialog.showModal();
+        else dialog.setAttribute("open", "");
+        const first = dialog.querySelector('input:not([type="hidden"]):not([disabled])');
+        (first || dialog.querySelector("button[type=submit], button:not([type])"))?.focus({preventScroll: true});
+      });
+    });
+    document.querySelectorAll("[data-dialog-cancel]").forEach((button) => {
+      if (button.dataset.cwcDialogBound) return;
+      button.dataset.cwcDialogBound = "true";
+      button.addEventListener("click", () => button.closest("dialog")?.close());
+    });
+    document.querySelectorAll("dialog.action-dialog").forEach((dialog) => {
+      if (dialog.dataset.cwcDialogBound) return;
+      dialog.dataset.cwcDialogBound = "true";
+      dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
+      dialog.addEventListener("close", () => { if (dialog.dataset.preserveValues !== "true") dialog.querySelectorAll('input:not([type="hidden"])').forEach((input) => { input.value = ""; }); });
+    });
   }
 
   function copyElementAttributes(source, target) {
     Array.from(source.attributes).forEach((attribute) => {
-      if (attribute.name !== "data-cwc-bound") target.setAttribute(attribute.name, attribute.value);
+      if (!["data-cwc-bound", "data-cwc-dialog-bound", "data-cwc-language-bound"].includes(attribute.name)) target.setAttribute(attribute.name, attribute.value);
     });
   }
   function materialButtonTag(source) {
+    if (source.classList.contains("icon-button")) return "md-icon-button";
     if (source.classList.contains("primary") || source.classList.contains("danger")) return "md-filled-button";
     if (source.classList.contains("tonal")) return "md-filled-tonal-button";
     if (source.classList.contains("outlined")) return "md-outlined-button";
@@ -865,7 +1175,10 @@ const appJS = `
     if (!customElements.get("md-filled-button")) return;
     upgradeMaterialSelects();
     upgradeMaterialButtons();
+    ensureAccountNavigation();
+    ensureAccountActions();
     bindControls();
+    bindDialogs();
     bindCopyButtons();
     translate();
     applyTheme(stored(themeKey, "auto"));
@@ -889,10 +1202,16 @@ const appJS = `
   function loadAdSense() {
     const slot = document.querySelector("[data-adsense-client]");
     if (!slot || !slot.dataset.adsenseClient) return;
+    const fillSlots = () => document.querySelectorAll(".adsense-unit:not([data-cwc-adsense-filled])").forEach((unit) => {
+      unit.dataset.cwcAdsenseFilled = "true";
+      try { (window.adsbygoogle = window.adsbygoogle || []).push({}); } catch (_) {}
+    });
+    const existing = document.querySelector("script[data-cwc-adsense]");
+    if (existing) { existing.addEventListener("load", fillSlots, {once: true}); fillSlots(); return; }
     const script = document.createElement("script");
     script.async = true; script.crossOrigin = "anonymous"; script.dataset.cwcAdsense = "true";
     script.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=" + encodeURIComponent(slot.dataset.adsenseClient);
-    script.onload = () => { try { (window.adsbygoogle = window.adsbygoogle || []).push({}); } catch (_) {} };
+    script.onload = fillSlots;
     document.head.appendChild(script);
   }
   function createRipple(element, event) {
@@ -909,9 +1228,13 @@ const appJS = `
     ripple.addEventListener("animationend", () => ripple.remove(), {once: true});
   }
   document.querySelectorAll("[data-ui-controls]").forEach(makeControls);
+  ensureAccountNavigation();
+  ensureAccountActions();
+  normalizeActionForms();
   bindControls();
   applyTheme(stored(themeKey, "auto"));
   translate();
+  bindDialogs();
   function bindCopyButtons() {
     document.querySelectorAll("[data-copy-target]").forEach((button) => {
       if (button.dataset.cwcBound) return;
@@ -953,16 +1276,20 @@ func (s *Server) handleMonetizationConfig(w http.ResponseWriter, r *http.Request
 	adsenseSlot := strings.TrimSpace(s.cfg.AdSenseSlot)
 	admobAppID := strings.TrimSpace(s.cfg.AdMobAppID)
 	admobRewardUnitID := strings.TrimSpace(s.cfg.AdMobRewardUnitID)
-	usageUnlockEnabled := s.cfg.UsageUnlockEnabled && strings.TrimSpace(s.cfg.UsageUnlockEndpoint) != ""
+	usageUnlockEnabled := s.rewardedUsageEnabledLocked() && strings.TrimSpace(s.cfg.UsageUnlockEndpoint) != ""
 	usageUnlockEndpoint := strings.TrimSpace(s.cfg.UsageUnlockEndpoint)
+	usageMeteringEnabled := s.usageMeteringEnabled
+	usageDefaultQuotaBytes := s.usageDefaultQuotaBytes
+	rewardVerifierConfigured := strings.TrimSpace(s.cfg.AdMobVerifierSecret) != ""
 	s.mu.Unlock()
 	admobEnabled := admobAppID != "" && admobRewardUnitID != ""
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"adsense":      map[string]any{"enabled": adsenseClientID != "" && adsenseSlot != "", "client_id": adsenseClientID, "slot": adsenseSlot},
-		"admob":        map[string]any{"enabled": admobEnabled, "app_id": admobAppID, "reward_unit_id": admobRewardUnitID},
-		"usage_unlock": map[string]any{"enabled": usageUnlockEnabled, "endpoint": usageUnlockEndpoint, "verification": "server-side-provider-verification-required"},
+		"admob":        map[string]any{"enabled": admobEnabled, "app_id": admobAppID, "reward_unit_id": admobRewardUnitID, "reward_ready": usageUnlockEnabled && admobEnabled && rewardVerifierConfigured},
+		"usage":        map[string]any{"enabled": usageMeteringEnabled, "default_quota_bytes": usageDefaultQuotaBytes, "accounting": "authenticated MCP and Agent request/response payload bytes"},
+		"usage_unlock": map[string]any{"enabled": usageUnlockEnabled, "endpoint": usageUnlockEndpoint, "redeem_endpoint": s.absolute("/account/admob/redeem"), "verification": "server-side-provider-verification-required", "verifier_configured": rewardVerifierConfigured},
 	})
 }
 

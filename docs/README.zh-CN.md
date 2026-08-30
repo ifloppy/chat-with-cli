@@ -66,6 +66,14 @@ Relay 不能替工作站授予能力；本地 profile 和前台审批模式才�
 
 网页 UI 提供默认关闭的 AdSense 和 AdMob 扩展点。只有在隐私声明和用户同意流程准备好后，才应配置 AdSense 发布商和广告位。AdMob 属于原生伴侣应用：Relay 可以链接到奖励流程，但只能接受服务端验证后的短期签名 entitlement。浏览器按钮、客户端自报或未验证回执绝不能直接授予 MCP/Agent 权限。
 
+启用 `--usage-metering-enabled` 后，Relay 会按账户维护流量额度：认证后的 MCP HTTP 请求/响应字节，以及经 Broker 转发的 Agent WebSocket 载荷字节都会计入额度。额度耗尽后，新的请求会返回 HTTP `402`。每个账户默认 100 MiB，可用 `--usage-default-quota-bytes` 或管理员控制台调整。管理员可以直接给账户增加额度，也可以创建一次性激活码；用户在 `/account` 兑换。额度增加会累加并在重启后保留。计数器、激活码哈希和已兑换奖励 ID 保存在私有的 `usage-state.json` 中，与 `oauth-state.json` 的授权状态分离。普通流量按批次写入并在 Relay 正常关闭时刷新；额度授予和兑换则同步持久化。
+
+激励广告由 Relay 和伴侣应用共同完成。配置 AdMob 应用/广告单元、HTTPS `--usage-unlock-endpoint`，并在 Relay 环境变量中设置 `CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET` 后，管理员才能启用奖励额度。伴侣应用必须先向 AdMob 验证奖励，再用共享密钥签发短期 entitlement，并把用户带回 Relay 的兑换地址。Relay 会检查账户 subject、过期时间、额度上限和一次性 ID；验证密钥绝不能放进 TOML、浏览器代码或 Relay 状态文件。
+
+entitlement 格式为 `base64url(json).base64url(hmac)`，其中 HMAC-SHA256 计算范围是第一段，密钥是验证器密钥。JSON claims 为 `{ "sub": "<用户 ID>", "quota_bytes": <正整数>, "exp": <Unix 秒>, "jti": "<唯一 ID>" }`；Relay 最多接受 24 小时有效期，并将 `jti` 记录为一次性凭据。
+
+AdSense 与流量额度相互独立：同时填入发布商 client ID 和广告位 ID 后，公共首页会在顶部、中部和底部渲染可选的响应式广告位。任一配置为空时都不会加载广告脚本。
+
 Relay 和 `relay setup` 都提供相关选项：
 
 ```bash
@@ -73,7 +81,7 @@ chat-with-cli relay --help
 chat-with-cli relay setup --help
 ```
 
-非敏感的公开配置也可以从 `/api/monetization/config` 获取，供伴侣应用读取；该接口不会签发 entitlement。
+非敏感的公开配置也可以从 `/api/monetization/config` 获取，供伴侣应用读取；该接口不会签发 entitlement，也不会暴露验证密钥。
 
 ## 界面语言和主题
 

@@ -186,6 +186,19 @@ sessions, and security events are bounded. These limits reduce accidental
 exhaustion but do not replace host/container CPU, memory, process, and disk
 quotas for public instances.
 
+Optional Relay usage metering counts authenticated MCP request/response payload
+bytes and brokered Agent WebSocket payload bytes per user. It is disabled by
+default and is a traffic budget, not an authorization boundary: the Relay
+operator can still observe or alter traffic. Keep AdMob reward verification
+server-side; the browser and client must never be trusted to choose a user,
+quota, or reward claim. Store `CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET` out of band,
+never in Relay state or web assets. Usage counters, activation-code hashes, and
+redeemed reward IDs live in the mode-0600 `usage-state.json`, separate from the
+fail-closed `oauth-state.json`. High-frequency byte accounting is checkpointed
+in batches; a usage checkpoint failure is retried and never opens or freezes an
+authorization boundary. Quota grants and redemptions synchronously persist and
+roll back on failure.
+
 ## Public deployment checklist
 
 - Use HTTPS and a reverse proxy with WebSocket support; never trust forwarded
