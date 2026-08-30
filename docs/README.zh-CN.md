@@ -55,10 +55,11 @@ systemctl --user enable --now chat-with-cli-agent.service
 
 | 配置 | 适用场景 | 默认权限 |
 | --- | --- | --- |
-| `read-only` | 首次连接、普通代码阅读 | 仅文件系统读取 |
-| `developer` | 有意识的本地开发 | 文件写入和 PTY 执行；Linux 默认使用 Landlock |
-| `computer-use` | 明确的桌面自动化 | 屏幕/辅助功能读取和计算机输入 |
-| `custom` | 逐项控制权限 | 生成配置中的各个 flag |
+| `read-only` (`R`) | 首次连接、普通代码阅读 | 仅文件系统读取 |
+| `read-write` (`W`) | 本地开发 | 文件写入和 PTY 执行；Linux 默认使用 Landlock |
+| `desktop-computer-use` (`D`) | 桌面自动化 | 屏幕/辅助功能读取和计算机输入 |
+| `all` (`A`) | 全部工作站能力 | read-write + 桌面自动化；Linux exec 默认使用 Landlock |
+| `custom` (`C`) | 逐项控制权限 | 生成配置中的各个 flag |
 
 Relay 不能替工作站授予能力；本地 profile 和前台审批模式才是最终权限边界。不要以 root 运行 Agent，也不要在没有明确意图时暴露 `/` 或整个 home 目录。
 

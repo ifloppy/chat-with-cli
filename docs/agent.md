@@ -15,10 +15,11 @@ password.
 
 | Profile | Enabled capabilities |
 | --- | --- |
-| `read-only` | filesystem reads under roots |
-| `developer` | read, filesystem/checkpoint write, PTY shell |
-| `computer-use` | screen/accessibility read and computer input/write |
-| `custom` | individual flags only |
+| `read-only` (`R`) | filesystem reads under roots |
+| `read-write` (`W`) | read, filesystem/checkpoint write, PTY shell |
+| `desktop-computer-use` (`D`) | screen/accessibility read and computer input/write |
+| `all` (`A`) | read-write plus all desktop/computer-use capabilities |
+| `custom` (`C`) | individual flags only |
 
 Capabilities can also be selected separately:
 

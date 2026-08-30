@@ -77,7 +77,7 @@ OAuth grant can then see only the devices owned by that account, list them with
 `/mcp/id/<immutable-device-id>` endpoints remain available when a client should
 be pinned to exactly one workstation. In ChatGPT or another MCP client, choose
 OAuth authentication and refresh the tool list after authorization. For a developer workstation,
-explicitly choose `--profile developer` or enable individual capabilities; see
+explicitly choose `--profile read-write` (legacy alias: `developer`) or enable individual capabilities; see
 [Agent configuration](docs/agent.md).
 
 ## Security defaults

@@ -58,10 +58,11 @@ systemctl --user enable --now chat-with-cli-agent.service
 
 | Profile | Intended use | Default authority |
 | --- | --- | --- |
-| `read-only` | First connection and ordinary code reading | Filesystem reads only |
-| `developer` | Deliberate local development | Filesystem writes and PTY execution; Linux uses Landlock by default |
-| `computer-use` | Explicit desktop automation | Screen/accessibility reads and computer input |
-| `custom` | Operators who want individual flags | The flags in the generated config |
+| `read-only` (`R`) | First connection and ordinary code reading | Filesystem reads only |
+| `read-write` (`W`) | Deliberate local development | Filesystem writes and PTY execution; Linux uses Landlock by default |
+| `desktop-computer-use` (`D`) | Explicit desktop automation | Screen/accessibility reads and computer input |
+| `all` (`A`) | Full workstation capability set | Read-write plus desktop automation; Linux exec uses Landlock by default |
+| `custom` (`C`) | Operators who want individual flags | The flags in the generated config |
 
 The Relay cannot make a workstation grant a capability. Local profiles and the
 foreground approval mode remain the final authority. Do not run an Agent as

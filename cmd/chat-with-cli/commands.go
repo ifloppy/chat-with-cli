@@ -94,6 +94,47 @@ func uiPrompt(reader *bufio.Reader, writer io.Writer, label, defaultValue string
 	return line, nil
 }
 
+func promptCapabilityProfile(reader *bufio.Reader, writer io.Writer) (string, []string, error) {
+	fmt.Fprintln(writer, "  [R] Read-only             Filesystem read only")
+	fmt.Fprintln(writer, "  [W] Read-write            Filesystem read/write + shell/exec")
+	fmt.Fprintln(writer, "  [D] Desktop-computer-use  Screenshot + accessibility + mouse/keyboard")
+	fmt.Fprintln(writer, "  [A] All                   Read-write + desktop-computer-use")
+	fmt.Fprintln(writer, "  [C] Custom                Choose capabilities individually")
+	selected, err := uiPrompt(reader, writer, "Capability profile [R/W/D/A/C]", "R")
+	if err != nil {
+		return "", nil, err
+	}
+	profile, ok := canonicalCapabilityProfile(selected)
+	if !ok {
+		return "", nil, fmt.Errorf("invalid capability profile %q", selected)
+	}
+	if profile != "custom" {
+		return profile, nil, nil
+	}
+
+	flags := make([]string, 0, 5)
+	choices := []struct {
+		label string
+		flag  string
+	}{
+		{"Allow filesystem/checkpoint writes? (y/N)", "--allow-file-write"},
+		{"Allow PTY shell execution? (y/N)", "--allow-exec"},
+		{"Allow screenshot capture? (y/N)", "--allow-screen"},
+		{"Allow accessibility inspection? (y/N)", "--allow-accessibility"},
+		{"Allow mouse/keyboard and semantic UI control? (y/N)", "--allow-computer-use"},
+	}
+	for _, choice := range choices {
+		answer, err := uiPrompt(reader, writer, choice.label, "n")
+		if err != nil {
+			return "", nil, err
+		}
+		if strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes") {
+			flags = append(flags, choice.flag)
+		}
+	}
+	return profile, flags, nil
+}
+
 func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	hostname, _ := os.Hostname()
 	root, err := os.Getwd()
@@ -112,7 +153,7 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	profile, err := uiPrompt(reader, writer, "Capability profile (read-only/developer/computer-use/custom)", "read-only")
+	profile, capabilityFlags, err := promptCapabilityProfile(reader, writer)
 	if err != nil {
 		return err
 	}
@@ -121,6 +162,7 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 		return err
 	}
 	setupArgs := []string{"--relay", relay, "--root", root, "--device", device, "--profile", profile}
+	setupArgs = append(setupArgs, capabilityFlags...)
 	if strings.EqualFold(installSystemd, "y") || strings.EqualFold(installSystemd, "yes") {
 		setupArgs = append(setupArgs, "--install-systemd")
 	}
@@ -134,7 +176,7 @@ func runAgentSetup(args []string) error {
 	deviceDefault, _ := os.Hostname()
 	device := fs.String("device", deviceDefault, "human-readable device name")
 	deviceID := fs.String("device-id", "", "immutable device ID; generated when omitted")
-	profile := fs.String("profile", "read-only", "read-only, developer, computer-use, or custom")
+	profile := fs.String("profile", "read-only", "read-only, read-write, desktop-computer-use, all, or custom (legacy developer/computer-use aliases accepted)")
 	roots := new(stringList)
 	fs.Var(roots, "root", "allowed filesystem root (repeatable)")
 	stateDir := fs.String("state-dir", defaultAgentStateDir(), "agent state directory")
@@ -170,18 +212,22 @@ func runAgentSetup(args []string) error {
 	if strings.TrimSpace(*relayURL) == "" {
 		return errors.New("--relay is required, for example https://relay.example.com")
 	}
-	if !validCapabilityProfile(*profile) {
+	canonicalProfile, ok := canonicalCapabilityProfile(*profile)
+	if !ok {
 		return fmt.Errorf("invalid capability profile %q", *profile)
 	}
+	*profile = canonicalProfile
 	explicitFileWrite, explicitExec := *allowFileWrite, *allowExec
 	explicitScreen, explicitAccessibility, explicitComputer := *allowScreen, *allowAccessibility, *allowComputer
-	switch strings.ToLower(strings.TrimSpace(*profile)) {
+	switch *profile {
 	case "read-only":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, false, false, false
-	case "developer":
+	case "read-write":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, false, false, false
-	case "computer-use":
+	case "desktop-computer-use":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, true, true, true
+	case "all":
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, true, true, true
 	}
 	// Profiles provide a baseline; capability flags explicitly supplied to
 	// setup remain the final operator choice.
@@ -203,7 +249,7 @@ func runAgentSetup(args []string) error {
 	if *allowComputer {
 		*allowScreen, *allowAccessibility = true, true
 	}
-	if *allowExec && strings.EqualFold(strings.TrimSpace(*profile), "developer") && runtime.GOOS == "linux" && !flagWasSet(fs, "exec-sandbox") && strings.EqualFold(strings.TrimSpace(*execSandbox), "none") {
+	if *allowExec && (*profile == "read-write" || *profile == "all") && runtime.GOOS == "linux" && !flagWasSet(fs, "exec-sandbox") && strings.EqualFold(strings.TrimSpace(*execSandbox), "none") {
 		*execSandbox = "landlock"
 	}
 	if !*allowExec {
@@ -431,13 +477,26 @@ func systemdQuote(value string) string {
 	return "\"" + value + "\""
 }
 
-func validCapabilityProfile(value string) bool {
+func canonicalCapabilityProfile(value string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "read-only", "developer", "computer-use", "custom":
-		return true
+	case "r", "read-only", "readonly":
+		return "read-only", true
+	case "w", "read-write", "readwrite", "workspace", "developer":
+		return "read-write", true
+	case "d", "desktop", "desktop-computer-use", "computer-use":
+		return "desktop-computer-use", true
+	case "a", "all", "full":
+		return "all", true
+	case "c", "custom":
+		return "custom", true
 	default:
-		return false
+		return "", false
 	}
+}
+
+func validCapabilityProfile(value string) bool {
+	_, ok := canonicalCapabilityProfile(value)
+	return ok
 }
 
 func runRelaySetup(args []string) error {

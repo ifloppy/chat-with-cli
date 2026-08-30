@@ -202,7 +202,7 @@ func runExecSandbox(args []string) error {
 func addEngineFlags(fs *flag.FlagSet) (*stringList, *string, *bool, *bool, *string, *bool, *bool, *bool, *string, *string, *string, *int) {
 	roots := new(stringList)
 	fs.Var(roots, "root", "allowed filesystem root (repeatable; defaults to current directory)")
-	profile := fs.String("profile", "", "capability profile: read-only, developer, computer-use, or custom (individual flags apply when omitted)")
+	profile := fs.String("profile", "", "capability profile: read-only, read-write, desktop-computer-use, all, or custom; legacy developer/computer-use aliases remain accepted")
 	allowFileWrite := fs.Bool("allow-file-write", false, "allow filesystem and checkpoint writes inside allowed roots")
 	fs.BoolVar(allowFileWrite, "allow-fs-write", false, "alias for --allow-file-write")
 	allowExec := fs.Bool("allow-exec", false, "allow arbitrary shell commands in PTY tasks")
@@ -221,19 +221,23 @@ func applyCapabilityProfile(fs *flag.FlagSet, profile string, allowFileWrite, al
 	if !flagWasSet(fs, "profile") && strings.TrimSpace(profile) == "" {
 		return nil
 	}
+	canonicalProfile, ok := canonicalCapabilityProfile(profile)
+	if !ok {
+		return fmt.Errorf("unknown capability profile %q", profile)
+	}
 	explicitFileWrite, explicitExec := *allowFileWrite, *allowExec
 	explicitScreen, explicitAccessibility, explicitComputer := *allowScreen, *allowAccessibility, *allowComputer
-	switch strings.ToLower(strings.TrimSpace(profile)) {
+	switch canonicalProfile {
 	case "read-only":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, false, false, false
-	case "developer":
+	case "read-write":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, false, false, false
-	case "computer-use":
+	case "desktop-computer-use":
 		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = false, false, true, true, true
+	case "all":
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, true, true, true
 	case "custom":
 		return nil
-	default:
-		return fmt.Errorf("unknown capability profile %q", profile)
 	}
 	// A profile from TOML is a baseline. Any capability flag explicitly given
 	// on the command line remains the final override, including an explicit
@@ -260,7 +264,8 @@ func applyExecSandboxDefault(fs *flag.FlagSet, profile string, allowExec bool, e
 	if !allowExec || flagWasSet(fs, "exec-sandbox") {
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(profile), "developer") && runtime.GOOS == "linux" && strings.EqualFold(strings.TrimSpace(*execSandbox), "none") {
+	canonicalProfile, ok := canonicalCapabilityProfile(profile)
+	if ok && (canonicalProfile == "read-write" || canonicalProfile == "all") && runtime.GOOS == "linux" && strings.EqualFold(strings.TrimSpace(*execSandbox), "none") {
 		*execSandbox = "landlock"
 	}
 }
