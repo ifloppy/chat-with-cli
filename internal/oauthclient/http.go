@@ -11,6 +11,22 @@ import (
 	"strings"
 )
 
+type HTTPStatusError struct {
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return "OAuth endpoint returned an HTTP error"
+	}
+	return fmt.Sprintf("OAuth endpoint returned %d %s", e.StatusCode, http.StatusText(e.StatusCode))
+}
+
+func IsHTTPStatus(err error, status int) bool {
+	var target *HTTPStatusError
+	return errors.As(err, &target) && target.StatusCode == status
+}
+
 func getJSON(ctx context.Context, client *http.Client, target string, out any) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -25,7 +41,7 @@ func getJSON(ctx context.Context, client *http.Client, target string, out any) e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("OAuth endpoint returned %s", resp.Status)
+		return &HTTPStatusError{StatusCode: resp.StatusCode}
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
 }
@@ -44,6 +60,27 @@ func postJSON(ctx context.Context, client *http.Client, target string, body any,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return doJSON(client, req, out)
+}
+
+func postForm(ctx context.Context, client *http.Client, target string, form url.Values) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return safeHTTPError(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode/100 != 2 {
+		return &HTTPStatusError{StatusCode: resp.StatusCode}
+	}
+	return nil
 }
 
 func postFormJSON(ctx context.Context, client *http.Client, target string, form url.Values, out any) error {
@@ -69,7 +106,7 @@ func doJSON(client *http.Client, req *http.Request, out any) error {
 		// OAuth request. Never include them in an error that can reach CLI logs:
 		// token, authorization-code, PKCE, and other credential fields are sent
 		// in the request body.
-		return fmt.Errorf("OAuth endpoint returned %s", resp.Status)
+		return &HTTPStatusError{StatusCode: resp.StatusCode}
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
 }

@@ -11,8 +11,11 @@ go test ./...
 go build -o chat-with-cli ./cmd/chat-with-cli
 ```
 
-For an installed workstation, `chat-with-cli ui` opens the interactive setup
-hub. If no Relay is supplied, the client uses the community public Relay
+For an installed workstation, `chat-with-cli ui` opens the interactive control
+hub. Choose **Connect this workstation**: if local setup is missing, the same flow
+creates it first, then opens OAuth when needed and connects. The separate
+**Workstation settings** entry is for changing an existing configuration, while
+**Account** shows OAuth status and Login / Logout. If no Relay is supplied, the client uses the community public Relay
 `https://chat-with-cli.iruanp.com`; pass `--relay` to use a private Relay.
 
 Run the local MCP server over stdio for a first smoke test:
@@ -63,8 +66,11 @@ systemctl --user daemon-reload
 systemctl --user enable --now chat-with-cli-agent.service
 ```
 
-The generated config stores the Relay URL and immutable device ID, so `login`
-can reuse them without manual transcription. Immutable IDs are canonicalized to
+The generated config stores the Relay URL and immutable device ID. Normal
+`connect` refreshes expired credentials and opens OAuth automatically when a
+saved credential is rejected. Explicit `login` always performs a fresh browser
+authorization; `logout` revokes that workstation token family and removes its
+exact local credential. Immutable IDs are canonicalized to
 lowercase and are the workstation identity; the device name is only a display
 label and legacy route. Use the stable account endpoint in normal MCP clients:
 

@@ -4644,3 +4644,24 @@ func TestAuthorizationDecisionRejectsDuplicateSecurityFields(t *testing.T) {
 		})
 	}
 }
+
+func TestRetiredAgentChallengeReturnsGone(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19171", Password: "retired-agent-challenge-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := "id/" + identity.ID()
+	s.mu.Lock()
+	s.retiredDevices[route] = true
+	s.mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, s.absolute("/agent/"+route+"/challenge"), nil)
+	rr := httptest.NewRecorder()
+	s.AgentChallengeHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusGone {
+		t.Fatalf("retired Agent challenge status=%d want=410 body=%s", rr.Code, rr.Body.String())
+	}
+}

@@ -40,30 +40,37 @@ func runInteractiveUI(args []string) error {
 		fmt.Fprintln(tty, "\n┌─ Chat with CLI ─────────────────────────────────────┐")
 		fmt.Fprintln(tty, "│  A small, safe control centre for your workstation.  │")
 		fmt.Fprintln(tty, "└─────────────────────────────────────────────────────┘")
-		fmt.Fprintln(tty, "  1  Set up a workstation")
-		fmt.Fprintln(tty, "  2  Connect this workstation")
-		fmt.Fprintln(tty, "  3  Run diagnostics")
-		fmt.Fprintln(tty, "  4  Show current status")
+		fmt.Fprintln(tty, "  1  Connect this workstation")
+		fmt.Fprintln(tty, "  2  Workstation settings")
+		fmt.Fprintln(tty, "  3  Account")
+		fmt.Fprintln(tty, "  4  Run diagnostics")
+		fmt.Fprintln(tty, "  5  Show current status")
 		fmt.Fprintln(tty, "  q  Quit")
 		choice, err := uiPrompt(reader, tty, "Choose an action", "1")
 		if err != nil {
 			return err
 		}
 		switch strings.ToLower(strings.TrimSpace(choice)) {
-		case "1", "setup", "s":
-			if err := interactiveAgentSetup(reader, tty); err != nil {
-				fmt.Fprintf(tty, "\nSetup failed: %v\n", err)
-			} else {
-				fmt.Fprintln(tty, "\nSetup complete. Choose connect when you are ready to start the foreground Agent.")
+		case "1", "connect", "c":
+			if err := interactiveConnectWorkstation(reader, tty); err != nil {
+				fmt.Fprintf(tty, "\nConnection failed: %v\n", err)
 			}
-		case "2", "connect", "c":
-			return runConnect(nil)
-		case "3", "doctor", "d":
+		case "2", "settings", "setup", "s":
+			if err := interactiveAgentSetup(reader, tty); err != nil {
+				fmt.Fprintf(tty, "\nWorkstation settings failed: %v\n", err)
+			} else {
+				fmt.Fprintln(tty, "\nWorkstation settings saved.")
+			}
+		case "3", "account", "a":
+			if err := interactiveAccountMenu(reader, tty); err != nil {
+				fmt.Fprintf(tty, "\nAccount menu failed: %v\n", err)
+			}
+		case "4", "doctor", "d":
 			if err := runDoctor(nil); err != nil {
 				fmt.Fprintf(tty, "\nDiagnostics failed: %v\n", err)
 			}
 			_, _ = uiPrompt(reader, tty, "Press Enter to return to the menu", "")
-		case "4", "status":
+		case "5", "status":
 			if err := runStatus(nil); err != nil {
 				fmt.Fprintf(tty, "\nStatus failed: %v\n", err)
 			}
@@ -72,7 +79,7 @@ func runInteractiveUI(args []string) error {
 			fmt.Fprintln(tty, "Goodbye.")
 			return nil
 		default:
-			fmt.Fprintln(tty, "Please choose 1, 2, 3, 4, or q.")
+			fmt.Fprintln(tty, "Please choose 1, 2, 3, 4, 5, or q.")
 		}
 	}
 }
@@ -94,13 +101,280 @@ func uiPrompt(reader *bufio.Reader, writer io.Writer, label, defaultValue string
 	return line, nil
 }
 
-func promptCapabilityProfile(reader *bufio.Reader, writer io.Writer) (string, []string, error) {
+type configuredOAuthContext struct {
+	Manager     *oauthclient.Manager
+	Resource    string
+	Credentials string
+	Relay       string
+	Device      string
+	DeviceID    string
+}
+
+func configuredOAuthFromFile(configPath string) (configuredOAuthContext, error) {
+	values, err := config.Load(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return configuredOAuthContext{}, errors.New("this workstation is not configured yet")
+		}
+		return configuredOAuthContext{}, err
+	}
+	relay := values.String(defaultPublicRelayURL, "agent.relay_url")
+	device, _ := os.Hostname()
+	device = values.String(device, "agent.device")
+	deviceID := values.String("", "agent.device_id")
+	credentials := values.String(oauthclient.DefaultCredentialsPath(), "agent.credentials")
+	if override := strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS")); override != "" {
+		credentials = override
+	}
+	var identity *deviceidentity.Identity
+	if identityPath := values.String("", "agent.identity"); identityPath != "" {
+		identityPath, err = normalizeUserPath(identityPath)
+		if err != nil {
+			return configuredOAuthContext{}, err
+		}
+		identity, err = deviceidentity.Load(identityPath)
+		if err != nil {
+			return configuredOAuthContext{}, fmt.Errorf("load device identity: %w", err)
+		}
+		if deviceID == "" {
+			deviceID = identity.ID()
+		} else if canonical, ok := protocol.NormalizeDeviceID(deviceID); !ok || canonical != identity.ID() {
+			return configuredOAuthContext{}, errors.New("configured device ID does not match the local Ed25519 identity")
+		}
+	}
+	manager := &oauthclient.Manager{RelayURL: relay, Device: device, DeviceID: deviceID, DeviceIdentity: identity, CredentialsPath: credentials}
+	resource, err := manager.Resource()
+	if err != nil {
+		return configuredOAuthContext{}, err
+	}
+	return configuredOAuthContext{Manager: manager, Resource: resource, Credentials: credentials, Relay: relay, Device: device, DeviceID: deviceID}, nil
+}
+
+func accountSessionStatus(ctx context.Context, auth configuredOAuthContext) string {
+	credential, found, err := oauthclient.LoadCredential(auth.Credentials, auth.Resource)
+	if err != nil {
+		return "Error reading local OAuth session"
+	}
+	if !found {
+		return "Signed out"
+	}
+	if credential.AccessToken == "" {
+		return "Saved OAuth session is incomplete"
+	}
+	if credential.ExpiresAt <= time.Now().Unix() {
+		if credential.RefreshToken != "" {
+			return "Access token expired; Connect will refresh it or open OAuth automatically"
+		}
+		return "OAuth session expired"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(auth.Resource, "/")+"/challenge", nil)
+	if err != nil {
+		return "Saved OAuth session (unable to verify Relay state)"
+	}
+	req.Header.Set("Authorization", "Bearer "+credential.AccessToken)
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "Saved OAuth session; Relay unreachable"
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	return accountSessionDescriptionForHTTPStatus(resp.StatusCode)
+}
+
+func accountSessionDescriptionForHTTPStatus(status int) string {
+	switch status {
+	case http.StatusOK:
+		return "Signed in (verified by Relay)"
+	case http.StatusUnauthorized:
+		return "Signed out (Relay rejected the saved credential)"
+	case http.StatusGone:
+		return "Device identity permanently revoked; Connect or Login will replace it and open OAuth"
+	case http.StatusServiceUnavailable:
+		return "Signed in locally; device is disabled or unavailable at the Relay"
+	default:
+		return fmt.Sprintf("Saved OAuth session; Relay validation returned HTTP %d", status)
+	}
+}
+
+func interactiveAccountMenu(reader *bufio.Reader, writer io.Writer) error {
+	for {
+		fmt.Fprintln(writer, "\nAccount")
+		auth, err := configuredOAuthFromFile(oauthclient.DefaultConfigPath())
+		if err != nil {
+			fmt.Fprintf(writer, "  Status: %v\n", err)
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			status := accountSessionStatus(ctx, auth)
+			cancel()
+			fmt.Fprintf(writer, "  Relay:   %s\n", auth.Relay)
+			fmt.Fprintf(writer, "  Device:  %s\n", auth.Device)
+			if auth.DeviceID != "" {
+				fmt.Fprintf(writer, "  ID:      %s\n", auth.DeviceID)
+			}
+			fmt.Fprintf(writer, "  Session: %s\n", status)
+		}
+		fmt.Fprintln(writer, "\n  1  Login / re-authorize")
+		fmt.Fprintln(writer, "  2  Logout")
+		fmt.Fprintln(writer, "  b  Back")
+		choice, promptErr := uiPrompt(reader, writer, "Choose an action", "b")
+		if promptErr != nil {
+			return promptErr
+		}
+		switch strings.ToLower(strings.TrimSpace(choice)) {
+		case "1", "login", "l":
+			if err := runLogin(nil); err != nil {
+				fmt.Fprintf(writer, "\nLogin failed: %v\n", err)
+			} else {
+				fmt.Fprintln(writer, "\nLogin complete.")
+			}
+		case "2", "logout", "o":
+			if err := runLogout(nil); err != nil {
+				fmt.Fprintf(writer, "\nLogout warning: %v\n", err)
+			} else {
+				fmt.Fprintln(writer, "\nLogged out.")
+			}
+		case "b", "back", "q", "quit", "0":
+			return nil
+		default:
+			fmt.Fprintln(writer, "Please choose 1, 2, or b.")
+		}
+	}
+}
+
+func interactiveConnectWorkstation(reader *bufio.Reader, writer io.Writer) error {
+	configPath := oauthclient.DefaultConfigPath()
+	if _, err := os.Lstat(configPath); errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(writer, "\nNo workstation configuration found. Configure this workstation first; connection will continue automatically afterward.")
+		if err := interactiveAgentSetup(reader, writer); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	if err := runConnect(nil); err != nil {
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintln(writer, "\nWorkstation disconnected.")
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func configPathFromArgs(args []string) string {
+	path := oauthclient.DefaultConfigPath()
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if strings.HasPrefix(arg, "--config=") {
+			if value := strings.TrimSpace(strings.TrimPrefix(arg, "--config=")); value != "" {
+				path = value
+			}
+			continue
+		}
+		if arg == "--config" && i+1 < len(args) {
+			i++
+			if value := strings.TrimSpace(args[i]); value != "" {
+				path = value
+			}
+		}
+	}
+	return path
+}
+
+func rotateRetiredAgentIdentity(configPath string) (string, string, error) {
+	values, err := config.Load(configPath)
+	if err != nil {
+		return "", "", err
+	}
+	identityPath := values.String("", "agent.identity")
+	if identityPath == "" {
+		return "", "", errors.New("configured device has no Ed25519 identity to rotate")
+	}
+	identityPath, err = normalizeUserPath(identityPath)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid configured identity path: %w", err)
+	}
+	oldIdentity, err := deviceidentity.Load(identityPath)
+	if err != nil {
+		return "", "", fmt.Errorf("load retired device identity: %w", err)
+	}
+	oldID := oldIdentity.ID()
+	newIdentity, err := deviceidentity.Generate()
+	if err != nil {
+		return "", "", fmt.Errorf("generate replacement device identity: %w", err)
+	}
+	newID := newIdentity.ID()
+	newIdentityPath := filepath.Join(filepath.Dir(identityPath), "device-identity-"+newID+".key")
+	if err := newIdentity.Save(newIdentityPath); err != nil {
+		return "", "", fmt.Errorf("save replacement device identity: %w", err)
+	}
+	cleanupNew := true
+	defer func() {
+		if cleanupNew {
+			_ = os.Remove(newIdentityPath)
+		}
+	}()
+
+	relay := values.String(defaultPublicRelayURL, "agent.relay_url")
+	device, _ := os.Hostname()
+	device = values.String(device, "agent.device")
+	credentials := values.String(oauthclient.DefaultCredentialsPath(), "agent.credentials")
+	profile := values.String("read-only", "agent.profile")
+	setupArgs := []string{
+		"--config", configPath, "--force",
+		"--relay", relay,
+		"--device", device,
+		"--profile", profile,
+		"--identity", newIdentityPath,
+		"--credentials", credentials,
+		"--allow-file-write=" + fmt.Sprint(values.Bool(false, "agent.allow_file_write")),
+		"--allow-exec=" + fmt.Sprint(values.Bool(false, "agent.allow_exec")),
+		"--allow-screen=" + fmt.Sprint(values.Bool(false, "agent.allow_screen")),
+		"--allow-accessibility=" + fmt.Sprint(values.Bool(false, "agent.allow_accessibility")),
+		"--allow-computer-use=" + fmt.Sprint(values.Bool(false, "agent.allow_computer_use")),
+	}
+	for _, root := range values.Strings("agent.root") {
+		setupArgs = append(setupArgs, "--root", root)
+	}
+	if value := values.String("", "agent.state_dir"); value != "" {
+		setupArgs = append(setupArgs, "--state-dir", value)
+	}
+	if value := values.String("", "agent.exec_sandbox"); value != "" {
+		setupArgs = append(setupArgs, "--exec-sandbox", value)
+	}
+	if value := values.String("", "agent.computer_persist"); value != "" {
+		setupArgs = append(setupArgs, "--computer-persist", value)
+	}
+	if value := values.String("", "agent.kill_switch_file"); value != "" {
+		setupArgs = append(setupArgs, "--kill-switch-file", value)
+	}
+	if _, ok := values.Raw("agent.max_active_tasks"); ok {
+		setupArgs = append(setupArgs, "--max-active-tasks", fmt.Sprint(values.Int(32, "agent.max_active_tasks")))
+	}
+	if err := runAgentSetup(setupArgs); err != nil {
+		return "", "", err
+	}
+	cleanupNew = false
+	oldResource := strings.TrimRight(relay, "/") + "/agent/id/" + oldID
+	if _, err := oauthclient.DeleteCredential(credentials, oldResource); err != nil {
+		return oldID, newID, fmt.Errorf("remove retired device credential: %w", err)
+	}
+	return oldID, newID, nil
+}
+
+func promptCapabilityProfile(reader *bufio.Reader, writer io.Writer, currentProfile string, current config.Values) (string, []string, error) {
 	fmt.Fprintln(writer, "  [R] Read-only             Filesystem read only")
 	fmt.Fprintln(writer, "  [W] Read-write            Filesystem read/write + shell/exec")
 	fmt.Fprintln(writer, "  [D] Desktop-computer-use  Screenshot + accessibility + mouse/keyboard")
 	fmt.Fprintln(writer, "  [A] All                   Read-write + desktop-computer-use")
 	fmt.Fprintln(writer, "  [C] Custom                Choose capabilities individually")
-	selected, err := uiPrompt(reader, writer, "Capability profile [R/W/D/A/C]", "R")
+	canonical, ok := canonicalCapabilityProfile(currentProfile)
+	if !ok {
+		canonical = "read-only"
+	}
+	defaultLetter := map[string]string{"read-only": "R", "read-write": "W", "desktop-computer-use": "D", "all": "A", "custom": "C"}[canonical]
+	selected, err := uiPrompt(reader, writer, "Capability profile [R/W/D/A/C]", defaultLetter)
 	if err != nil {
 		return "", nil, err
 	}
@@ -114,17 +388,22 @@ func promptCapabilityProfile(reader *bufio.Reader, writer io.Writer) (string, []
 
 	flags := make([]string, 0, 5)
 	choices := []struct {
-		label string
-		flag  string
+		label   string
+		flag    string
+		current bool
 	}{
-		{"Allow filesystem/checkpoint writes? (y/N)", "--allow-file-write"},
-		{"Allow PTY shell execution? (y/N)", "--allow-exec"},
-		{"Allow screenshot capture? (y/N)", "--allow-screen"},
-		{"Allow accessibility inspection? (y/N)", "--allow-accessibility"},
-		{"Allow mouse/keyboard and semantic UI control? (y/N)", "--allow-computer-use"},
+		{"Allow filesystem/checkpoint writes?", "--allow-file-write", current.Bool(false, "agent.allow_file_write")},
+		{"Allow PTY shell execution?", "--allow-exec", current.Bool(false, "agent.allow_exec")},
+		{"Allow screenshot capture?", "--allow-screen", current.Bool(false, "agent.allow_screen")},
+		{"Allow accessibility inspection?", "--allow-accessibility", current.Bool(false, "agent.allow_accessibility")},
+		{"Allow mouse/keyboard and semantic UI control?", "--allow-computer-use", current.Bool(false, "agent.allow_computer_use")},
 	}
 	for _, choice := range choices {
-		answer, err := uiPrompt(reader, writer, choice.label, "n")
+		defaultValue := "n"
+		if choice.current {
+			defaultValue = "y"
+		}
+		answer, err := uiPrompt(reader, writer, choice.label, defaultValue)
 		if err != nil {
 			return "", nil, err
 		}
@@ -136,32 +415,84 @@ func promptCapabilityProfile(reader *bufio.Reader, writer io.Writer) (string, []
 }
 
 func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
+	configPath := oauthclient.DefaultConfigPath()
+	values, err := config.LoadOptional(configPath)
+	if err != nil {
+		return fmt.Errorf("load existing workstation configuration: %w", err)
+	}
+	_, statErr := os.Lstat(configPath)
+	configExists := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+
 	hostname, _ := os.Hostname()
-	root, err := os.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
-		root = "."
+		cwd = "."
 	}
-	relay, err := uiPrompt(reader, writer, "Relay URL", defaultPublicRelayURL)
-	if err != nil {
-		return err
+	relayDefault := values.String(defaultPublicRelayURL, "agent.relay_url")
+	deviceDefault := values.String(hostname, "agent.device")
+	roots := values.Strings("agent.root")
+	rootDefault := cwd
+	if len(roots) > 0 {
+		rootDefault = roots[0]
 	}
-	root, err = uiPrompt(reader, writer, "Workspace root", root)
-	if err != nil {
-		return err
-	}
-	device, err := uiPrompt(reader, writer, "Device name", hostname)
-	if err != nil {
-		return err
-	}
-	profile, capabilityFlags, err := promptCapabilityProfile(reader, writer)
+	profileDefault := values.String("read-only", "agent.profile")
+
+	relay, err := uiPrompt(reader, writer, "Relay URL", relayDefault)
 	if err != nil {
 		return err
 	}
-	installSystemd, err := uiPrompt(reader, writer, "Write an inactive systemd user unit? (y/N)", "n")
+	root, err := uiPrompt(reader, writer, "Workspace root", rootDefault)
 	if err != nil {
 		return err
 	}
-	setupArgs := []string{"--relay", relay, "--root", root, "--device", device, "--profile", profile}
+	device, err := uiPrompt(reader, writer, "Device name", deviceDefault)
+	if err != nil {
+		return err
+	}
+	profile, capabilityFlags, err := promptCapabilityProfile(reader, writer, profileDefault, values)
+	if err != nil {
+		return err
+	}
+	installSystemd, err := uiPrompt(reader, writer, "Write/update an inactive systemd user unit?", "n")
+	if err != nil {
+		return err
+	}
+
+	setupArgs := []string{"--config", configPath, "--relay", relay, "--device", device, "--profile", profile}
+	if configExists {
+		setupArgs = append(setupArgs, "--force")
+	}
+	if len(roots) > 1 && root == rootDefault {
+		for _, existingRoot := range roots {
+			setupArgs = append(setupArgs, "--root", existingRoot)
+		}
+	} else {
+		setupArgs = append(setupArgs, "--root", root)
+	}
+	if identity := values.String("", "agent.identity"); identity != "" {
+		setupArgs = append(setupArgs, "--identity", identity)
+	}
+	if credentials := values.String("", "agent.credentials"); credentials != "" {
+		setupArgs = append(setupArgs, "--credentials", credentials)
+	}
+	if stateDir := values.String("", "agent.state_dir"); stateDir != "" {
+		setupArgs = append(setupArgs, "--state-dir", stateDir)
+	}
+	if sandbox := values.String("", "agent.exec_sandbox"); sandbox != "" {
+		setupArgs = append(setupArgs, "--exec-sandbox", sandbox)
+	}
+	if persist := values.String("", "agent.computer_persist"); persist != "" {
+		setupArgs = append(setupArgs, "--computer-persist", persist)
+	}
+	if killSwitch := values.String("", "agent.kill_switch_file"); killSwitch != "" {
+		setupArgs = append(setupArgs, "--kill-switch-file", killSwitch)
+	}
+	if _, ok := values.Raw("agent.max_active_tasks"); ok {
+		setupArgs = append(setupArgs, "--max-active-tasks", fmt.Sprint(values.Int(32, "agent.max_active_tasks")))
+	}
 	setupArgs = append(setupArgs, capabilityFlags...)
 	if strings.EqualFold(installSystemd, "y") || strings.EqualFold(installSystemd, "yes") {
 		setupArgs = append(setupArgs, "--install-systemd")
@@ -181,6 +512,7 @@ func runAgentSetup(args []string) error {
 	fs.Var(roots, "root", "allowed filesystem root (repeatable)")
 	stateDir := fs.String("state-dir", defaultAgentStateDir(), "agent state directory")
 	identityPath := fs.String("identity", "", "Ed25519 device identity path; generated under the state directory when omitted")
+	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	allowFileWrite := fs.Bool("allow-file-write", false, "allow filesystem/checkpoint writes")
 	allowExec := fs.Bool("allow-exec", false, "allow PTY shell execution")
 	execSandbox := fs.String("exec-sandbox", "none", "none or landlock")
@@ -301,6 +633,10 @@ func runAgentSetup(args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --config: %w", err)
 	}
+	*credentials, err = normalizeUserPath(*credentials)
+	if err != nil {
+		return fmt.Errorf("invalid --credentials: %w", err)
+	}
 	if strings.TrimSpace(*killSwitchPath) != "" {
 		*killSwitchPath, err = normalizeUserPath(*killSwitchPath)
 		if err != nil {
@@ -324,7 +660,7 @@ func runAgentSetup(args []string) error {
 		"agent.computer_persist":    strings.TrimSpace(*computerPersist),
 		"agent.max_active_tasks":    *maxActiveTasks,
 		"agent.kill_switch_file":    strings.TrimSpace(*killSwitchPath),
-		"agent.credentials":         oauthclient.DefaultCredentialsPath(),
+		"agent.credentials":         strings.TrimSpace(*credentials),
 	}
 	if err := writeConfigFile(*configPath, values, *force); err != nil {
 		return fmt.Errorf("write agent config: %w", err)
@@ -359,7 +695,7 @@ func runAgentSetup(args []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid --binary: %w", err)
 		}
-		readWritePaths := []string{*stateDir, filepath.Dir(oauthclient.DefaultCredentialsPath())}
+		readWritePaths := []string{*stateDir, filepath.Dir(*credentials)}
 		if *allowFileWrite {
 			readWritePaths = append(readWritePaths, (*roots)...)
 		}

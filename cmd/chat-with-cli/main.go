@@ -96,6 +96,8 @@ func main() {
 		err = runRollback(os.Args[2:])
 	case "login":
 		err = runLogin(os.Args[2:])
+	case "logout":
+		err = runLogout(os.Args[2:])
 	case "token":
 		fmt.Println(protocol.NewID() + protocol.NewID())
 	case "exec-sandbox":
@@ -134,7 +136,8 @@ Usage:
   chat-with-cli ui              Interactive terminal hub (also opens with no arguments)
   chat-with-cli agent [flags]   Connect this machine outbound to a relay
   chat-with-cli agent setup     Create agent config and optional user unit
-  chat-with-cli login [flags]   Explicit browser OAuth login (normally unnecessary)
+  chat-with-cli login [flags]   Explicit browser OAuth login / re-authorization
+  chat-with-cli logout [flags]  Revoke this workstation OAuth session and remove local credentials
   chat-with-cli doctor [flags]  Check relay, OAuth, MCP, and local prerequisites
   chat-with-cli status          Show local configuration/service status
   chat-with-cli update          Review or apply a verified atomic binary update
@@ -1007,7 +1010,19 @@ func runConnect(args []string) error {
 	if err != nil {
 		return err
 	}
-	return runAgentCommand("connect", append([]string{"--approval-mode=" + mode}, args...))
+	connectArgs := append([]string{"--approval-mode=" + mode}, args...)
+	err = runAgentCommand("connect", connectArgs)
+	if !oauthclient.IsHTTPStatus(err, http.StatusGone) && !agent.IsChallengeHTTPStatus(err, http.StatusGone) {
+		return err
+	}
+	configPath := configPathFromArgs(args)
+	fmt.Fprintln(os.Stderr, "The Relay reports that this device identity was permanently revoked. Rotating the local device identity and starting OAuth again...")
+	oldID, newID, rotateErr := rotateRetiredAgentIdentity(configPath)
+	if rotateErr != nil {
+		return fmt.Errorf("recover permanently revoked device identity: %w", rotateErr)
+	}
+	fmt.Fprintf(os.Stderr, "Replaced retired device identity %s with %s. Browser OAuth will re-authorize this workstation.\n", oldID, newID)
+	return runAgentCommand("connect", connectArgs)
 }
 
 func chooseConnectApprovalMode() (string, error) {
@@ -1290,6 +1305,13 @@ func runAgentCommand(command string, args []string) error {
 		}
 		manager := &oauthclient.Manager{RelayURL: *relayURL, Device: *device, DeviceID: *deviceID, DeviceIdentity: deviceIdentity, CredentialsPath: *credentials}
 		client.TokenProvider = manager.Token
+		client.TokenRejected = func(context.Context) error {
+			_, err := manager.Forget()
+			if err == nil {
+				log.Printf("saved Agent OAuth credential was rejected by the Relay; starting browser OAuth")
+			}
+			return err
+		}
 		log.Printf("Agent authentication: browser OAuth (credentials: %s)", *credentials)
 	}
 	log.Printf("agent %q connecting to %s", *device, *relayURL)
@@ -1392,10 +1414,49 @@ func runLogin(args []string) error {
 	}
 	ctx, cancel := signalContext()
 	defer cancel()
-	if _, err := manager.Token(ctx); err != nil {
+	if _, err := manager.Login(ctx); err != nil {
+		if oauthclient.IsHTTPStatus(err, http.StatusGone) && !flagWasSet(fs, "device-id") && !flagWasSet(fs, "identity") {
+			fmt.Fprintln(os.Stderr, "The Relay reports that this device identity was permanently revoked. Rotating the local device identity and restarting browser OAuth...")
+			oldID, newID, rotateErr := rotateRetiredAgentIdentity(*configPath)
+			if rotateErr != nil {
+				return fmt.Errorf("recover permanently revoked device identity: %w", rotateErr)
+			}
+			fmt.Fprintf(os.Stderr, "Replaced retired device identity %s with %s.\n", oldID, newID)
+			return runLogin(args)
+		}
 		return err
 	}
 	fmt.Printf("Authorized %s via browser OAuth.\nAgent resource: %s\nCredentials saved to %s\n", *device, resource, *credentials)
+	return nil
+}
+
+func runLogout(args []string) error {
+	fs := flag.NewFlagSet("logout", flag.ContinueOnError)
+	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("logout does not accept positional arguments")
+	}
+	auth, err := configuredOAuthFromFile(*configPath)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	removed, revokeErr := auth.Manager.Logout(ctx)
+	if removed {
+		fmt.Printf("Removed local OAuth credential for %s.\n", auth.Device)
+	} else {
+		fmt.Printf("No local OAuth credential was saved for %s.\n", auth.Device)
+	}
+	if revokeErr != nil {
+		return fmt.Errorf("local logout completed, but Relay token revocation could not be confirmed: %w", revokeErr)
+	}
+	if removed {
+		fmt.Println("Relay token family revoked. This workstation will require OAuth before reconnecting.")
+	}
 	return nil
 }
 

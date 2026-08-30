@@ -25,6 +25,7 @@ type Client struct {
 	DeviceID         string
 	Token            string
 	TokenProvider    func(context.Context) (string, error)
+	TokenRejected    func(context.Context) error
 	AuthorizeRequest func(context.Context, protocol.Request) error
 	OnToolCall       ToolCallObserver
 	Identity         *deviceidentity.Identity
@@ -87,6 +88,19 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 			challenge, proofErr := fetchAgentChallenge(ctx, resource, token)
 			if proofErr != nil {
+				var statusErr *ChallengeHTTPError
+				if errors.As(proofErr, &statusErr) {
+					if statusErr.StatusCode == http.StatusUnauthorized && c.TokenProvider != nil && c.TokenRejected != nil {
+						if resetErr := c.TokenRejected(ctx); resetErr != nil {
+							return fmt.Errorf("discard rejected Agent OAuth credential: %w", resetErr)
+						}
+						backoff = time.Second
+						continue
+					}
+					if statusErr.StatusCode == http.StatusGone {
+						return fmt.Errorf("obtain Agent device challenge: %w", proofErr)
+					}
+				}
 				err = fmt.Errorf("obtain Agent device challenge: %w", proofErr)
 			} else {
 				proof, signErr := c.Identity.SignProof(resource, token, challenge)
@@ -133,6 +147,19 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
+type ChallengeHTTPError struct {
+	StatusCode int
+}
+
+func (e *ChallengeHTTPError) Error() string {
+	return fmt.Sprintf("challenge endpoint returned HTTP %d", e.StatusCode)
+}
+
+func IsChallengeHTTPStatus(err error, status int) bool {
+	var target *ChallengeHTTPError
+	return errors.As(err, &target) && target.StatusCode == status
+}
+
 func fetchAgentChallenge(ctx context.Context, resource, token string) (string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -149,7 +176,7 @@ func fetchAgentChallenge(ctx context.Context, resource, token string) (string, e
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("challenge endpoint returned HTTP %d", resp.StatusCode)
+		return "", &ChallengeHTTPError{StatusCode: resp.StatusCode}
 	}
 	var payload struct {
 		Challenge string `json:"challenge"`

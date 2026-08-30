@@ -202,3 +202,64 @@ func TestManagerResourceCanonicalizesDeviceIDCase(t *testing.T) {
 		t.Fatalf("resource=%q", resource)
 	}
 }
+
+func TestExplicitLoginReauthorizesAndLogoutRevokesExactResource(t *testing.T) {
+	oauth, base, cleanup := startTestOAuthServer(t, oauthserver.ModePrivate)
+	defer cleanup()
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	manager := &Manager{
+		RelayURL: base, Device: "login-device", DeviceID: identity.ID(), DeviceIdentity: identity, CredentialsPath: path,
+		OpenBrowser: loginBrowser(t, "owner", "owner-password-123456", "login", &calls),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	first, err := manager.Token(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("initial browser calls=%d", calls)
+	}
+	second, err := manager.Login(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("explicit Login reused cache; browser calls=%d want=2", calls)
+	}
+	if second == "" || second == first {
+		t.Fatal("explicit Login did not replace the access token")
+	}
+	resource, _ := manager.Resource()
+	store, err := loadStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherResource := base + "/agent/id/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store.Profiles[otherResource] = Credential{Issuer: base, Resource: otherResource, AccessToken: "other", RefreshToken: "other-refresh", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	if err := saveStore(path, store); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := manager.Logout(ctx)
+	if err != nil || !removed {
+		t.Fatalf("Logout removed=%v err=%v", removed, err)
+	}
+	if oauth.VerifyAccessScope(second, resource, "agent:connect") {
+		t.Fatal("Logout left the current access token family active")
+	}
+	store, err = loadStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Profiles[resource]; ok {
+		t.Fatal("Logout left current resource in local credential store")
+	}
+	if _, ok := store.Profiles[otherResource]; !ok {
+		t.Fatal("Logout removed another device resource")
+	}
+}

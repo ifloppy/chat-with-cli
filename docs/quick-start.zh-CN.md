@@ -10,7 +10,11 @@ chat-with-cli ui
 如果使用自建 Relay，在交互式设置中输入它的 HTTPS 地址；如果直接使用命令，传入
 `--relay`。不传时默认 Relay 是 `https://chat-with-cli.iruanp.com`。
 
-## 2. 创建只读 Agent
+## 2. 连接这台工作站
+
+在交互界面直接选择 **Connect this workstation**。首次使用时，它会在同一条流程中完成本机配置，然后在需要时打开 OAuth 并建立 Agent 连接；不需要先“Setup”再回主菜单点“Connect”。需要修改已有 root/profile 等设置时，使用 **Workstation settings**。**Account** 菜单会显示 OAuth 状态，并提供 Login / Logout。
+
+也可以继续使用等价的命令行方式：
 
 ```bash
 chat-with-cli agent setup \
@@ -22,13 +26,13 @@ chat-with-cli agent setup \
 
 `--root` 应该是最小的工作目录。命令会生成设备 Ed25519 身份、Agent 配置和一个未启动的 systemd 用户服务。
 
-## 3. 登录并连接
+## 3. OAuth 与连接
 
 ```bash
 chat-with-cli connect
 ```
 
-浏览器会自动打开 OAuth 页面。前台连接时可以选择每次请求审批、当前进程全部允许，或仅使用配置文件中的权限。需要后台运行前，请先审阅生成的 unit：
+缺少、过期或被 Relay 拒绝的凭据会自动触发 OAuth；远端撤销了仍未过期的本地 token 时也不会再无限重试旧 token。显式 `chat-with-cli login` 会强制重新走浏览器 OAuth，`chat-with-cli logout` 会撤销当前工作站的 token family 并仅删除这台设备的本地凭据。若设备 identity 已被永久 Revoke，交互式 Connect 会保留旧 revoked key、生成新的 Ed25519 identity/immutable ID、更新配置后再进入 OAuth。前台连接时可以选择每次请求审批、当前进程全部允许，或仅使用配置文件中的权限。需要后台运行前，请先审阅生成的 unit：
 
 前台 `connect`/`agent` 启动时会打印完整的 31 项 MCP 工具清单和本地能力摘要；每次入站工具调用也会按名称显示，即使选择“全部允许”（`--approval-mode=allow-all`）也不会关闭这条审计输出。参数、文件内容、命令和结果不会打印。
 

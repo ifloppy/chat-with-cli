@@ -3042,9 +3042,15 @@ func (s *Server) AgentChallengeHandler() http.Handler {
 			return
 		}
 		s.mu.Lock()
+		retired := s.retiredDevices[device]
 		enabled := s.resourceEnabledLocked(resource, "agent:connect")
 		record := s.deviceRecords[device]
 		s.mu.Unlock()
+		if retired {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "device identity permanently retired", http.StatusGone)
+			return
+		}
 		if !enabled {
 			http.Error(w, "capability disabled", http.StatusServiceUnavailable)
 			return

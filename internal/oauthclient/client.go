@@ -91,6 +91,98 @@ func (m *Manager) Resource() (string, error) {
 	return base + "/agent/" + url.PathEscape(device), nil
 }
 
+// Login always performs a fresh browser OAuth authorization for this exact
+// device resource, replacing any locally cached credential only after success.
+func (m *Manager) Login(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	resource, err := m.Resource()
+	if err != nil {
+		return "", err
+	}
+	path := m.CredentialsPath
+	if path == "" {
+		path = DefaultCredentialsPath()
+	}
+	client := m.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	cred, err := m.browserAuthorize(ctx, client, resource)
+	if err != nil {
+		return "", err
+	}
+	err = withCredentialStoreLock(path, func() error {
+		store, err := loadStore(path)
+		if err != nil {
+			return err
+		}
+		store.Profiles[resource] = cred
+		return saveStore(path, store)
+	})
+	if err != nil {
+		return "", err
+	}
+	return cred.AccessToken, nil
+}
+
+// Forget removes only this device resource from the local credential store.
+func (m *Manager) Forget() (bool, error) {
+	resource, err := m.Resource()
+	if err != nil {
+		return false, err
+	}
+	return DeleteCredential(m.CredentialsPath, resource)
+}
+
+// Logout revokes the current token family at the Relay when possible and then
+// removes the exact local device credential. A remote revocation error is
+// returned after local cleanup so callers can report the distinction clearly.
+func (m *Manager) Logout(ctx context.Context) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resource, err := m.Resource()
+	if err != nil {
+		return false, err
+	}
+	path := m.CredentialsPath
+	if path == "" {
+		path = DefaultCredentialsPath()
+	}
+	cred, found, err := LoadCredential(path, resource)
+	if err != nil {
+		return false, err
+	}
+	var revokeErr error
+	if found {
+		token := cred.AccessToken
+		if token == "" {
+			token = cred.RefreshToken
+		}
+		if token != "" {
+			base, baseErr := normalizeRelay(m.RelayURL)
+			if baseErr != nil {
+				revokeErr = baseErr
+			} else {
+				client := m.HTTPClient
+				if client == nil {
+					client = http.DefaultClient
+				}
+				revokeErr = postForm(ctx, client, base+"/oauth/revoke", url.Values{"token": {token}})
+			}
+		}
+	}
+	removed, removeErr := DeleteCredential(path, resource)
+	if removeErr != nil {
+		return removed, removeErr
+	}
+	return removed, revokeErr
+}
+
 func (m *Manager) Token(ctx context.Context) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()

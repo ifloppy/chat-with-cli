@@ -44,7 +44,9 @@ process, and environment access. Landlock is filesystem-only defense in depth.
 
 ## OAuth and device identity
 
-`login` performs browser OAuth with PKCE S256. The local fallback store is
+`login` explicitly performs a fresh browser OAuth authorization with PKCE S256;
+`logout` revokes the current workstation token family at the Relay and removes
+only that exact local device credential. The local fallback store is
 `~/.config/chat-with-cli/credentials.json`, mode 0600 under a 0700 directory.
 It contains raw access/refresh tokens for unattended reconnects, but never the
 Relay account password. Deleting it removes local credentials; the Relay admin
@@ -56,7 +58,14 @@ credential before every brokered RPC.
 
 `agent setup` also creates a 0600 Ed25519 identity file and stores its path in
 the config. The immutable device ID is derived from that public key rather than
-chosen independently. For normal foreground use, run `chat-with-cli connect`; it performs browser OAuth automatically when credentials are missing or expired. `chat-with-cli login` remains available for explicit pre-authorization.
+chosen independently. For normal foreground use, run `chat-with-cli connect`; it
+refreshes credentials and automatically opens browser OAuth when credentials are
+missing, expired, or rejected by the Relay. If the Relay reports HTTP 410 because
+the device identity was permanently revoked, interactive `connect` preserves the
+retired key, generates a fresh Ed25519 identity and immutable ID, updates the
+config, and starts OAuth for the replacement identity. Explicit `chat-with-cli
+login` remains available when re-authorization is desired even while the current
+credential is still valid.
 Before DCR, the CLI obtains a short-lived one-time registration challenge from
 the Relay, signs it with the device private key, and submits that proof with
 the DCR request. Device-bound Agent DCR accepts only loopback HTTP callbacks;

@@ -3,10 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ifloppy/chat-with-cli/internal/config"
+	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 )
 
 func TestDefaultRelayAndRewardEndpointValidation(t *testing.T) {
@@ -56,7 +60,7 @@ func TestCapabilityProfileAliasesAndSingleLetters(t *testing.T) {
 
 func TestPromptCapabilityProfileAllAndCustom(t *testing.T) {
 	var out bytes.Buffer
-	profile, flags, err := promptCapabilityProfile(bufio.NewReader(strings.NewReader("a\n")), &out)
+	profile, flags, err := promptCapabilityProfile(bufio.NewReader(strings.NewReader("a\n")), &out, "read-only", config.Values{})
 	if err != nil || profile != "all" || len(flags) != 0 {
 		t.Fatalf("all profile=%q flags=%v err=%v", profile, flags, err)
 	}
@@ -67,7 +71,7 @@ func TestPromptCapabilityProfileAllAndCustom(t *testing.T) {
 	}
 
 	out.Reset()
-	profile, flags, err = promptCapabilityProfile(bufio.NewReader(strings.NewReader("c\ny\ny\nn\ny\ny\n")), &out)
+	profile, flags, err = promptCapabilityProfile(bufio.NewReader(strings.NewReader("c\ny\ny\nn\ny\ny\n")), &out, "read-only", config.Values{})
 	if err != nil || profile != "custom" {
 		t.Fatalf("custom profile=%q err=%v", profile, err)
 	}
@@ -107,5 +111,105 @@ func TestAgentSetupAllProfileEnablesEveryCapability(t *testing.T) {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("all profile config missing %q:\n%s", expected, text)
 		}
+	}
+}
+
+func TestRotateRetiredAgentIdentityPreservesOldKeyAndUpdatesConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	stateDir := filepath.Join(dir, "state")
+	credentials := filepath.Join(dir, "credentials.json")
+	if err := runAgentSetup([]string{
+		"--config", configPath, "--state-dir", stateDir, "--credentials", credentials,
+		"--relay", "https://relay.example.test", "--root", dir,
+		"--device", "rotate-device", "--profile", "A",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPath := before.String("", "agent.identity")
+	oldIdentity, err := deviceidentity.Load(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := oldIdentity.ID()
+	gotOld, newID, err := rotateRetiredAgentIdentity(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOld != oldID || newID == "" || newID == oldID {
+		t.Fatalf("rotation old=%q new=%q want old=%q and a fresh ID", gotOld, newID, oldID)
+	}
+	if preserved, err := deviceidentity.Load(oldPath); err != nil || preserved.ID() != oldID {
+		t.Fatalf("retired key was not preserved: identity=%v err=%v", preserved, err)
+	}
+	after, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.String("", "agent.device_id") != newID {
+		t.Fatalf("config device_id=%q want=%q", after.String("", "agent.device_id"), newID)
+	}
+	newPath := after.String("", "agent.identity")
+	if newPath == oldPath {
+		t.Fatal("rotation reused the permanently retired identity path")
+	}
+	newIdentity, err := deviceidentity.Load(newPath)
+	if err != nil || newIdentity.ID() != newID {
+		t.Fatalf("replacement identity invalid: id=%v err=%v", newIdentity, err)
+	}
+	for _, key := range []string{"agent.allow_file_write", "agent.allow_exec", "agent.allow_screen", "agent.allow_accessibility", "agent.allow_computer_use"} {
+		if !after.Bool(false, key) {
+			t.Fatalf("rotation lost capability %s", key)
+		}
+	}
+}
+
+func TestInteractiveSetupUpdatesExistingConfigInsteadOfFailing(t *testing.T) {
+	configHome := t.TempDir()
+	stateHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	configPath := filepath.Join(configHome, "chat-with-cli", "config.toml")
+	root := t.TempDir()
+	if err := runAgentSetup([]string{
+		"--config", configPath,
+		"--state-dir", filepath.Join(stateHome, "chat-with-cli"),
+		"--relay", "https://relay.example.test",
+		"--root", root,
+		"--device", "existing-device",
+		"--profile", "A",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := before.String("", "agent.device_id")
+	var out bytes.Buffer
+	// Keep every existing default and decline systemd generation.
+	if err := interactiveAgentSetup(bufio.NewReader(strings.NewReader("\n\n\n\n\n")), &out); err != nil {
+		t.Fatalf("interactive update failed: %v\n%s", err, out.String())
+	}
+	after, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.String("", "agent.device_id") != oldID {
+		t.Fatalf("settings update unexpectedly rotated identity: before=%q after=%q", oldID, after.String("", "agent.device_id"))
+	}
+	if after.String("", "agent.profile") != "all" || !after.Bool(false, "agent.allow_computer_use") {
+		t.Fatalf("settings update lost profile/capabilities: %#v", after)
+	}
+}
+
+func TestAccountSessionStatusExplainsPermanentlyRevokedIdentity(t *testing.T) {
+	status := accountSessionDescriptionForHTTPStatus(http.StatusGone)
+	if !strings.Contains(status, "permanently revoked") || !strings.Contains(status, "OAuth") {
+		t.Fatalf("revoked account status=%q", status)
 	}
 }

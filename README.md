@@ -13,9 +13,12 @@ Computer Use controls.
 > Review [SECURITY.md](SECURITY.md) before exposing a Relay publicly.
 
 After installation, run `chat-with-cli ui` (or simply `chat-with-cli` in an
-interactive terminal) to open the terminal hub. It guides first-time setup,
-uses `https://chat-with-cli.iruanp.com` as the default public Relay, and lets
-you run connection diagnostics without memorising subcommands. Pass
+interactive terminal) to open the terminal hub. **Connect this workstation** is
+the normal entry point: on first use it creates the local configuration, opens
+browser OAuth when needed, and then connects the Agent. The Account menu shows
+the current OAuth state and provides explicit Login / Logout actions. The hub
+uses `https://chat-with-cli.iruanp.com` as the default public Relay and also
+exposes workstation settings and diagnostics without memorising subcommands. Pass
 `--relay https://your-relay.example` whenever you want to use another Relay.
 
 ## Five-minute quick start
@@ -51,8 +54,9 @@ Read the one-time setup token from the local file path printed by `relay
 setup`, open `https://cli.example.com/setup`, and create the owner account.
 The setup page is disabled after the first administrator is created.
 
-On the workstation, install the checksum-verified release, create a default
-read-only Agent profile, and connect it. `connect` automatically opens browser
+On the workstation, install the checksum-verified release and run `chat-with-cli`.
+The interactive **Connect this workstation** path performs first-time setup and
+connection as one flow. `connect` automatically refreshes OAuth or opens browser
 OAuth when needed. In a foreground terminal it then asks whether to use
 interactive local approvals, allow all capabilities for this process only, or
 stay with the configured profile:

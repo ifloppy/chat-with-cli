@@ -211,3 +211,25 @@ func LoadCredential(path, resource string) (Credential, bool, error) {
 	credential, ok := store.Profiles[resource]
 	return credential, ok, nil
 }
+
+// DeleteCredential removes only the credential bound to one exact OAuth resource.
+// Other devices and Relay profiles in the same store are preserved.
+func DeleteCredential(path, resource string) (bool, error) {
+	if path == "" {
+		path = DefaultCredentialsPath()
+	}
+	var removed bool
+	err := withCredentialStoreLock(path, func() error {
+		store, err := loadStore(path)
+		if err != nil {
+			return err
+		}
+		if _, ok := store.Profiles[resource]; !ok {
+			return nil
+		}
+		delete(store.Profiles, resource)
+		removed = true
+		return saveStore(path, store)
+	})
+	return removed, err
+}

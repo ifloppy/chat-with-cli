@@ -224,3 +224,112 @@ func TestToolCallObserverRunsWithoutAuthorization(t *testing.T) {
 		t.Fatalf("unexpected engine error: %q", resp.Error)
 	}
 }
+
+func TestRejectedCachedOAuthTokenIsDiscardedBeforeReconnect(t *testing.T) {
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const challenge = "fresh-challenge-for-token-recovery-1234567890"
+	verified := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if strings.HasSuffix(r.URL.Path, "/challenge") {
+			if token == "stale-token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if token != "fresh-token" {
+				http.Error(w, "unexpected token", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"challenge": challenge, "expires_in": 30})
+			return
+		}
+		resource := "http://" + r.Host + r.URL.EscapedPath()
+		if token != "fresh-token" || !deviceidentity.VerifyProof(identity.PublicKey(), resource, deviceidentity.TokenFingerprint(token), challenge, r.Header.Get(deviceidentity.HeaderProof)) {
+			http.Error(w, "bad proof", http.StatusUnauthorized)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		select {
+		case verified <- struct{}{}:
+		default:
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "verified")
+	}))
+	defer server.Close()
+
+	eng, err := engine.New(engine.Config{Roots: []string{t.TempDir()}, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	current := "stale-token"
+	rejected := 0
+	providerCalls := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &Client{
+		Engine: eng, URL: server.URL, Device: "recovery-device", DeviceID: identity.ID(), Identity: identity,
+		TokenProvider: func(context.Context) (string, error) {
+			providerCalls++
+			return current, nil
+		},
+		TokenRejected: func(context.Context) error {
+			rejected++
+			current = "fresh-token"
+			return nil
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+	select {
+	case <-verified:
+		cancel()
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("Agent did not retry with a fresh OAuth token")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Agent did not stop after cancellation")
+	}
+	if rejected != 1 || providerCalls < 2 {
+		t.Fatalf("rejected=%d providerCalls=%d", rejected, providerCalls)
+	}
+}
+
+func TestRetiredDeviceChallengeStopsForIdentityRotation(t *testing.T) {
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/challenge") {
+			http.Error(w, "retired", http.StatusGone)
+			return
+		}
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	eng, err := engine.New(engine.Config{Roots: []string{t.TempDir()}, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	client := &Client{
+		Engine: eng, URL: server.URL, Device: "retired-device", DeviceID: identity.ID(), Identity: identity,
+		TokenProvider: func(context.Context) (string, error) { return "cached-token", nil },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = client.Run(ctx)
+	if !IsChallengeHTTPStatus(err, http.StatusGone) {
+		t.Fatalf("retired device error=%v, want detectable HTTP 410", err)
+	}
+}
