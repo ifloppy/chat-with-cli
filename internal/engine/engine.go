@@ -85,11 +85,11 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.ExecSandbox == "" {
 		cfg.ExecSandbox = "none"
 	}
-	if cfg.ExecSandbox != "none" && cfg.ExecSandbox != "landlock" {
+	if cfg.ExecSandbox != "none" && cfg.ExecSandbox != "landlock" && cfg.ExecSandbox != "protected" {
 		return nil, fmt.Errorf("unsupported exec sandbox %q", cfg.ExecSandbox)
 	}
-	if cfg.ExecSandbox == "landlock" && runtime.GOOS != "linux" {
-		return nil, errors.New("the Landlock exec sandbox is supported on Linux only")
+	if (cfg.ExecSandbox == "landlock" || cfg.ExecSandbox == "protected") && runtime.GOOS != "linux" {
+		return nil, errors.New("the selected exec sandbox is supported on Linux only")
 	}
 	mode, err := normalizeComputerPersistMode(cfg.ComputerPersistMode)
 	if err != nil {
@@ -373,7 +373,7 @@ func (e *Engine) ValidateExecConfiguration() error {
 	}
 	for _, root := range e.roots {
 		if e.rootTouchesProtectedPath(root) {
-			return fmt.Errorf("Landlock root %q contains chat-with-cli private state; choose a narrower root or disable shell execution", root)
+			return fmt.Errorf("Landlock root %q contains chat-with-cli private state; choose a narrower root, protected shell mode, or full user access", root)
 		}
 	}
 	return nil

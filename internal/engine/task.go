@@ -128,10 +128,18 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	id := protocol.NewID()
 	logPath := filepath.Join(m.dir, id+".log")
 	tempDir := ""
-	if m.engine.cfg.ExecSandbox == "landlock" {
+	switch m.engine.cfg.ExecSandbox {
+	case "landlock":
 		tempDir = filepath.Join(m.dir, id+".tmp")
 		if err := os.Mkdir(tempDir, 0o700); err != nil {
 			return TaskInfo{}, fmt.Errorf("create private task temp directory: %w", err)
+		}
+	case "protected":
+		// Keep the wrapper's scratch area outside the protected state tree so
+		// bubblewrap can mask that tree without hiding TMPDIR from the child.
+		tempDir, err = os.MkdirTemp("", ".chat-with-cli-task-*")
+		if err != nil {
+			return TaskInfo{}, fmt.Errorf("create protected-shell temporary directory: %w", err)
 		}
 	}
 	cleanupTemp := func() {
@@ -171,11 +179,12 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 		cmd.Env = setEnv(cmd.Env, "TMPDIR", tempDir)
 		cmd.Env = setEnv(cmd.Env, "TMP", tempDir)
 		cmd.Env = setEnv(cmd.Env, "TEMP", tempDir)
+	}
+	if m.engine.cfg.ExecSandbox == "landlock" {
 		// A Landlock child cannot read the operator's real home directory. Give
 		// common tools a private synthetic home so git, Go, npm, and similar
 		// tooling do not fail while probing private dotfiles or caches outside
-		// the workspace. The directory is already granted to the child and is
-		// removed when the task finishes.
+		// the workspace. Protected-shell mode intentionally keeps the real HOME.
 		cmd.Env = setEnv(cmd.Env, "HOME", tempDir)
 		cmd.Env = setEnv(cmd.Env, "USERPROFILE", tempDir)
 		cmd.Env = setEnv(cmd.Env, "XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
@@ -512,8 +521,11 @@ func shellCommand(command string) *exec.Cmd {
 }
 
 func (e *Engine) command(command, cwd, tempDir string) (*exec.Cmd, error) {
-	if e.cfg.ExecSandbox == "none" {
+	switch e.cfg.ExecSandbox {
+	case "none":
 		return shellCommand(command), nil
+	case "protected":
+		return e.protectedShellCommand(command, cwd, tempDir)
 	}
 	if err := e.ValidateExecConfiguration(); err != nil {
 		return nil, err
@@ -538,6 +550,79 @@ func (e *Engine) command(command, cwd, tempDir string) (*exec.Cmd, error) {
 		args = append(args, "--", "/bin/sh", "-lc", command)
 	}
 	return exec.Command(executable, args...), nil
+}
+
+func (e *Engine) protectedShellCommand(command, cwd, tempDir string) (*exec.Cmd, error) {
+	if runtime.GOOS != "linux" {
+		return nil, errors.New("protected shell mode is supported on Linux only")
+	}
+	if strings.TrimSpace(tempDir) == "" {
+		return nil, errors.New("protected shell mode requires a private temporary directory")
+	}
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		return nil, errors.New("protected shell mode requires bubblewrap (bwrap)")
+	}
+	maskDir := filepath.Join(tempDir, "masked-directory")
+	maskFile := filepath.Join(tempDir, "masked-file")
+	if err := os.Mkdir(maskDir, 0o000); err != nil {
+		return nil, fmt.Errorf("create protected directory mask: %w", err)
+	}
+	if err := os.WriteFile(maskFile, nil, 0o000); err != nil {
+		return nil, fmt.Errorf("create protected file mask: %w", err)
+	}
+
+	// This mode intentionally preserves the operator's normal filesystem
+	// authority and real HOME. Bubblewrap is used only to create a private
+	// mount/PID namespace so selected Chat with CLI private paths can be
+	// over-mounted with inaccessible empty placeholders.
+	args := []string{
+		"--die-with-parent", "--unshare-pid",
+		"--bind", "/", "/",
+		"--proc", "/proc",
+		"--dev-bind", "/dev", "/dev",
+	}
+	for _, protected := range minimalProtectedPaths(e.protected) {
+		info, statErr := os.Lstat(protected)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil {
+			return nil, fmt.Errorf("inspect protected shell path %s: %w", protected, statErr)
+		}
+		mask := maskFile
+		if info.IsDir() {
+			mask = maskDir
+		}
+		args = append(args, "--ro-bind", mask, protected)
+	}
+	args = append(args, "--chdir", cwd, "--", "/bin/sh", "-lc", command)
+	return exec.Command(bwrap, args...), nil
+}
+
+func minimalProtectedPaths(paths []string) []string {
+	ordered := append([]string(nil), paths...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if len(ordered[i]) == len(ordered[j]) {
+			return ordered[i] < ordered[j]
+		}
+		return len(ordered[i]) < len(ordered[j])
+	})
+	result := make([]string, 0, len(ordered))
+	for _, candidate := range ordered {
+		candidate = filepath.Clean(candidate)
+		covered := false
+		for _, parent := range result {
+			if pathWithin(parent, candidate) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			result = append(result, candidate)
+		}
+	}
+	return result
 }
 
 func setEnv(env []string, key, value string) []string {

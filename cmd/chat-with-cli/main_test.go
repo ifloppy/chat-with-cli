@@ -258,6 +258,20 @@ func TestRelayStreamableOptionsOnlyRelaxExplicitReverseProxyTopology(t *testing.
 	}
 }
 
+func TestAllowAllDoesNotChangeConfiguredShellBoundary(t *testing.T) {
+	write, execAllowed, screen, accessibility, computer := false, false, false, false, false
+	sandbox := "none"
+	if err := applyApprovalMode(approvalAllowAll, &write, &execAllowed, &screen, &accessibility, &computer); err != nil {
+		t.Fatal(err)
+	}
+	if !write || !execAllowed || !screen || !accessibility || !computer {
+		t.Fatal("allow-all did not expand every capability")
+	}
+	if sandbox != "none" {
+		t.Fatalf("allow-all changed shell boundary to %q", sandbox)
+	}
+}
+
 func TestEnvBoolDefault(t *testing.T) {
 	t.Setenv("CWC_TEST_BOOL", "")
 	if !envBoolDefault("CWC_TEST_BOOL", true) {

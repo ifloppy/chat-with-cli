@@ -27,7 +27,9 @@ Capabilities can also be selected separately:
 --root PATH                 repeat for allowed filesystem trees
 --allow-file-write          filesystem and checkpoint writes
 --allow-exec                arbitrary PTY shell commands
---exec-sandbox=landlock     Linux filesystem boundary for shell children
+--exec-sandbox=landlock     restrict shell filesystem access to workspace roots
+--exec-sandbox=protected    keep normal user filesystem access but mask Chat with CLI private paths (Linux + bubblewrap)
+--protected-path PATH       additionally hide this file/directory from filesystem tools and protected shell mode; repeatable
 --allow-screen              screenshots
 --allow-accessibility       AT-SPI semantic inspection
 --allow-computer-use        keyboard, pointer, semantic UI writes
@@ -38,15 +40,20 @@ Capabilities can also be selected separately:
 `agent setup` prints every configured filesystem root and warns when `/` or the
 whole home directory is exposed. Coding profiles use a project-like root by
 default. Interactive settings expose the shell boundary explicitly: `[L]` uses
-Landlock and `[F]` uses Full user access (`--exec-sandbox=none`). A Landlock
-configuration whose root overlaps private `chat-with-cli` state/configuration
-would make every task fail closed, so the interactive CLI offers to keep the
-broad root with Full user access or choose a narrower root. Non-interactive
-setup still rejects that internally inconsistent Landlock combination unless
-the operator explicitly selects `--exec-sandbox=none`. Read-only still means
+Landlock, `[P]` uses bubblewrap to preserve the normal user filesystem while
+masking Chat with CLI private paths, and `[F]` uses Full user access
+(`--exec-sandbox=none`). A broad HOME root cannot be represented as “allow parent
+but deny a child” by Landlock, so the interactive CLI recommends `[P]` for that
+case instead of rejecting the operator's desired root. Non-interactive setup
+still rejects an internally inconsistent Landlock combination; use
+`--exec-sandbox=protected` or `--exec-sandbox=none` explicitly. Read-only still means
 every readable file under the root can be returned to an authorized MCP client.
-A root is not a shell sandbox. Without Landlock, shell commands have the Agent
-user's normal filesystem, network, process, and environment access.
+A root is not a shell sandbox. Protected mode intentionally keeps the Agent
+user's normal filesystem authority and real HOME, but masks the configured
+private Chat with CLI paths inside a private mount/PID namespace. Additional
+operator-selected paths can be saved in `agent.protected_paths` or supplied with
+repeatable `--protected-path PATH`. Full mode has no shell filesystem filtering.
+Neither mode removes network/process authority.
 
 ## Coding file workflow
 

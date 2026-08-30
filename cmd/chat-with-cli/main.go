@@ -209,7 +209,7 @@ func addEngineFlags(fs *flag.FlagSet) (*stringList, *string, *bool, *bool, *stri
 	allowFileWrite := fs.Bool("allow-file-write", false, "allow filesystem and checkpoint writes inside allowed roots")
 	fs.BoolVar(allowFileWrite, "allow-fs-write", false, "alias for --allow-file-write")
 	allowExec := fs.Bool("allow-exec", false, "allow arbitrary shell commands in PTY tasks")
-	execSandbox := fs.String("exec-sandbox", "none", "exec boundary: none or landlock (Linux; only applies with --allow-exec)")
+	execSandbox := fs.String("exec-sandbox", "none", "exec boundary: none, landlock, or protected (Linux; only applies with --allow-exec)")
 	allowScreen := fs.Bool("allow-screen", false, "allow read-only desktop screenshots")
 	allowAccessibility := fs.Bool("allow-accessibility", false, "allow read-only AT-SPI accessibility inspection")
 	allowComputer := fs.Bool("allow-computer-use", false, "allow screenshots, accessibility writes, and keyboard/mouse control")
@@ -1207,6 +1207,21 @@ func manualOAuthCallbackPrompt(ctx context.Context, manual oauthclient.ManualAut
 	return line, nil
 }
 
+func applyApprovalMode(mode string, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer *bool) error {
+	switch mode {
+	case approvalConfigured:
+		return nil
+	case approvalAsk, approvalAllowAll:
+		// Temporary capability expansion changes capabilities only. The shell
+		// boundary is an independent operator choice and must never be silently
+		// upgraded from none/protected to Landlock.
+		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, true, true, true
+		return nil
+	default:
+		return fmt.Errorf("invalid --approval-mode %q; use configured, ask, or allow-all", mode)
+	}
+}
+
 func runAgent(args []string) error {
 	return runAgentCommand("agent", args)
 }
@@ -1222,6 +1237,8 @@ func runAgentCommand(command string, args []string) error {
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	configPath := fs.String("config", oauthclient.DefaultConfigPath(), "agent TOML configuration file")
 	identityPath := fs.String("identity", "", "Ed25519 device identity path")
+	extraProtectedPaths := new(stringList)
+	fs.Var(extraProtectedPaths, "protected-path", "additional path to hide from filesystem tools and protected shell mode (repeatable)")
 	manualOAuth := fs.Bool("manual-oauth", false, "use headless OAuth and paste the final callback URL instead of opening a local browser")
 	approvalMode := fs.String("approval-mode", approvalConfigured, "configured, ask, or allow-all; ask/allow-all temporarily expose all capabilities for this process")
 	if err := fs.Parse(args); err != nil {
@@ -1292,19 +1309,15 @@ func runAgentCommand(command string, args []string) error {
 	if !flagWasSet(fs, "identity") {
 		*identityPath = values.String(*identityPath, "agent.identity")
 	}
+	if !flagWasSet(fs, "protected-path") {
+		*extraProtectedPaths = values.Strings("agent.protected_paths")
+	}
 	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
 	}
 	*approvalMode = strings.ToLower(strings.TrimSpace(*approvalMode))
-	switch *approvalMode {
-	case approvalConfigured:
-	case approvalAsk, approvalAllowAll:
-		*allowFileWrite, *allowExec, *allowScreen, *allowAccessibility, *allowComputer = true, true, true, true, true
-		if runtime.GOOS == "linux" && strings.EqualFold(strings.TrimSpace(*execSandbox), "none") {
-			*execSandbox = "landlock"
-		}
-	default:
-		return fmt.Errorf("invalid --approval-mode %q; use configured, ask, or allow-all", *approvalMode)
+	if err := applyApprovalMode(*approvalMode, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
+		return err
 	}
 	applyCodingRootDefault(roots, *allowFileWrite, *allowExec)
 	*token = envOr(*token, "CHAT_WITH_CLI_AGENT_TOKEN")
@@ -1339,6 +1352,14 @@ func runAgentCommand(command string, args []string) error {
 			return fmt.Errorf("configured device ID %s does not match Ed25519 identity %s", *deviceID, derivedID)
 		}
 	}
+	for i, protectedPath := range *extraProtectedPaths {
+		normalized, normalizeErr := normalizeUserPath(protectedPath)
+		if normalizeErr != nil {
+			return fmt.Errorf("invalid --protected-path %q: %w", protectedPath, normalizeErr)
+		}
+		(*extraProtectedPaths)[i] = normalized
+	}
+
 	if strings.TrimSpace(*relayURL) == "" && *token == "" {
 		saved, ok, err := "", false, error(nil)
 		if *deviceID != "" {
@@ -1365,6 +1386,7 @@ func runAgentCommand(command string, args []string) error {
 	if *identityPath != "" {
 		protectedPaths = append(protectedPaths, *identityPath)
 	}
+	protectedPaths = append(protectedPaths, (*extraProtectedPaths)...)
 	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, protectedPaths, *maxActiveTasks)
 	if err != nil {
 		return err

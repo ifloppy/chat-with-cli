@@ -269,7 +269,7 @@ func interactiveConnectWorkstation(reader *bufio.Reader, writer io.Writer) error
 	}
 	if conflict != nil {
 		fmt.Fprintf(writer, "\nCurrent shell configuration needs an operator choice: %v\n", conflict)
-		fmt.Fprintln(writer, "Open Workstation settings now. Keep the broad root and choose [F] Full user access, or choose a narrower root for Landlock.")
+		fmt.Fprintln(writer, "Open Workstation settings now. Keep the broad root with [P] Protected-path filtering or [F] Full user access, or choose a narrower root for Landlock.")
 		choice, promptErr := uiPrompt(reader, writer, "Open Workstation settings now? (Y/n)", "y")
 		if promptErr != nil {
 			return promptErr
@@ -395,6 +395,9 @@ func rotateConfiguredAgentIdentity(configPath string) (string, string, error) {
 	for _, root := range values.Strings("agent.root") {
 		setupArgs = append(setupArgs, "--root", root)
 	}
+	for _, protectedPath := range values.Strings("agent.protected_paths") {
+		setupArgs = append(setupArgs, "--protected-path", protectedPath)
+	}
 	if value := values.String("", "agent.state_dir"); value != "" {
 		setupArgs = append(setupArgs, "--state-dir", value)
 	}
@@ -508,19 +511,25 @@ func promptExecSandbox(reader *bufio.Reader, writer io.Writer, current string) (
 		return "none", nil
 	}
 	fmt.Fprintln(writer, "  Shell execution boundary:")
-	fmt.Fprintln(writer, "  [L] Landlock sandbox   Restrict shell to workspace roots (recommended)")
-	fmt.Fprintln(writer, "  [F] Full user access  No shell sandbox; commands run with your user permissions")
+	fmt.Fprintln(writer, "  [L] Landlock sandbox      Restrict shell to workspace roots")
+	fmt.Fprintln(writer, "  [P] Protected-path filter Keep normal user filesystem access but mask Chat with CLI private paths")
+	fmt.Fprintln(writer, "  [F] Full user access      No shell filesystem filtering")
 	defaultChoice := "L"
-	if strings.EqualFold(strings.TrimSpace(current), "none") {
+	switch strings.ToLower(strings.TrimSpace(current)) {
+	case "protected":
+		defaultChoice = "P"
+	case "none":
 		defaultChoice = "F"
 	}
-	choice, err := uiPrompt(reader, writer, "Shell mode [L/F]", defaultChoice)
+	choice, err := uiPrompt(reader, writer, "Shell mode [L/P/F]", defaultChoice)
 	if err != nil {
 		return "", err
 	}
 	switch strings.ToLower(strings.TrimSpace(choice)) {
 	case "l", "landlock":
 		return "landlock", nil
+	case "p", "protected", "protected-path", "filtered":
+		return "protected", nil
 	case "f", "full", "none", "unrestricted":
 		return "none", nil
 	default:
@@ -534,6 +543,7 @@ func configuredPrivatePaths(values config.Values, configPath string) []string {
 	identity := values.String(deviceidentity.DefaultPath(stateDir), "agent.identity")
 	killSwitch := values.String("", "agent.kill_switch_file")
 	paths := []string{stateDir, configPath, credentials, identity, killSwitch}
+	paths = append(paths, values.Strings("agent.protected_paths")...)
 	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
 		paths = append(paths, filepath.Join(configDir, "chat-with-cli"))
 	}
@@ -603,14 +613,17 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	if allowExecSelected && sandbox == "landlock" {
 		if conflict := validateAgentLandlockRoots(candidateRoots, true, sandbox, configuredPrivatePaths(values, configPath)...); conflict != nil {
 			fmt.Fprintf(writer, "\n  Landlock cannot be used with the selected broad root because it overlaps Chat with CLI private state.\n")
-			fmt.Fprintln(writer, "  [F] Keep this root and use Full user access (no shell sandbox)")
+			fmt.Fprintln(writer, "  [P] Keep this root and mask Chat with CLI private paths (recommended for a broad HOME)")
+			fmt.Fprintln(writer, "  [F] Keep this root with Full user access and no shell path filtering")
 			fmt.Fprintln(writer, "  [N] Choose a narrower workspace root and keep Landlock")
 			fmt.Fprintln(writer, "  [C] Cancel")
-			choice, promptErr := uiPrompt(reader, writer, "Resolve shell boundary [F/N/C]", "F")
+			choice, promptErr := uiPrompt(reader, writer, "Resolve shell boundary [P/F/N/C]", "P")
 			if promptErr != nil {
 				return promptErr
 			}
 			switch strings.ToLower(strings.TrimSpace(choice)) {
+			case "p", "protected":
+				sandbox = "protected"
 			case "f", "full":
 				sandbox = "none"
 			case "n", "narrow":
@@ -651,6 +664,9 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	if stateDir := values.String("", "agent.state_dir"); stateDir != "" {
 		setupArgs = append(setupArgs, "--state-dir", stateDir)
 	}
+	for _, protectedPath := range values.Strings("agent.protected_paths") {
+		setupArgs = append(setupArgs, "--protected-path", protectedPath)
+	}
 	setupArgs = append(setupArgs, "--exec-sandbox", sandbox)
 	if persist := values.String("", "agent.computer_persist"); persist != "" {
 		setupArgs = append(setupArgs, "--computer-persist", persist)
@@ -678,12 +694,14 @@ func runAgentSetup(args []string) error {
 	profile := fs.String("profile", "read-only", "read-only, read-write, desktop-computer-use, all, or custom (legacy developer/computer-use aliases accepted)")
 	roots := new(stringList)
 	fs.Var(roots, "root", "allowed filesystem root (repeatable)")
+	protectedPaths := new(stringList)
+	fs.Var(protectedPaths, "protected-path", "additional path to hide from filesystem tools and protected shell mode (repeatable)")
 	stateDir := fs.String("state-dir", defaultAgentStateDir(), "agent state directory")
 	identityPath := fs.String("identity", "", "Ed25519 device identity path; generated under the state directory when omitted")
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
 	allowFileWrite := fs.Bool("allow-file-write", false, "allow filesystem/checkpoint writes")
 	allowExec := fs.Bool("allow-exec", false, "allow PTY shell execution")
-	execSandbox := fs.String("exec-sandbox", "none", "none or landlock")
+	execSandbox := fs.String("exec-sandbox", "none", "none, landlock, or protected")
 	allowScreen := fs.Bool("allow-screen", false, "allow read-only screenshot capture")
 	allowAccessibility := fs.Bool("allow-accessibility", false, "allow read-only AT-SPI accessibility inspection")
 	allowComputer := fs.Bool("allow-computer-use", false, "allow computer input/control")
@@ -755,8 +773,17 @@ func runAgentSetup(args []string) error {
 	if !*allowExec {
 		*execSandbox = "none"
 	}
-	if strings.ToLower(strings.TrimSpace(*execSandbox)) != "none" && strings.ToLower(strings.TrimSpace(*execSandbox)) != "landlock" {
+	sandboxMode := strings.ToLower(strings.TrimSpace(*execSandbox))
+	if sandboxMode != "none" && sandboxMode != "landlock" && sandboxMode != "protected" {
 		return fmt.Errorf("invalid exec sandbox %q", *execSandbox)
+	}
+	if sandboxMode == "protected" {
+		if runtime.GOOS != "linux" {
+			return errors.New("protected shell mode is supported on Linux only")
+		}
+		if _, err := exec.LookPath("bwrap"); err != nil {
+			return errors.New("protected shell mode requires bubblewrap (bwrap); install bubblewrap or choose full/Landlock mode")
+		}
 	}
 	if len(*roots) == 0 {
 		*roots = append(*roots, recommendedWorkspaceRoot())
@@ -797,7 +824,15 @@ func runAgentSetup(args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --identity: %w", err)
 	}
+	for i, protectedPath := range *protectedPaths {
+		normalized, normalizeErr := normalizeUserPath(protectedPath)
+		if normalizeErr != nil {
+			return fmt.Errorf("invalid --protected-path %q: %w", protectedPath, normalizeErr)
+		}
+		(*protectedPaths)[i] = normalized
+	}
 	privatePaths := []string{*stateDir, *configPath, *credentials, *identityPath, *killSwitchPath}
+	privatePaths = append(privatePaths, (*protectedPaths)...)
 	if configDir, configErr := os.UserConfigDir(); configErr == nil && configDir != "" {
 		privatePaths = append(privatePaths, filepath.Join(configDir, "chat-with-cli"))
 	}
@@ -822,6 +857,7 @@ func runAgentSetup(args []string) error {
 		"agent.device":              strings.TrimSpace(*device),
 		"agent.device_id":           strings.TrimSpace(*deviceID),
 		"agent.root":                append([]string(nil), *roots...),
+		"agent.protected_paths":     append([]string(nil), *protectedPaths...),
 		"agent.profile":             strings.ToLower(strings.TrimSpace(*profile)),
 		"agent.state_dir":           strings.TrimSpace(*stateDir),
 		"agent.identity":            strings.TrimSpace(*identityPath),
@@ -1034,7 +1070,7 @@ func validateAgentLandlockRoots(roots []string, allowExec bool, sandbox string, 
 			if strings.TrimSpace(privatePath) == "" || !pathsOverlap(root, privatePath) {
 				continue
 			}
-			return fmt.Errorf("cannot create a Landlock coding configuration: root %q overlaps chat-with-cli private state %q; choose a narrower workspace root such as %s or explicitly use --exec-sandbox=none if you accept the weaker boundary", root, filepath.Clean(privatePath), systemdQuote(filepath.Join("$HOME", "project")))
+			return fmt.Errorf("cannot create a Landlock coding configuration: root %q overlaps chat-with-cli private state %q; choose a narrower workspace root such as %s, use --exec-sandbox=protected to mask private paths, or explicitly use --exec-sandbox=none", root, filepath.Clean(privatePath), systemdQuote(filepath.Join("$HOME", "project")))
 		}
 	}
 	return nil

@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -96,14 +97,22 @@ func TestPromptExecSandboxAllowsExplicitFullUserAccess(t *testing.T) {
 	if err != nil || got != "none" {
 		t.Fatalf("full shell mode=%q err=%v", got, err)
 	}
-	if !strings.Contains(out.String(), "Full user access") || !strings.Contains(out.String(), "Landlock") {
+	if !strings.Contains(out.String(), "Full user access") || !strings.Contains(out.String(), "Landlock") || !strings.Contains(out.String(), "Protected-path filter") {
 		t.Fatalf("shell boundary menu missing operator choices: %s", out.String())
+	}
+	out.Reset()
+	got, err = promptExecSandbox(bufio.NewReader(strings.NewReader("p\n")), &out, "none")
+	if err != nil || got != "protected" {
+		t.Fatalf("protected shell mode=%q err=%v", got, err)
 	}
 }
 
-func TestInteractiveSetupLetsOperatorKeepBroadRootWithFullUserAccess(t *testing.T) {
+func TestInteractiveSetupLetsOperatorKeepBroadRootWithProtectedPaths(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("Landlock choice is Linux-specific")
+		t.Skip("protected shell choice is Linux-specific")
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bubblewrap is unavailable")
 	}
 	base := t.TempDir()
 	t.Setenv("HOME", base)
@@ -111,17 +120,17 @@ func TestInteractiveSetupLetsOperatorKeepBroadRootWithFullUserAccess(t *testing.
 	t.Setenv("XDG_STATE_HOME", filepath.Join(base, ".state"))
 	configPath := oauthclient.DefaultConfigPath()
 	var out bytes.Buffer
-	// relay, root, device, profile=A, shell=L, conflict resolution=F, systemd=n
-	input := strings.Join([]string{"", base, "", "a", "l", "f", "n", ""}, "\n")
+	// relay, root, device, profile=A, shell=L, conflict resolution=P, systemd=n
+	input := strings.Join([]string{"", base, "", "a", "l", "p", "n", ""}, "\n")
 	if err := interactiveAgentSetup(bufio.NewReader(strings.NewReader(input)), &out); err != nil {
-		t.Fatalf("explicit full-access setup failed: %v\n%s", err, out.String())
+		t.Fatalf("explicit protected-path setup failed: %v\n%s", err, out.String())
 	}
 	values, err := config.Load(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := values.String("", "agent.exec_sandbox"); got != "none" {
-		t.Fatalf("exec_sandbox=%q want none", got)
+	if got := values.String("", "agent.exec_sandbox"); got != "protected" {
+		t.Fatalf("exec_sandbox=%q want protected", got)
 	}
 	roots := values.Strings("agent.root")
 	if len(roots) != 1 || filepath.Clean(roots[0]) != filepath.Clean(base) {
@@ -130,8 +139,45 @@ func TestInteractiveSetupLetsOperatorKeepBroadRootWithFullUserAccess(t *testing.
 	if !values.Bool(false, "agent.allow_exec") || !values.Bool(false, "agent.allow_file_write") {
 		t.Fatalf("full-access profile lost coding capabilities: %#v", values)
 	}
-	if !strings.Contains(out.String(), "Keep this root and use Full user access") {
-		t.Fatalf("overlap resolution was not shown: %s", out.String())
+	if !strings.Contains(out.String(), "Keep this root and mask Chat with CLI private paths") {
+		t.Fatalf("protected-path overlap resolution was not shown: %s", out.String())
+	}
+}
+
+func TestAgentSetupPersistsAdditionalProtectedPaths(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	custom := filepath.Join(root, ".sensitive")
+	configPath := filepath.Join(base, "config.toml")
+	stateDir := filepath.Join(base, "state")
+	if err := runAgentSetup([]string{
+		"--config", configPath, "--state-dir", stateDir,
+		"--relay", "https://relay.example.test", "--root", root,
+		"--device", "protected-path-device", "--profile", "R",
+		"--protected-path", custom,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	values, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := values.Strings("agent.protected_paths")
+	if len(got) != 1 || filepath.Clean(got[0]) != filepath.Clean(custom) {
+		t.Fatalf("protected_paths=%v want %q", got, custom)
+	}
+	found := false
+	for _, path := range configuredPrivatePaths(values, configPath) {
+		if filepath.Clean(path) == filepath.Clean(custom) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("configured private paths did not include %q", custom)
 	}
 }
 

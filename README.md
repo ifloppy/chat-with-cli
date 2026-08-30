@@ -97,7 +97,7 @@ explicitly choose `--profile read-write` (legacy alias: `developer`) or enable i
 | Filesystem read | only inside `--root` | add a narrowly scoped root |
 | Filesystem/checkpoint write | off | `--allow-file-write` |
 | Arbitrary shell / PTY | off | `--allow-exec` |
-| Exec filesystem boundary | none for read-only; coding profiles select Landlock on Linux | `--exec-sandbox=landlock` on Linux |
+| Exec filesystem boundary | none for read-only; coding profiles select Landlock on Linux | `landlock`, `protected`, or `none` |
 | Screen read (screenshots) | off | `--allow-screen` |
 | Accessibility read (AT-SPI) | off | `--allow-accessibility` |
 | Keyboard, pointer, semantic UI writes | off | `--allow-computer-use` |
@@ -106,10 +106,12 @@ The default profile is read-only. `--root` is a filesystem-tool boundary, not
 a sandbox for shell commands. Landlock restricts filesystem access only; it
 does not remove the Agent user's network, process, or inherited-secret access.
 The interactive workstation settings always leave the final choice to the
-operator: `[L]` keeps the Landlock boundary, while `[F]` runs shell commands
-with the current user's normal permissions (`--exec-sandbox=none`). If a broad
-root overlaps Chat with CLI private state, the CLI warns and offers Full user
-access or a narrower root instead of silently weakening the sandbox.
+operator: `[L]` keeps the Landlock workspace boundary, `[P]` keeps normal user
+filesystem access while masking Chat with CLI private paths with bubblewrap, and
+`[F]` runs with no shell filesystem filtering. If a broad root overlaps private
+state, `[P]` is the recommended broad-HOME choice; the operator can still choose
+Full user access or a narrower Landlock root. Repeat `--protected-path PATH` to
+mask additional operator-selected files/directories in `[P]` mode and filesystem tools.
 
 Private Relay mode is the default. Public users manage their own devices,
 browser sessions, password, and OAuth token families from `/account`; instance
