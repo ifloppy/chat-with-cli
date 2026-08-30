@@ -263,6 +263,24 @@ func interactiveConnectWorkstation(reader *bufio.Reader, writer io.Writer) error
 	} else if err != nil {
 		return err
 	}
+	conflict, conflictErr := configuredLandlockConflict(configPath)
+	if conflictErr != nil {
+		return conflictErr
+	}
+	if conflict != nil {
+		fmt.Fprintf(writer, "\nCurrent shell configuration needs an operator choice: %v\n", conflict)
+		fmt.Fprintln(writer, "Open Workstation settings now. Keep the broad root and choose [F] Full user access, or choose a narrower root for Landlock.")
+		choice, promptErr := uiPrompt(reader, writer, "Open Workstation settings now? (Y/n)", "y")
+		if promptErr != nil {
+			return promptErr
+		}
+		if !strings.EqualFold(choice, "y") && !strings.EqualFold(choice, "yes") {
+			return errors.New("connection canceled until the shell execution boundary is chosen")
+		}
+		if err := interactiveAgentSetup(reader, writer); err != nil {
+			return err
+		}
+	}
 	if err := runConnect(nil); err != nil {
 		if errors.Is(err, context.Canceled) {
 			fmt.Fprintln(writer, "\nWorkstation disconnected.")
@@ -473,6 +491,64 @@ func promptCapabilityProfile(reader *bufio.Reader, writer io.Writer, currentProf
 	return profile, flags, nil
 }
 
+func selectedProfileAllowsExec(profile string, capabilityFlags []string) bool {
+	if profile == "read-write" || profile == "all" {
+		return true
+	}
+	for _, flag := range capabilityFlags {
+		if flag == "--allow-exec" {
+			return true
+		}
+	}
+	return false
+}
+
+func promptExecSandbox(reader *bufio.Reader, writer io.Writer, current string) (string, error) {
+	if runtime.GOOS != "linux" {
+		return "none", nil
+	}
+	fmt.Fprintln(writer, "  Shell execution boundary:")
+	fmt.Fprintln(writer, "  [L] Landlock sandbox   Restrict shell to workspace roots (recommended)")
+	fmt.Fprintln(writer, "  [F] Full user access  No shell sandbox; commands run with your user permissions")
+	defaultChoice := "L"
+	if strings.EqualFold(strings.TrimSpace(current), "none") {
+		defaultChoice = "F"
+	}
+	choice, err := uiPrompt(reader, writer, "Shell mode [L/F]", defaultChoice)
+	if err != nil {
+		return "", err
+	}
+	switch strings.ToLower(strings.TrimSpace(choice)) {
+	case "l", "landlock":
+		return "landlock", nil
+	case "f", "full", "none", "unrestricted":
+		return "none", nil
+	default:
+		return "", fmt.Errorf("invalid shell mode %q", choice)
+	}
+}
+
+func configuredPrivatePaths(values config.Values, configPath string) []string {
+	stateDir := values.String(defaultAgentStateDir(), "agent.state_dir")
+	credentials := values.String(oauthclient.DefaultCredentialsPath(), "agent.credentials")
+	identity := values.String(deviceidentity.DefaultPath(stateDir), "agent.identity")
+	killSwitch := values.String("", "agent.kill_switch_file")
+	paths := []string{stateDir, configPath, credentials, identity, killSwitch}
+	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+		paths = append(paths, filepath.Join(configDir, "chat-with-cli"))
+	}
+	return paths
+}
+
+func configuredLandlockConflict(configPath string) (error, error) {
+	values, err := config.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+	conflict := validateAgentLandlockRoots(values.Strings("agent.root"), values.Bool(false, "agent.allow_exec"), values.String("none", "agent.exec_sandbox"), configuredPrivatePaths(values, configPath)...)
+	return conflict, nil
+}
+
 func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	configPath := oauthclient.DefaultConfigPath()
 	values, err := config.LoadOptional(configPath)
@@ -511,6 +587,45 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
+	allowExecSelected := selectedProfileAllowsExec(profile, capabilityFlags)
+	sandbox := "none"
+	if allowExecSelected {
+		currentSandbox := values.String("landlock", "agent.exec_sandbox")
+		sandbox, err = promptExecSandbox(reader, writer, currentSandbox)
+		if err != nil {
+			return err
+		}
+	}
+	candidateRoots := []string{root}
+	if len(roots) > 1 && root == rootDefault {
+		candidateRoots = append([]string(nil), roots...)
+	}
+	if allowExecSelected && sandbox == "landlock" {
+		if conflict := validateAgentLandlockRoots(candidateRoots, true, sandbox, configuredPrivatePaths(values, configPath)...); conflict != nil {
+			fmt.Fprintf(writer, "\n  Landlock cannot be used with the selected broad root because it overlaps Chat with CLI private state.\n")
+			fmt.Fprintln(writer, "  [F] Keep this root and use Full user access (no shell sandbox)")
+			fmt.Fprintln(writer, "  [N] Choose a narrower workspace root and keep Landlock")
+			fmt.Fprintln(writer, "  [C] Cancel")
+			choice, promptErr := uiPrompt(reader, writer, "Resolve shell boundary [F/N/C]", "F")
+			if promptErr != nil {
+				return promptErr
+			}
+			switch strings.ToLower(strings.TrimSpace(choice)) {
+			case "f", "full":
+				sandbox = "none"
+			case "n", "narrow":
+				root, err = uiPrompt(reader, writer, "Workspace root", recommendedWorkspaceRoot())
+				if err != nil {
+					return err
+				}
+				candidateRoots = []string{root}
+			case "c", "cancel", "q", "quit":
+				return errors.New("workstation settings canceled")
+			default:
+				return fmt.Errorf("invalid shell-boundary choice %q", choice)
+			}
+		}
+	}
 	installSystemd, err := uiPrompt(reader, writer, "Write/update an inactive systemd user unit?", "n")
 	if err != nil {
 		return err
@@ -536,9 +651,7 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	if stateDir := values.String("", "agent.state_dir"); stateDir != "" {
 		setupArgs = append(setupArgs, "--state-dir", stateDir)
 	}
-	if sandbox := values.String("", "agent.exec_sandbox"); sandbox != "" {
-		setupArgs = append(setupArgs, "--exec-sandbox", sandbox)
-	}
+	setupArgs = append(setupArgs, "--exec-sandbox", sandbox)
 	if persist := values.String("", "agent.computer_persist"); persist != "" {
 		setupArgs = append(setupArgs, "--computer-persist", persist)
 	}

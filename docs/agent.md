@@ -37,13 +37,16 @@ Capabilities can also be selected separately:
 
 `agent setup` prints every configured filesystem root and warns when `/` or the
 whole home directory is exposed. Coding profiles use a project-like root by
-default; when Landlock is enabled, setup rejects a root that overlaps the
-private `chat-with-cli` state/configuration paths because that would make every
-shell task fail closed. Prefer an explicit project/workspace root; read-only
-still means every readable file under that root can be returned to an
-authorized MCP client. A root is not a shell sandbox. With `--allow-exec`, a
-shell without Landlock still has the Agent user's normal filesystem, network,
-process, and environment access. Landlock is filesystem-only defense in depth.
+default. Interactive settings expose the shell boundary explicitly: `[L]` uses
+Landlock and `[F]` uses Full user access (`--exec-sandbox=none`). A Landlock
+configuration whose root overlaps private `chat-with-cli` state/configuration
+would make every task fail closed, so the interactive CLI offers to keep the
+broad root with Full user access or choose a narrower root. Non-interactive
+setup still rejects that internally inconsistent Landlock combination unless
+the operator explicitly selects `--exec-sandbox=none`. Read-only still means
+every readable file under the root can be returned to an authorized MCP client.
+A root is not a shell sandbox. Without Landlock, shell commands have the Agent
+user's normal filesystem, network, process, and environment access.
 
 ## Coding file workflow
 

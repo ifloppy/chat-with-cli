@@ -105,8 +105,11 @@ explicitly choose `--profile read-write` (legacy alias: `developer`) or enable i
 The default profile is read-only. `--root` is a filesystem-tool boundary, not
 a sandbox for shell commands. Landlock restricts filesystem access only; it
 does not remove the Agent user's network, process, or inherited-secret access.
-Run the Agent as a dedicated unprivileged user and use `--exec-sandbox=landlock`
-when shell work needs an additional kernel boundary.
+The interactive workstation settings always leave the final choice to the
+operator: `[L]` keeps the Landlock boundary, while `[F]` runs shell commands
+with the current user's normal permissions (`--exec-sandbox=none`). If a broad
+root overlaps Chat with CLI private state, the CLI warns and offers Full user
+access or a narrower root instead of silently weakening the sandbox.
 
 Private Relay mode is the default. Public users manage their own devices,
 browser sessions, password, and OAuth token families from `/account`; instance

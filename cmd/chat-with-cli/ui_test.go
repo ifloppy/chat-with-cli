@@ -13,6 +13,7 @@ import (
 
 	"github.com/ifloppy/chat-with-cli/internal/config"
 	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
+	"github.com/ifloppy/chat-with-cli/internal/oauthclient"
 )
 
 func TestDefaultRelayAndRewardEndpointValidation(t *testing.T) {
@@ -80,6 +81,57 @@ func TestPromptCapabilityProfileAllAndCustom(t *testing.T) {
 	want := []string{"--allow-file-write", "--allow-exec", "--allow-accessibility", "--allow-computer-use"}
 	if strings.Join(flags, ",") != strings.Join(want, ",") {
 		t.Fatalf("custom flags=%v want=%v", flags, want)
+	}
+}
+
+func TestPromptExecSandboxAllowsExplicitFullUserAccess(t *testing.T) {
+	var out bytes.Buffer
+	got, err := promptExecSandbox(bufio.NewReader(strings.NewReader("f\n")), &out, "landlock")
+	if runtime.GOOS != "linux" {
+		if err != nil || got != "none" {
+			t.Fatalf("non-Linux shell mode=%q err=%v", got, err)
+		}
+		return
+	}
+	if err != nil || got != "none" {
+		t.Fatalf("full shell mode=%q err=%v", got, err)
+	}
+	if !strings.Contains(out.String(), "Full user access") || !strings.Contains(out.String(), "Landlock") {
+		t.Fatalf("shell boundary menu missing operator choices: %s", out.String())
+	}
+}
+
+func TestInteractiveSetupLetsOperatorKeepBroadRootWithFullUserAccess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Landlock choice is Linux-specific")
+	}
+	base := t.TempDir()
+	t.Setenv("HOME", base)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, ".state"))
+	configPath := oauthclient.DefaultConfigPath()
+	var out bytes.Buffer
+	// relay, root, device, profile=A, shell=L, conflict resolution=F, systemd=n
+	input := strings.Join([]string{"", base, "", "a", "l", "f", "n", ""}, "\n")
+	if err := interactiveAgentSetup(bufio.NewReader(strings.NewReader(input)), &out); err != nil {
+		t.Fatalf("explicit full-access setup failed: %v\n%s", err, out.String())
+	}
+	values, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := values.String("", "agent.exec_sandbox"); got != "none" {
+		t.Fatalf("exec_sandbox=%q want none", got)
+	}
+	roots := values.Strings("agent.root")
+	if len(roots) != 1 || filepath.Clean(roots[0]) != filepath.Clean(base) {
+		t.Fatalf("roots=%v want broad root %q", roots, base)
+	}
+	if !values.Bool(false, "agent.allow_exec") || !values.Bool(false, "agent.allow_file_write") {
+		t.Fatalf("full-access profile lost coding capabilities: %#v", values)
+	}
+	if !strings.Contains(out.String(), "Keep this root and use Full user access") {
+		t.Fatalf("overlap resolution was not shown: %s", out.String())
 	}
 }
 
@@ -259,7 +311,7 @@ func TestInteractiveSetupUpdatesExistingConfigInsteadOfFailing(t *testing.T) {
 	oldID := before.String("", "agent.device_id")
 	var out bytes.Buffer
 	// Keep every existing default and decline systemd generation.
-	if err := interactiveAgentSetup(bufio.NewReader(strings.NewReader("\n\n\n\n\n")), &out); err != nil {
+	if err := interactiveAgentSetup(bufio.NewReader(strings.NewReader("\n\n\n\n\n\n")), &out); err != nil {
 		t.Fatalf("interactive update failed: %v\n%s", err, out.String())
 	}
 	after, err := config.Load(configPath)

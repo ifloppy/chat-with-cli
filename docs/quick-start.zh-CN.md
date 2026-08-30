@@ -24,7 +24,7 @@ chat-with-cli agent setup \
   --install-systemd
 ```
 
-`--root` 应该是最小的工作目录。命令会生成设备 Ed25519 身份、Agent 配置和一个未启动的 systemd 用户服务。
+`--root` 默认推荐使用项目目录，但最终权限由本机操作者决定。在交互式设置中，`[L] Landlock` 会把 shell 限制在 workspace roots；`[F] Full user access` 则不启用 shell 沙箱，命令直接继承当前用户权限。若选择的宽 root 包含 Chat With CLI 自己的私有状态，CLI 会警告并让你选择 Full user access 或更窄 root，而不是替你强制缩小权限。命令会生成设备 Ed25519 身份、Agent 配置和一个未启动的 systemd 用户服务。
 
 ## 3. OAuth 与连接
 
