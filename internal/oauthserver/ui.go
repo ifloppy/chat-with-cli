@@ -323,6 +323,69 @@ details[open] > summary::after { content: "−"; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
 
+/* OAuth is intentionally native HTML + CSS only. Do not attach app.js or
+   Material form-associated elements to this surface. */
+.oauth-page {
+  min-height: 100vh;
+  padding: 0 20px 44px;
+  background:
+    radial-gradient(circle at 50% -18%, color-mix(in srgb, var(--md-primary-container) 64%, transparent), transparent 36rem),
+    var(--md-surface);
+}
+.oauth-shell { width: min(760px, 100%); margin: 0 auto; }
+.oauth-brand { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 82px; }
+.oauth-card {
+  overflow: hidden;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: 24px;
+  padding: clamp(24px, 5vw, 42px);
+  background: var(--md-surface-container-low);
+  box-shadow: 0 18px 54px color-mix(in srgb, var(--md-on-surface) 10%, transparent);
+}
+.oauth-heading { margin-bottom: 24px; }
+.oauth-heading h1 { margin: 12px 0 8px; font-size: clamp(30px, 6vw, 44px); }
+.oauth-heading p { max-width: 610px; margin: 0; color: var(--md-on-surface-variant); }
+.oauth-client { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 14px; margin: 0 0 14px; }
+.oauth-client > div, .oauth-meta > div, .oauth-signed-in {
+  min-width: 0;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: 14px;
+  padding: 14px 16px;
+  background: var(--md-surface);
+}
+.oauth-client strong { display: block; margin-top: 4px; font-size: 17px; }
+.oauth-client code, .oauth-meta code { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.oauth-meta { display: grid; gap: 9px; margin: 0 0 18px; }
+.oauth-meta > div { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: start; gap: 14px; padding-block: 12px; }
+.oauth-meta dt { color: var(--md-on-surface-variant); font-size: 13px; font-weight: 750; }
+.oauth-meta dd { min-width: 0; margin: 0; }
+.oauth-notice { display: grid; gap: 5px; margin: 12px 0; border-radius: 14px; padding: 14px 16px; }
+.oauth-notice b { margin: 0; }
+.oauth-notice span { color: var(--md-on-surface-variant); }
+.oauth-notice.verified { border: 1px solid color-mix(in srgb, var(--md-success) 42%, var(--md-outline-variant)); background: color-mix(in srgb, var(--md-success-container) 44%, var(--md-surface)); }
+.oauth-form { margin-top: 22px; border-top: 1px solid var(--md-outline-variant); padding-top: 22px; }
+.oauth-form h2 { margin-bottom: 14px; }
+.oauth-form label { margin-top: 12px; }
+.oauth-submit { width: 100%; margin-top: 20px; }
+.oauth-signed-in { margin-bottom: 14px; }
+.oauth-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.oauth-actions button { margin-top: 0; }
+.oauth-register { margin-top: 16px; border: 1px solid var(--md-outline-variant); border-radius: 14px; background: var(--md-surface); }
+.oauth-register > summary { padding: 16px 18px; font-size: 16px; }
+.oauth-register > .oauth-form { margin: 0; padding: 0 18px 18px; border-top: 0; }
+.oauth-footer { display: flex; justify-content: space-between; gap: 16px; padding: 18px 4px 0; color: var(--md-on-surface-variant); font-size: 13px; }
+@media (max-width: 620px) {
+  .oauth-page { padding: 0 14px 32px; }
+  .oauth-brand { min-height: 70px; }
+  .oauth-brand .pill { display: none; }
+  .oauth-card { border-radius: 18px; padding: 22px 18px; }
+  .oauth-client { grid-template-columns: 1fr; }
+  .oauth-meta > div { grid-template-columns: 1fr; gap: 2px; }
+  .oauth-actions { align-items: stretch; flex-direction: column; }
+  .oauth-actions button { width: 100%; }
+  .oauth-footer { flex-direction: column; gap: 6px; }
+}
+
 /* Material 3 component layer. Keep these tokens and state layers local so the
    single-binary Relay does not depend on a CDN or an opaque runtime bundle. */
 body {
@@ -1144,6 +1207,9 @@ const appJS = `
   function upgradeMaterialButtons() {
     document.querySelectorAll("a.button, button").forEach((source) => {
       if (source.closest("md-filled-button, md-filled-tonal-button, md-outlined-button, md-text-button, md-icon-button")) return;
+      // Native form controls own submission semantics. Replacing submitters with
+      // form-associated custom elements can change which name/value pair is sent.
+      if (source.closest("form")) return;
       if (source.tagName === "A" && !(source.getAttribute("href") || "").startsWith("/")) return;
       const target = document.createElement(materialButtonTag(source));
       copyElementAttributes(source, target);
@@ -1154,6 +1220,9 @@ const appJS = `
   function upgradeMaterialSelects() {
     document.querySelectorAll("select").forEach((source) => {
       if (source.closest("md-outlined-select")) return;
+      // Keep all form controls native. CSS provides the visual treatment while
+      // the browser remains the sole owner of successful-control semantics.
+      if (source.closest("form")) return;
       const target = document.createElement("md-outlined-select");
       copyElementAttributes(source, target);
       const label = source.getAttribute("aria-label") || source.previousElementSibling?.textContent.trim() || "";
@@ -1247,7 +1316,21 @@ const appJS = `
   }
   bindCopyButtons();
   document.querySelectorAll(".button, button, .nav a").forEach((element) => element.addEventListener("pointerdown", (event) => createRipple(element, event)));
-  document.querySelectorAll("form").forEach((form) => form.addEventListener("submit", () => { const submit = form.querySelector("button[type=submit], button:not([type]), md-filled-button, md-filled-tonal-button, md-outlined-button, md-text-button"); if (submit && !form.dataset.allowDoubleSubmit) { submit.disabled = true; submit.setAttribute("aria-busy", "true"); } }));
+  document.querySelectorAll("form").forEach((form) => form.addEventListener("submit", (event) => {
+    if (form.dataset.allowDoubleSubmit) return;
+    if (form.dataset.cwcSubmitting === "true") {
+      event.preventDefault();
+      return;
+    }
+    form.dataset.cwcSubmitting = "true";
+    // Never disable the submitter here: disabled successful controls are
+    // omitted from form submission, including their security-sensitive name/value.
+    const submit = event.submitter;
+    if (submit) {
+      submit.setAttribute("aria-busy", "true");
+      submit.setAttribute("aria-disabled", "true");
+    }
+  }));
   loadAdSense();
   loadMaterialWeb();
 })();
@@ -1340,10 +1423,31 @@ func executeTemplateWithUINonce(w http.ResponseWriter, r *http.Request, tmpl *te
 	return err
 }
 
+// executeSecurityTemplate keeps authentication and authorization pages native.
+// It may share CSS, but deliberately injects no JavaScript: browser-native form
+// submission semantics are part of the security protocol on these pages.
+func executeSecurityTemplate(w http.ResponseWriter, r *http.Request, tmpl *template.Template, data any) error {
+	var rendered bytes.Buffer
+	if err := tmpl.Execute(&rendered, data); err != nil {
+		return err
+	}
+	html := rendered.String()
+	locale := uiLocale(r)
+	if strings.Contains(html, "<html lang=") {
+		html = strings.Replace(html, "<html", `<html data-locale="`+locale+`"`, 1)
+	} else {
+		html = strings.Replace(html, "<html", `<html lang="en" data-locale="`+locale+`"`, 1)
+	}
+	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=3">`, 1)
+	html = injectUINonce(html, r)
+	_, err := w.Write([]byte(html))
+	return err
+}
+
 // executeUITemplate upgrades the older, page-local templates during the
 // rolling UI migration. It adds the same local stylesheet, controls, locale
-// hint, and progressive-enhancement script without changing their form
-// fields or security-sensitive server-side rendering semantics.
+// hint, and progressive-enhancement script. Security-sensitive forms must use
+// executeSecurityTemplate instead.
 func executeUITemplate(w http.ResponseWriter, r *http.Request, tmpl *template.Template, data any) error {
 	var rendered bytes.Buffer
 	if err := tmpl.Execute(&rendered, data); err != nil {

@@ -98,3 +98,49 @@ func TestLocalUIAssetsAndMonetizationContract(t *testing.T) {
 		}
 	}
 }
+
+func TestOAuthAuthorizationPageKeepsNativeFormSemanticsAndConstrainedLayout(t *testing.T) {
+	s, err := New(Config{
+		PublicURL: "http://127.0.0.1:19302",
+		StateDir:  t.TempDir(),
+		Mode:      ModePrivate,
+		Password:  "oauth-ui-password-12345",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize"), nil)
+	s.renderAuthorizationWithCSRFRequest(rr, req, "request", Client{ID: "client", Name: "ChatGPT", RedirectURIs: []string{"https://chatgpt.com/connector_platform_oauth_redirect"}}, s.absolute("/mcp"), "mcp offline_access", "https://chatgpt.com/connector_platform_oauth_redirect", "csrf", User{}, false)
+	body := rr.Body.String()
+	for _, expected := range []string{`class="oauth-shell"`, `class="oauth-card"`, `class="oauth-form"`, `name="decision" value="login"`, `/assets/app.css?v=3`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("OAuth page is missing %q: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"/assets/app.js", "/assets/material-web.js", "md-filled-button", "md-text-button"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("OAuth page loaded form-mutating UI code %q: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(appCSS, `.oauth-shell { width: min(760px, 100%); margin: 0 auto; }`) || !strings.Contains(appCSS, `.oauth-card {`) {
+		t.Fatal("OAuth CSS lost its centered constrained card layout")
+	}
+}
+
+func TestSharedUIJavaScriptDoesNotMutateNativeFormControls(t *testing.T) {
+	for _, expected := range []string{
+		`if (source.closest("form")) return;`,
+		`const submit = event.submitter;`,
+		`event.preventDefault();`,
+	} {
+		if !strings.Contains(appJS, expected) {
+			t.Fatalf("shared UI JavaScript is missing form-safety guard %q", expected)
+		}
+	}
+	if strings.Contains(appJS, `submit.disabled = true`) {
+		t.Fatal("shared UI JavaScript disables the successful submitter before form data is constructed")
+	}
+}

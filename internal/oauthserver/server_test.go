@@ -4617,3 +4617,30 @@ func TestGenericDCRRejectsUnsupportedGrantInsteadOfEchoingIt(t *testing.T) {
 		t.Fatalf("unsupported DCR grant status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestAuthorizationDecisionRejectsDuplicateSecurityFields(t *testing.T) {
+	for _, duplicate := range []string{"request_id", "csrf_token", "decision"} {
+		t.Run(duplicate, func(t *testing.T) {
+			s, err := New(Config{PublicURL: "http://127.0.0.1:19138", Password: "duplicate-form-password-12345", StateDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			csrf := "duplicate-form-csrf"
+			s.pending["request"] = pendingAuth{RedirectURI: "https://chatgpt.com/connector_platform_oauth_redirect", CSRFTokenHash: tokenKey(csrf), Expires: time.Now().Add(time.Minute)}
+			form := url.Values{"request_id": {"request"}, "csrf_token": {csrf}, "decision": {"allow"}}
+			form.Add(duplicate, form.Get(duplicate))
+			req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/authorize"), strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(&http.Cookie{Name: oauthCSRFCookie, Value: csrf})
+			rr := httptest.NewRecorder()
+			s.handleAuthorizePOST(rr, req)
+			if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid authorization form") {
+				t.Fatalf("duplicate %s status=%d body=%s", duplicate, rr.Code, rr.Body.String())
+			}
+			if _, ok := s.pending["request"]; !ok {
+				t.Fatalf("duplicate %s consumed the pending authorization", duplicate)
+			}
+		})
+	}
+}

@@ -714,10 +714,10 @@ func csrfMatches(r *http.Request, expectedHash string) bool {
 		return false
 	}
 	cookie, err := r.Cookie(oauthCSRFCookie)
-	if err != nil || cookie.Value == "" || r.FormValue("csrf_token") == "" {
+	if err != nil || cookie.Value == "" || r.PostForm.Get("csrf_token") == "" {
 		return false
 	}
-	provided := r.FormValue("csrf_token")
+	provided := r.PostForm.Get("csrf_token")
 	return len(cookie.Value) == len(provided) &&
 		subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(provided)) == 1 &&
 		len(expectedHash) == len(tokenKey(provided)) &&
@@ -1919,13 +1919,24 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 
 var authorizationTemplate = template.Must(template.New("authorization").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authorize chat-with-cli</title></head><body>
-<h1>Authorize chat-with-cli</h1>{{if .PublicInstance}}<div class="identity warning"><b>Public Relay operator is inside the trust boundary</b><br>This Relay can observe or modify MCP requests and results, and its operator can run modified server code. User-to-user isolation does not protect you from the operator. Do not use any public instance for secrets or high-trust computer access; self-host a private Relay instead.</div>{{end}}<div class="meta"><b>Client name:</b> {{.Client}}<br><b>Client ID:</b> <code>{{.ClientID}}</code><br><b>Callback:</b> <code>{{.Callback}}</code><br><b>Resource:</b> <code>{{.Resource}}</code><br><b>Scope:</b> {{.Scope}}</div>
-{{if .UnverifiedClient}}<div class="identity warning"><b>Unverified dynamic OAuth client</b><br>The client name above is self-asserted. Only authorize if the callback origin matches the application you intended to connect.</div>{{end}}
-{{if .VerifiedDevice}}<div class="identity verified"><b>Verified device identity</b><br>This Agent proved possession of the Ed25519 private key for device <code>{{.DeviceID}}</code>. The Relay requires a request-bound signed proof for authorization and a fresh signed proof on every Agent connection.</div>{{else if .AgentDevice}}<div class="identity warning"><b>Legacy unbound Agent</b><br>This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.</div>{{end}}
-{{if .LoggedIn}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><p>Signed in as <b>{{.Username}}</b>.</p><button name="decision" value="allow" type="submit">Authorize</button><button name="decision" value="deny" type="submit">Deny</button><button name="decision" value="logout" type="submit">Sign out</button></form>
-{{else}}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Sign in</h2><input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="current-password" placeholder="Password" required><button name="decision" value="login" type="submit">Sign in and authorize</button></form>
-{{if .RegistrationAvailable}}<form class="secondary" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Create account</h2>{{if .InviteRequired}}<p class="muted">Open registration is disabled. A single-use invite from this instance operator is required.</p><input name="invite_code" autocomplete="off" placeholder="Invite code" required>{{end}}<input name="username" autocomplete="username" placeholder="Username" required><input type="password" name="password" autocomplete="new-password" placeholder="Password (12+ characters)" minlength="12" required><button name="decision" value="register" type="submit">Register and authorize</button></form>{{end}}{{end}}
+<title>Authorize chat-with-cli</title></head><body class="oauth-page">
+<div class="oauth-shell">
+<header class="oauth-brand"><a href="/" class="brand"><span class="brand-mark" aria-hidden="true">⌁</span><span class="brand-name">Chat with CLI</span></a><span class="pill">OAuth authorization</span></header>
+<main class="oauth-card">
+<div class="oauth-heading"><span class="eyebrow">Secure connection</span><h1>Authorize Chat with CLI</h1><p>Review the requesting application, then sign in to grant only the scope shown below.</p></div>
+<div class="oauth-client"><div><span class="field-label">Application</span><strong>{{.Client}}</strong></div><div><span class="field-label">Callback</span><code>{{.Callback}}</code></div></div>
+<dl class="oauth-meta"><div><dt>Client ID</dt><dd><code>{{.ClientID}}</code></dd></div><div><dt>Resource</dt><dd><code>{{.Resource}}</code></dd></div><div><dt>Scope</dt><dd><code>{{.Scope}}</code></dd></div></dl>
+{{if .PublicInstance}}<div class="oauth-notice warning"><b>Public Relay operator is inside the trust boundary</b><span>This Relay can observe or modify MCP requests and results, and its operator can run modified server code. User-to-user isolation does not protect you from the operator. Do not use any public instance for secrets or high-trust computer access; self-host a private Relay instead.</span></div>{{end}}
+{{if .UnverifiedClient}}<div class="oauth-notice warning"><b>Unverified dynamic OAuth client</b><span>The client name above is self-asserted. Only authorize if the callback origin matches the application you intended to connect.</span></div>{{end}}
+{{if .VerifiedDevice}}<div class="oauth-notice verified"><b>Verified device identity</b><span>This Agent proved possession of the Ed25519 private key for device <code>{{.DeviceID}}</code>. The Relay requires a request-bound signed proof for authorization and a fresh signed proof on every Agent connection.</span></div>{{else if .AgentDevice}}<div class="oauth-notice warning"><b>Legacy unbound Agent</b><span>This device has no verified cryptographic identity. OAuth still enforces account/resource ownership, but a stolen Agent bearer could impersonate this legacy device until it is migrated.</span></div>{{end}}
+{{if .LoggedIn}}
+<form class="oauth-form" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><div class="oauth-signed-in"><span class="field-label">Signed in as</span><strong>{{.Username}}</strong></div><div class="oauth-actions"><button class="primary" name="decision" value="allow" type="submit">Authorize</button><button class="outlined" name="decision" value="deny" type="submit">Deny</button><button class="text" name="decision" value="logout" type="submit">Sign out</button></div></form>
+{{else}}
+<form class="oauth-form" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><h2>Sign in</h2><label>Username<input name="username" autocomplete="username" placeholder="Username" required></label><label>Password<input type="password" name="password" autocomplete="current-password" placeholder="Password" required></label><button class="primary oauth-submit" name="decision" value="login" type="submit">Sign in and authorize</button></form>
+{{if .RegistrationAvailable}}<details class="oauth-register"><summary>Create account</summary><form class="oauth-form secondary" method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="{{.RequestID}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}">{{if .InviteRequired}}<p class="muted">Open registration is disabled. A single-use invite from this instance operator is required.</p><label>Invite code<input name="invite_code" autocomplete="off" placeholder="Invite code" required></label>{{end}}<label>Username<input name="username" autocomplete="username" placeholder="Username" required></label><label>Password<input type="password" name="password" autocomplete="new-password" placeholder="Password (12+ characters)" minlength="12" required></label><button class="primary oauth-submit" name="decision" value="register" type="submit">Register and authorize</button></form></details>{{end}}{{end}}
+</main>
+<footer class="oauth-footer"><span>Only approve applications and callback origins you recognize.</span><a href="/docs">Documentation</a></footer>
+</div>
 </body></html>`))
 
 func (s *Server) renderAuthorization(w http.ResponseWriter, requestID string, client Client, resource, scope string, user User, loggedIn bool) {
@@ -1962,7 +1973,7 @@ func (s *Server) renderAuthorizationWithCSRFRequest(w http.ResponseWriter, r *ht
 	if origin := callbackOrigin(redirectURI); origin != "" {
 		callback = origin
 	}
-	_ = executeUITemplate(w, r, authorizationTemplate, map[string]any{
+	_ = executeSecurityTemplate(w, r, authorizationTemplate, map[string]any{
 		"RequestID": requestID, "Client": name, "ClientID": client.ID, "Callback": callback, "Resource": resource, "Scope": scope,
 		"CSRFToken": csrfToken, "LoggedIn": loggedIn, "Username": user.Username, "PublicInstance": publicInstance,
 		"RegistrationAvailable": openRegistration || inviteOnly, "InviteRequired": inviteOnly,
@@ -2042,11 +2053,17 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuthorizeDecisionPOST(w http.ResponseWriter, r *http.Request) {
+	for _, name := range []string{"request_id", "csrf_token", "decision"} {
+		if len(r.PostForm[name]) != 1 {
+			s.oauthPageError(w, http.StatusBadRequest, "invalid authorization form")
+			return
+		}
+	}
 	if !s.allowRate(r, "authorize-post", 30, time.Minute) {
 		rateLimited(w, 60)
 		return
 	}
-	requestID := r.Form.Get("request_id")
+	requestID := r.PostForm.Get("request_id")
 	s.mu.Lock()
 	pending, ok := s.pending[requestID]
 	if ok && time.Now().After(pending.Expires) {
@@ -2062,7 +2079,7 @@ func (s *Server) handleAuthorizeDecisionPOST(w http.ResponseWriter, r *http.Requ
 		s.oauthPageError(w, http.StatusForbidden, "invalid authorization form")
 		return
 	}
-	decision := r.Form.Get("decision")
+	decision := r.PostForm.Get("decision")
 	if decision == "logout" {
 		s.clearSession(w, r)
 		csrfToken := randomToken(24)
@@ -2092,13 +2109,13 @@ func (s *Server) handleAuthorizeDecisionPOST(w http.ResponseWriter, r *http.Requ
 		user, authenticated = s.sessionUser(r)
 	case "login":
 		var busy bool
-		user, authenticated, busy = s.authenticate(r.Form.Get("username"), r.Form.Get("password"))
+		user, authenticated, busy = s.authenticate(r.PostForm.Get("username"), r.PostForm.Get("password"))
 		if busy {
 			s.oauthPageError(w, http.StatusTooManyRequests, "login capacity is busy; retry shortly")
 			return
 		}
 	case "register":
-		prepared, err, busy := s.prepareRegistration(r.Form.Get("username"), r.Form.Get("password"))
+		prepared, err, busy := s.prepareRegistration(r.PostForm.Get("username"), r.PostForm.Get("password"))
 		if busy {
 			s.oauthPageError(w, http.StatusTooManyRequests, err.Error())
 			return
@@ -2107,7 +2124,7 @@ func (s *Server) handleAuthorizeDecisionPOST(w http.ResponseWriter, r *http.Requ
 			s.oauthPageError(w, http.StatusBadRequest, "registration failed: "+err.Error())
 			return
 		}
-		if err := s.registerAndGrantAuthorization(w, r, requestID, prepared, r.Form.Get("invite_code")); err != nil {
+		if err := s.registerAndGrantAuthorization(w, r, requestID, prepared, r.PostForm.Get("invite_code")); err != nil {
 			s.oauthPageError(w, http.StatusForbidden, "registration failed: "+err.Error())
 		}
 		return
