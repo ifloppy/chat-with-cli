@@ -281,8 +281,13 @@ func (s *Server) ensureUsageRecordLocked(userID string) usageRecord {
 	return record
 }
 
+const legacyAdMobRewardedUsageEnabled = false
+
 func (s *Server) rewardedUsageEnabledLocked() bool {
-	return s.usageMeteringEnabled && s.cfg.UsageUnlockEnabled
+	// The native AdMob companion reward path is intentionally parked while the
+	// web product focuses on AdSense. Keep the verifier and redemption code for
+	// backward compatibility, but do not advertise or enable the flow.
+	return legacyAdMobRewardedUsageEnabled && s.usageMeteringEnabled && s.cfg.UsageUnlockEnabled
 }
 
 func (s *Server) rewardedUsageReadyLocked() bool {
@@ -701,25 +706,6 @@ func (s *Server) handleAdminMonetization(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "AdSense client ID and slot must be configured together", http.StatusBadRequest)
 		return
 	}
-	admobApp, err := normalizeAdIdentifier(r.Form.Get("admob_app_id"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	admobUnit, err := normalizeAdIdentifier(r.Form.Get("admob_reward_unit_id"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if (admobApp == "") != (admobUnit == "") {
-		http.Error(w, "AdMob app ID and rewarded unit ID must be configured together", http.StatusBadRequest)
-		return
-	}
-	endpoint, err := normalizeUsageUnlockEndpoint(r.Form.Get("usage_unlock_endpoint"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 	s.mu.Lock()
 	if s.persistenceFault || !s.liveAdminLocked(current) {
 		s.mu.Unlock()
@@ -728,11 +714,6 @@ func (s *Server) handleAdminMonetization(w http.ResponseWriter, r *http.Request)
 	}
 	snapshot := s.snapshotMutableStateLocked()
 	s.cfg.AdSenseClientID, s.cfg.AdSenseSlot = adsenseClient, adsenseSlot
-	s.cfg.AdMobAppID, s.cfg.AdMobRewardUnitID = admobApp, admobUnit
-	s.cfg.UsageUnlockEndpoint = endpoint
-	if admobApp == "" || admobUnit == "" || endpoint == "" {
-		s.cfg.UsageUnlockEnabled = false
-	}
 	s.usageDefaultQuotaBytes = quota
 	s.usageConfigured = true
 	s.monetizationConfigured = true

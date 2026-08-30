@@ -254,6 +254,13 @@ button:disabled { cursor: wait; opacity: .65; transform: none; }
 .ad-slot { min-height: 90px; margin: 24px 0; border: 1px dashed var(--md-outline); border-radius: var(--md-radius-md); background: var(--md-surface-container-low); text-align: center; }
 .adsense-unit { display: block; min-height: 90px; }
 .ad-slot .ad-label { padding: 14px; color: var(--md-on-surface-variant); font-size: 12px; }
+.ad-slot[data-ad-empty="true"] { display: none; }
+.adblock-gate { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--md-surface) 96%, transparent); backdrop-filter: blur(12px); }
+.adblock-gate-card { width: min(560px, 100%); padding: 28px; border: 1px solid var(--md-outline-variant); border-radius: var(--md-radius-lg); background: var(--md-surface-container-low); box-shadow: var(--md-shadow); }
+.adblock-gate-card h2 { margin: 0 0 10px; font-size: 28px; }
+.adblock-gate-card p { margin: 8px 0; color: var(--md-on-surface-variant); }
+.adblock-gate-card .actions { margin-top: 20px; }
+body[data-ad-gate-blocked="true"] { overflow: hidden; }
 .support-card { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; padding: 22px; border-radius: var(--md-radius-md); background: linear-gradient(120deg, var(--md-primary-container), var(--md-secondary-container)); }
 .support-card p { margin: 0; color: var(--md-on-primary-container); }
 
@@ -714,6 +721,7 @@ const appJS = `
       "Keep the public Relay available": "一起保持公共 Relay 可用",
       "A companion app can verify a rewarded AdMob view and issue a short-lived, signed usage entitlement.": "伴侣应用可以验证激励式 AdMob 广告，并签发短期签名使用 entitlement。",
       "Open reward app": "打开奖励应用", "Open releases": "打开发行页", "Install documentation": "安装文档",
+      "Ads are required for the web app": "网页应用需要允许广告", "Ad or tracking protection is blocking the advertising service.": "广告或跟踪保护正在阻止广告服务加载。", "Allow ads for this site, then reload the page. In Firefox, disable Enhanced Tracking Protection for this site.": "请为本站允许广告，然后重新加载页面。在 Firefox 中，请为本站关闭增强型跟踪保护（Enhanced Tracking Protection）。", "Reload after allowing ads": "允许广告后重新加载",
       "Self-hosting guide": "自托管指南", "Need a quick path?": "想快速开始？",
       "Start here when you are deploying a Relay, pairing a workstation, or connecting an MCP client.": "部署 Relay、配对工作站或连接 MCP 客户端时，可以从这里开始。",
       "Connect a computer · Chat with CLI": "连接电脑 · Chat with CLI", "The installer verifies the release binary against SHA256SUMS and installs to": "安装程序会使用 SHA256SUMS 校验发行版二进制，并安装到",
@@ -771,8 +779,8 @@ const appJS = `
       "Disable is reversible. Revoke permanently retires the device identity so the same private key can never claim this ID again; reconnecting requires a newly generated device identity.": "停用可以恢复。永久撤销会废弃设备身份，使同一私钥永远无法再次认领此 ID；重新连接需要生成新的设备身份。", "Display name": "显示名称", "Immutable ID / route": "不可变 ID / 路由", "Owner": "所有者", "Connection": "连接", "Capabilities": "能力", "No devices have been claimed.": "还没有设备被认领。",
       "Users": "用户", "Create user": "创建用户", "Username": "用户名", "Role / state": "角色 / 状态", "Created / last login": "创建时间 / 最后登录", "admin": "管理员", "active": "活跃", "never": "从未", "device(s)": "台设备", "Logout all": "全部退出", "Rotate password": "轮换密码", "Delete": "删除", "Browser sessions": "浏览器会话", "Session handles are one-way identifiers; browser cookie values are never displayed.": "会话句柄是单向标识符；浏览器 Cookie 值永远不会显示。", "Log out": "退出登录", "OAuth clients and token metadata": "OAuth 客户端和令牌元数据", "Name / redirects": "名称 / 重定向地址", "No approved clients.": "没有已批准的客户端。", "active token records (metadata only; bearer values are never displayed).": "条活跃令牌记录（只有元数据，绝不显示 bearer 值）。", "Kind": "类型", "No active tokens.": "没有活跃令牌。", "Revoke client": "撤销客户端", "Recent security events": "最近的安全事件", "Time": "时间", "Event": "事件", "User / device": "用户 / 设备", "Result": "结果", "success": "成功", "failure": "失败", "No events recorded.": "没有记录的事件。",
       "new username": "新用户名", "temporary password": "临时密码", "new password": "新密码", "DELETE": "输入 DELETE", "REVOKE": "输入 REVOKE", "type RELEASE": "输入 RELEASE", "Return to admin": "返回管理", "Operator admin": "管理员控制台",
-      "Support": "支持", "Relay usage": "Relay 用量", "Support the maintainer": "支持维护者", "MCP and Agent request/response payload bytes are counted at the Relay. Add quota with an activation code or a verified rewarded ad.": "Relay 会统计 MCP 和 Agent 请求/响应载荷流量。可通过激活码或经验证的激励广告增加额度。", "Remaining traffic": "剩余流量", "Used": "已使用", "Granted": "已授予", "Watch an ad for quota": "看广告增加额度", "Redeem activation code": "兑换激活码", "activation code": "激活码", "Rewarded ads are awaiting server-side verifier configuration.": "激励广告正在等待服务端验证器配置。",
-      "Relay usage and support": "Relay 用量与支持", "This optional system accounts request and response payload bytes through the Relay. It is disabled by default and never grants authority by itself.": "此可选系统统计通过 Relay 的请求和响应载荷字节数。默认关闭，且不会单独授予任何权限。", "Traffic quota": "流量额度", "Default for new accounts": "新账户默认额度", "Disabled by default": "默认关闭", "Only authenticated, user-owned MCP and Agent traffic is counted. Existing accounts keep their granted quota when this default changes.": "只统计已认证且属于用户自己的 MCP 和 Agent 流量。更改默认值不会改变现有账户已授予的额度。", "Disable traffic quotas": "关闭流量额度", "Enable traffic quotas": "启用流量额度", "default quota in bytes": "默认额度（字节）", "Default quota in bytes": "默认额度（字节）", "Edit advertising settings": "编辑广告设置", "Rewarded ads": "激励广告", "AdMob companion verification": "AdMob 伴侣应用验证", "Needs verifier": "需要验证器", "AdMob must be verified server-side. Store the verifier secret in CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET; it is never shown or persisted in Relay state.": "AdMob 必须由服务端验证。请将验证器密钥放入 CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET；它不会显示或写入 Relay 状态。", "Advertising is optional. AdMob rewards require a server-side verifier secret.": "广告为可选项。AdMob 奖励需要服务端验证器密钥。", "Disable rewarded ads": "关闭激励广告", "Enable rewarded ads": "启用激励广告", "AdSense client ID": "AdSense 客户端 ID", "AdSense slot ID": "AdSense 广告位 ID", "AdMob app ID": "AdMob 应用 ID", "AdMob rewarded unit ID": "AdMob 激励广告单元 ID", "reward endpoint (HTTPS)": "奖励端点（HTTPS）", "Reward endpoint (HTTPS)": "奖励端点（HTTPS）", "Activation codes": "激活码", "Support codes": "支持码", "Create a single-use code that adds traffic quota to one account. The plaintext is shown once and only its hash is persisted.": "创建一个为账户增加流量额度的单次使用代码。明文只显示一次，持久化的只有哈希。", "quota in bytes": "额度（字节）", "Create activation code": "创建激活码", "Code hash": "代码哈希", "Quota": "额度", "No active activation codes.": "没有活跃激活码。", "Account quotas": "账户额度", "Grant quota to users": "为用户增加额度", "Add quota manually for a user. Grants are additive and are recorded as administrator security events.": "为用户手动增加额度。额度按累加计算，并记录为管理员安全事件。", "Remaining": "剩余", "quota to add in bytes": "要增加的额度（字节）", "Add quota": "增加额度", "No user quotas yet.": "还没有用户额度记录。", "Activation code created": "激活码已创建", "This code is shown once. Share it with the intended user and keep it private until then.": "此代码只显示一次。请分享给目标用户，并在此之前妥善保密。", "Claim rewarded usage": "领取广告奖励额度", "The companion app returned a server-verified reward. Confirm below to add it to this account.": "伴侣应用返回了经服务端验证的奖励。请在下方确认，将额度加入此账户。", "Add rewarded quota": "加入广告奖励额度"
+      "Support": "支持", "Relay usage": "Relay 用量", "Support the maintainer": "支持维护者", "MCP and Agent request/response payload bytes are counted at the Relay. Add quota with an activation code.": "Relay 会统计 MCP 和 Agent 请求/响应载荷流量。可通过激活码增加额度。", "Remaining traffic": "剩余流量", "Used": "已使用", "Granted": "已授予", "Watch an ad for quota": "看广告增加额度", "Redeem activation code": "兑换激活码", "activation code": "激活码", "Rewarded ads are awaiting server-side verifier configuration.": "激励广告正在等待服务端验证器配置。",
+      "Relay usage and support": "Relay 用量与支持", "This optional system accounts request and response payload bytes through the Relay. It is disabled by default and never grants authority by itself.": "此可选系统统计通过 Relay 的请求和响应载荷字节数。默认关闭，且不会单独授予任何权限。", "Traffic quota": "流量额度", "Default for new accounts": "新账户默认额度", "Disabled by default": "默认关闭", "Only authenticated, user-owned MCP and Agent traffic is counted. Existing accounts keep their granted quota when this default changes.": "只统计已认证且属于用户自己的 MCP 和 Agent 流量。更改默认值不会改变现有账户已授予的额度。", "Disable traffic quotas": "关闭流量额度", "Enable traffic quotas": "启用流量额度", "default quota in bytes": "默认额度（字节）", "Default quota in bytes": "默认额度（字节）", "Edit advertising settings": "编辑广告设置", "Save AdSense settings": "保存 AdSense 设置", "Configure the optional AdSense display ads shown by the web application.": "配置网页应用中显示的可选 AdSense 展示广告。", "Rewarded ads": "激励广告", "AdMob companion verification": "AdMob 伴侣应用验证", "Needs verifier": "需要验证器", "AdMob must be verified server-side. Store the verifier secret in CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET; it is never shown or persisted in Relay state.": "AdMob 必须由服务端验证。请将验证器密钥放入 CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET；它不会显示或写入 Relay 状态。", "Advertising is optional. AdMob rewards require a server-side verifier secret.": "广告为可选项。AdMob 奖励需要服务端验证器密钥。", "Disable rewarded ads": "关闭激励广告", "Enable rewarded ads": "启用激励广告", "AdSense client ID": "AdSense 客户端 ID", "AdSense slot ID": "AdSense 广告位 ID", "AdMob app ID": "AdMob 应用 ID", "AdMob rewarded unit ID": "AdMob 激励广告单元 ID", "reward endpoint (HTTPS)": "奖励端点（HTTPS）", "Reward endpoint (HTTPS)": "奖励端点（HTTPS）", "Activation codes": "激活码", "Support codes": "支持码", "Create a single-use code that adds traffic quota to one account. The plaintext is shown once and only its hash is persisted.": "创建一个为账户增加流量额度的单次使用代码。明文只显示一次，持久化的只有哈希。", "quota in bytes": "额度（字节）", "Create activation code": "创建激活码", "Code hash": "代码哈希", "Quota": "额度", "No active activation codes.": "没有活跃激活码。", "Account quotas": "账户额度", "Grant quota to users": "为用户增加额度", "Add quota manually for a user. Grants are additive and are recorded as administrator security events.": "为用户手动增加额度。额度按累加计算，并记录为管理员安全事件。", "Remaining": "剩余", "quota to add in bytes": "要增加的额度（字节）", "Add quota": "增加额度", "No user quotas yet.": "还没有用户额度记录。", "Activation code created": "激活码已创建", "This code is shown once. Share it with the intended user and keep it private until then.": "此代码只显示一次。请分享给目标用户，并在此之前妥善保密。", "Claim rewarded usage": "领取广告奖励额度", "The companion app returned a server-verified reward. Confirm below to add it to this account.": "伴侣应用返回了经服务端验证的奖励。请在下方确认，将额度加入此账户。", "Add rewarded quota": "加入广告奖励额度"
     }
   };
 
@@ -1071,7 +1079,7 @@ const appJS = `
     if (action === "redeem-activation-code") return {title: "Redeem activation code", help: "Add the quota attached to a one-time support code."};
     if (action === "grant-quota") return {title: "Add quota", help: "Add Relay traffic quota to this account."};
     if (action === "create-activation-code") return {title: "Create activation code", help: "Create a single-use code for the selected quota."};
-    if (action === "set-monetization") return {title: "Edit advertising settings", help: "Advertising is optional. AdMob rewards require a server-side verifier secret."};
+    if (action === "set-monetization") return {title: "Save AdSense settings", help: "Configure the optional AdSense display ads shown by the web application."};
     return null;
   }
   function dialogFieldLabel(action, input) {
@@ -1087,9 +1095,6 @@ const appJS = `
     if (input.name === "default_quota_bytes") return "Default quota in bytes";
     if (input.name === "adsense_client_id") return "AdSense client ID";
     if (input.name === "adsense_slot") return "AdSense slot ID";
-    if (input.name === "admob_app_id") return "AdMob app ID";
-    if (input.name === "admob_reward_unit_id") return "AdMob rewarded unit ID";
-    if (input.name === "usage_unlock_endpoint") return "Reward endpoint (HTTPS)";
     if (input.name === "password") return "Current password";
     if (input.name === "confirm") return "Confirmation";
     return input.name;
@@ -1273,20 +1278,95 @@ const appJS = `
     if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(value).then(done).catch(fallback);
     else fallback();
   }
-  function loadAdSense() {
-    const slot = document.querySelector("[data-adsense-client]");
-    if (!slot || !slot.dataset.adsenseClient) return;
-    const fillSlots = () => document.querySelectorAll(".adsense-unit:not([data-cwc-adsense-filled])").forEach((unit) => {
+  function adGateRequired() {
+    const path = window.location.pathname || "/";
+    // Never lock operators out of recovery/security pages. The gate is for the
+    // user-facing web application only; MCP/Agent/API traffic is unaffected.
+    return !path.startsWith("/admin") && path !== "/setup" && !path.startsWith("/oauth/");
+  }
+  function showAdBlockGate() {
+    if (!adGateRequired() || document.getElementById("cwc-adblock-gate")) return;
+    document.body.dataset.adGateBlocked = "true";
+    Array.from(document.body.children).forEach((child) => {
+      if (child.id !== "cwc-adblock-gate") child.inert = true;
+    });
+    const gate = document.createElement("div");
+    gate.id = "cwc-adblock-gate";
+    gate.className = "adblock-gate";
+    gate.setAttribute("role", "dialog");
+    gate.setAttribute("aria-modal", "true");
+    gate.innerHTML = '<div class="adblock-gate-card"><span class="eyebrow">Chat with CLI</span><h2 data-i18n="Ads are required for the web app">Ads are required for the web app</h2><p data-i18n="Ad or tracking protection is blocking the advertising service.">Ad or tracking protection is blocking the advertising service.</p><p data-i18n="Allow ads for this site, then reload the page. In Firefox, disable Enhanced Tracking Protection for this site.">Allow ads for this site, then reload the page. In Firefox, disable Enhanced Tracking Protection for this site.</p><div class="actions"><button class="primary" type="button" data-ad-gate-reload data-i18n="Reload after allowing ads">Reload after allowing ads</button></div></div>';
+    document.body.appendChild(gate);
+    translate();
+    const reload = gate.querySelector("[data-ad-gate-reload]");
+    if (reload) reload.addEventListener("click", () => window.location.reload());
+    if (reload) reload.focus();
+  }
+  function observeAdSenseUnits() {
+    document.querySelectorAll(".adsense-unit").forEach((unit) => {
+      if (unit.dataset.cwcStatusObserved) return;
+      unit.dataset.cwcStatusObserved = "true";
+      const sync = () => {
+        const container = unit.closest(".ad-slot");
+        if (!container) return;
+        if (unit.dataset.adStatus === "unfilled") container.dataset.adEmpty = "true";
+        else if (unit.dataset.adStatus === "filled") delete container.dataset.adEmpty;
+      };
+      new MutationObserver(sync).observe(unit, {attributes: true, attributeFilter: ["data-ad-status"]});
+      sync();
+    });
+  }
+  function fillAdSenseSlots() {
+    observeAdSenseUnits();
+    document.querySelectorAll(".adsense-unit:not([data-cwc-adsense-filled])").forEach((unit) => {
       unit.dataset.cwcAdsenseFilled = "true";
       try { (window.adsbygoogle = window.adsbygoogle || []).push({}); } catch (_) {}
     });
-    const existing = document.querySelector("script[data-cwc-adsense]");
-    if (existing) { existing.addEventListener("load", fillSlots, {once: true}); fillSlots(); return; }
-    const script = document.createElement("script");
-    script.async = true; script.crossOrigin = "anonymous"; script.dataset.cwcAdsense = "true";
-    script.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=" + encodeURIComponent(slot.dataset.adsenseClient);
-    script.onload = fillSlots;
-    document.head.appendChild(script);
+  }
+  function loadAdSenseClient(clientID) {
+    return new Promise((resolve, reject) => {
+      if (!clientID) { resolve(); return; }
+      if (window.adsbygoogle) { fillAdSenseSlots(); resolve(); return; }
+      let script = document.querySelector("script[data-cwc-adsense]");
+      let settled = false;
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        if (ok && window.adsbygoogle) { fillAdSenseSlots(); resolve(); }
+        else reject(new Error("AdSense script unavailable"));
+      };
+      const timer = window.setTimeout(() => finish(false), 8000);
+      if (!script) {
+        script = document.createElement("script");
+        script.async = true; script.crossOrigin = "anonymous"; script.dataset.cwcAdsense = "true";
+        script.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=" + encodeURIComponent(clientID);
+        document.head.appendChild(script);
+      }
+      script.addEventListener("load", () => finish(true), {once: true});
+      script.addEventListener("error", () => finish(false), {once: true});
+      // A cached script can already be available before listeners are attached.
+      window.setTimeout(() => { if (window.adsbygoogle) finish(true); }, 0);
+    });
+  }
+  async function loadAdSense() {
+    const slot = document.querySelector("[data-adsense-client]");
+    let clientID = slot && slot.dataset.adsenseClient ? slot.dataset.adsenseClient : "";
+    if (!clientID && adGateRequired()) {
+      try {
+        const response = await fetch("/api/monetization/config", {credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}});
+        if (response.ok) {
+          const config = await response.json();
+          if (config && config.adsense && config.adsense.enabled) clientID = config.adsense.client_id || "";
+        }
+      } catch (_) {
+        // A first-party config failure is not evidence of ad blocking.
+        return;
+      }
+    }
+    if (!clientID) return;
+    try { await loadAdSenseClient(clientID); }
+    catch (_) { showAdBlockGate(); }
   }
   function createRipple(element, event) {
     if (element.disabled || element.getAttribute("aria-disabled") === "true") return;
@@ -1333,7 +1413,7 @@ const appJS = `
       submit.setAttribute("aria-disabled", "true");
     }
   }));
-  loadAdSense();
+  void loadAdSense();
   loadMaterialWeb();
 })();
 `
@@ -1380,22 +1460,16 @@ func (s *Server) handleMonetizationConfig(w http.ResponseWriter, r *http.Request
 	s.mu.Lock()
 	adsenseClientID := strings.TrimSpace(s.cfg.AdSenseClientID)
 	adsenseSlot := strings.TrimSpace(s.cfg.AdSenseSlot)
-	admobAppID := strings.TrimSpace(s.cfg.AdMobAppID)
-	admobRewardUnitID := strings.TrimSpace(s.cfg.AdMobRewardUnitID)
-	usageUnlockEnabled := s.rewardedUsageEnabledLocked() && strings.TrimSpace(s.cfg.UsageUnlockEndpoint) != ""
-	usageUnlockEndpoint := strings.TrimSpace(s.cfg.UsageUnlockEndpoint)
 	usageMeteringEnabled := s.usageMeteringEnabled
 	usageDefaultQuotaBytes := s.usageDefaultQuotaBytes
-	rewardVerifierConfigured := strings.TrimSpace(s.cfg.AdMobVerifierSecret) != ""
 	s.mu.Unlock()
-	admobEnabled := admobAppID != "" && admobRewardUnitID != ""
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"adsense":      map[string]any{"enabled": adsenseClientID != "" && adsenseSlot != "", "client_id": adsenseClientID, "slot": adsenseSlot},
-		"admob":        map[string]any{"enabled": admobEnabled, "app_id": admobAppID, "reward_unit_id": admobRewardUnitID, "reward_ready": usageUnlockEnabled && admobEnabled && rewardVerifierConfigured},
+		"admob":        map[string]any{"enabled": false, "app_id": "", "reward_unit_id": "", "reward_ready": false},
 		"usage":        map[string]any{"enabled": usageMeteringEnabled, "default_quota_bytes": usageDefaultQuotaBytes, "accounting": "authenticated MCP and Agent request/response payload bytes"},
-		"usage_unlock": map[string]any{"enabled": usageUnlockEnabled, "endpoint": usageUnlockEndpoint, "redeem_endpoint": s.absolute("/account/admob/redeem"), "verification": "server-side-provider-verification-required", "verifier_configured": rewardVerifierConfigured},
+		"usage_unlock": map[string]any{"enabled": false, "endpoint": "", "redeem_endpoint": "", "verification": "parked", "verifier_configured": false},
 	})
 }
 

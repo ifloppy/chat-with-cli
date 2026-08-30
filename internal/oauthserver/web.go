@@ -34,20 +34,16 @@ func SecurityHeaders(next http.Handler) http.Handler {
 }
 
 type landingPageData struct {
-	Version             string
-	Mode                string
-	Admin               bool
-	GitHubURL           string
-	PublicURL           string
-	SetupAvailable      bool
-	Degraded            bool
-	Locale              string
-	AdSenseClientID     string
-	AdSenseSlot         string
-	AdMobAppID          string
-	AdMobRewardUnitID   string
-	UsageUnlockEnabled  bool
-	UsageUnlockEndpoint string
+	Version         string
+	Mode            string
+	Admin           bool
+	GitHubURL       string
+	PublicURL       string
+	SetupAvailable  bool
+	Degraded        bool
+	Locale          string
+	AdSenseClientID string
+	AdSenseSlot     string
 }
 
 var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype html>
@@ -65,7 +61,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
 <section class="section"><div class="section-heading"><div><span class="eyebrow" data-i18n="Relay">Relay</span><h2 data-i18n="A connection you can understand.">A connection you can understand.</h2></div><p data-i18n="See the instance mode, software version, and authorization health before you connect anything.">See the instance mode, software version, and authorization health before you connect anything.</p></div><div class="grid"><div class="card"><h3 data-i18n="Relay">Relay</h3><div class="meta"><span data-i18n="Version">Version</span><b>{{.Version}}</b><span data-i18n="Instance">Instance</span><b data-i18n="{{.Mode}}">{{.Mode}}</b><span data-i18n="Status">Status</span>{{if .Degraded}}<b class="status bad" data-i18n="authorization frozen">authorization frozen</b>{{else}}<b class="status ok" data-i18n="ready">ready</b>{{end}}</div></div><div class="card"><h3>{{if .SetupAvailable}}<span data-i18n="Setup required">Setup required</span>{{else}}<span data-i18n="Relay configured">Relay configured</span>{{end}}</h3>{{if .SetupAvailable}}<p data-i18n="The Relay has not created its owner account yet. Use the one-time token stored locally on the Relay host.">The Relay has not created its owner account yet. Use the one-time token stored locally on the Relay host.</p>{{else}}<p data-i18n="Owner setup is complete. Devices and credentials are visible only after administrator sign-in.">Owner setup is complete. Devices and credentials are visible only after administrator sign-in.</p>{{end}}</div><div class="card"><h3 data-i18n="Private by design">Private by design</h3><p data-i18n="OAuth credentials are bound to one user, exact device resource, and scope. New public devices use cryptographic immutable IDs.">OAuth credentials are bound to one user, exact device resource, and scope. New public devices use cryptographic immutable IDs.</p></div></div></section>
 {{if .AdSenseClientID}}{{if .AdSenseSlot}}<section class="ad-slot ad-slot-top" data-ad-placement="top" data-adsense-client="{{.AdSenseClientID}}" aria-label="Advertisement" data-i18n-aria-label="Advertisement"><div class="ad-label" data-i18n="Advertisement">Advertisement</div><ins class="adsbygoogle adsense-unit" data-ad-client="{{.AdSenseClientID}}" data-ad-slot="{{.AdSenseSlot}}" data-ad-format="auto" data-full-width-responsive="true"></ins></section>{{end}}{{end}}
 {{if .AdSenseClientID}}{{if .AdSenseSlot}}<section class="ad-slot ad-slot-inline" data-ad-placement="inline" data-adsense-client="{{.AdSenseClientID}}" aria-label="Advertisement" data-i18n-aria-label="Advertisement"><div class="ad-label" data-i18n="Advertisement">Advertisement</div><ins class="adsbygoogle adsense-unit" data-ad-client="{{.AdSenseClientID}}" data-ad-slot="{{.AdSenseSlot}}" data-ad-format="auto" data-full-width-responsive="true"></ins></section>{{end}}{{end}}
-{{if .UsageUnlockEnabled}}<section class="support-card" data-admob-app-id="{{.AdMobAppID}}" data-admob-reward-unit-id="{{.AdMobRewardUnitID}}"><div><h3 data-i18n="Keep the public Relay available">Keep the public Relay available</h3><p data-i18n="A companion app can verify a rewarded AdMob view and issue a short-lived, signed usage entitlement.">A companion app can verify a rewarded AdMob view and issue a short-lived, signed usage entitlement.</p></div><a class="button primary" href="{{.UsageUnlockEndpoint}}" rel="noreferrer" data-i18n="Open reward app">Open reward app</a></section>{{end}}
+
 {{if .AdSenseClientID}}{{if .AdSenseSlot}}<section class="ad-slot ad-slot-bottom" data-ad-placement="bottom" data-adsense-client="{{.AdSenseClientID}}" aria-label="Advertisement" data-i18n-aria-label="Advertisement"><div class="ad-label" data-i18n="Advertisement">Advertisement</div><ins class="adsbygoogle adsense-unit" data-ad-client="{{.AdSenseClientID}}" data-ad-slot="{{.AdSenseSlot}}" data-ad-format="auto" data-full-width-responsive="true"></ins></section>{{end}}{{end}}
 {{if not .SetupAvailable}}<section class="section"><div class="section-heading"><div><span class="eyebrow" data-i18n="Get started">Get started</span><h2 data-i18n="Add a workstation in a few calm steps.">Add a workstation in a few calm steps.</h2></div></div><div class="steps"><div class="step"><b data-i18n="1. Create a safe local Agent config">1. Create a safe local Agent config</b><span class="muted" data-i18n="Read-only is the default profile.">Read-only is the default profile.</span><div class="copy-row"><code class="command" id="setup-command">chat-with-cli agent setup --relay {{.PublicURL}} --root /path/to/workspace --profile read-only --install-systemd</code><button class="copy-button" type="button" data-copy-target="setup-command" data-i18n="Copy">Copy</button></div></div><div class="step"><b data-i18n="2. Connect interactively">2. Connect interactively</b><span class="muted"><span data-i18n="Run">Run</span> <code>chat-with-cli connect</code>. <span data-i18n="Browser OAuth opens automatically when needed, then the local terminal asks how to approve temporary capabilities for this session.">Browser OAuth opens automatically when needed, then the local terminal asks how to approve temporary capabilities for this session.</span></span></div><div class="step"><b data-i18n="3. Connect your MCP client">3. Connect your MCP client</b><div class="copy-row"><code class="command" id="mcp-endpoint">{{.PublicURL}}/mcp</code><button class="copy-button" type="button" data-copy-target="mcp-endpoint" data-i18n="Copy">Copy</button></div></div></div></section>{{end}}
 </main><footer class="footer"><span><span data-i18n="Health endpoint">Health endpoint</span>: <code>/health</code>. <span data-i18n="No device inventory or host information is exposed on this public page.">No device inventory or host information is exposed on this public page.</span></span><span><a href="/docs" data-i18n="Documentation">Documentation</a> · <a href="{{.GitHubURL}}" rel="noreferrer" data-i18n="Open source">Open source</a></span></footer>
@@ -117,11 +113,9 @@ func (s *Server) handleLanding(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	s.mu.Lock()
 	adsenseClientID, adsenseSlot := strings.TrimSpace(s.cfg.AdSenseClientID), strings.TrimSpace(s.cfg.AdSenseSlot)
-	admobAppID, admobRewardUnitID := strings.TrimSpace(s.cfg.AdMobAppID), strings.TrimSpace(s.cfg.AdMobRewardUnitID)
-	usageUnlockEnabled, usageUnlockEndpoint, usageMeteringEnabled := s.rewardedUsageReadyLocked(), strings.TrimSpace(s.cfg.UsageUnlockEndpoint), s.usageMeteringEnabled
 	s.mu.Unlock()
 	current, loggedIn := s.sessionUser(r)
-	_ = executeTemplateWithUINonce(w, r, landingTemplate, landingPageData{Version: version, Mode: mode, Admin: loggedIn && current.Admin, GitHubURL: github, PublicURL: strings.TrimRight(s.base.String(), "/"), SetupAvailable: s.setupAvailable(), Degraded: degraded, Locale: uiLocale(r), AdSenseClientID: adsenseClientID, AdSenseSlot: adsenseSlot, AdMobAppID: admobAppID, AdMobRewardUnitID: admobRewardUnitID, UsageUnlockEnabled: usageMeteringEnabled && usageUnlockEnabled && usageUnlockEndpoint != "", UsageUnlockEndpoint: usageUnlockEndpoint})
+	_ = executeTemplateWithUINonce(w, r, landingTemplate, landingPageData{Version: version, Mode: mode, Admin: loggedIn && current.Admin, GitHubURL: github, PublicURL: strings.TrimRight(s.base.String(), "/"), SetupAvailable: s.setupAvailable(), Degraded: degraded, Locale: uiLocale(r), AdSenseClientID: adsenseClientID, AdSenseSlot: adsenseSlot})
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {

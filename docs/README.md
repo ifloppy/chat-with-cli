@@ -68,14 +68,14 @@ The Relay cannot make a workstation grant a capability. Local profiles and the
 foreground approval mode remain the final authority. Do not run an Agent as
 root, and do not expose a broad filesystem root unless that scope is intended.
 
-## Public Relay and rewarded access
+## Public Relay, usage, and advertising
 
-The web UI has optional, disabled-by-default AdSense and AdMob integration
-points. Configure the AdSense publisher/slot only on a Relay whose privacy
-notice and consent model are ready. AdMob is a native companion-app concern;
-the Relay may link to a reward flow, but it must accept usage unlocks only from
-a server-side verifier using a short-lived signed entitlement. A browser
-button or an unverified receipt must never grant MCP/Agent authority.
+The web UI currently exposes AdSense display advertising. Configure the AdSense
+publisher/slot only on a Relay whose privacy notice and consent model are ready.
+The older native AdMob companion/reward implementation remains in the codebase
+for compatibility and future work, but it is parked: it is not exposed in the
+admin/account/landing UI and the public monetization contract reports it as
+disabled.
 
 When `--usage-metering-enabled` is enabled, the Relay maintains a per-account
 payload quota. Authenticated MCP HTTP request/response bytes and brokered Agent
@@ -84,30 +84,20 @@ WebSocket payload bytes are counted, and new requests are rejected with HTTP
 use `--usage-default-quota-bytes` or the admin console to change the default.
 The admin console can add quota directly or create a single-use activation code;
 users redeem codes from `/account`. These grants are additive and survive a
-restart. Counters, activation-code hashes, and redeemed reward IDs are stored
-in the private `usage-state.json`, separately from authorization data in
-`oauth-state.json`. Traffic increments are checkpointed in batches and flushed
-on clean Relay shutdown; grants and redemptions are persisted synchronously.
+restart. Counters and activation-code hashes are stored in the private
+`usage-state.json`, separately from authorization data in `oauth-state.json`.
+Traffic increments are checkpointed in batches and flushed on clean Relay
+shutdown; quota grants and redemptions are persisted synchronously.
 
-Rewarded usage is deliberately split between the Relay and a companion app.
-Configure the AdMob app/unit IDs and an HTTPS `--usage-unlock-endpoint`, then
-set `CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET` on the Relay. The companion app must
-verify the AdMob reward with the provider, sign a short-lived entitlement using
-that shared secret, and redirect the user to the Relay's redeem URL. The Relay
-checks the account subject, expiry, quota limit, and one-time ID before granting
-traffic. Never put the verifier secret in TOML, browser code, or the Relay state
-file.
-
-The entitlement wire format is `base64url(json).base64url(hmac)`, where the
-HMAC is SHA-256 over the first part using the verifier secret. The JSON claims
-are `{ "sub": "<user ID>", "quota_bytes": <positive integer>, "exp":
-<Unix seconds>, "jti": "<unique ID>" }`; the Relay accepts it for at most 24
-hours and records `jti` as single-use.
-
-AdSense is separate from usage credits: when both the publisher client ID and
-slot are configured, the public landing page renders optional top, inline, and
-bottom responsive placements. No ad script is loaded while either value is
-empty.
+When both the AdSense publisher client ID and slot are configured, the public
+landing page renders responsive placements. User-facing web pages also verify
+that the AdSense loader itself is reachable. If browser tracking/ad blocking
+prevents `adsbygoogle.js` from loading, the web UI shows a non-dismissible
+recovery screen asking the visitor to allow ads for this site and reload.
+Administrative, first-run setup, OAuth/security pages, and all MCP/Agent/API
+traffic are deliberately exempt so an advertising failure cannot lock out the
+operator or break protocol traffic. A normal AdSense `unfilled` result is not
+considered ad blocking; empty placements collapse instead of blocking access.
 
 Relevant Relay options are available on `relay` and `relay setup`:
 

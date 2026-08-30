@@ -63,17 +63,13 @@ systemctl --user enable --now chat-with-cli-agent.service
 
 Relay 不能替工作站授予能力；本地 profile 和前台审批模式才是最终权限边界。不要以 root 运行 Agent，也不要在没有明确意图时暴露 `/` 或整个 home 目录。
 
-## 公共 Relay 与激励广告
+## 公共 Relay、流量额度与广告
 
-网页 UI 提供默认关闭的 AdSense 和 AdMob 扩展点。只有在隐私声明和用户同意流程准备好后，才应配置 AdSense 发布商和广告位。AdMob 属于原生伴侣应用：Relay 可以链接到奖励流程，但只能接受服务端验证后的短期签名 entitlement。浏览器按钮、客户端自报或未验证回执绝不能直接授予 MCP/Agent 权限。
+网页 UI 当前只对外提供 AdSense 展示广告。只有在隐私声明和用户同意流程准备好后，才应配置 AdSense 发布商和广告位。旧的原生 AdMob 伴侣应用/激励奖励实现仍保留在代码中，便于兼容和以后继续开发，但目前处于 parked 状态：管理员页、账户页和首页都不再展示它，公开 monetization 配置接口也会明确报告为 disabled。
 
-启用 `--usage-metering-enabled` 后，Relay 会按账户维护流量额度：认证后的 MCP HTTP 请求/响应字节，以及经 Broker 转发的 Agent WebSocket 载荷字节都会计入额度。额度耗尽后，新的请求会返回 HTTP `402`。每个账户默认 100 MiB，可用 `--usage-default-quota-bytes` 或管理员控制台调整。管理员可以直接给账户增加额度，也可以创建一次性激活码；用户在 `/account` 兑换。额度增加会累加并在重启后保留。计数器、激活码哈希和已兑换奖励 ID 保存在私有的 `usage-state.json` 中，与 `oauth-state.json` 的授权状态分离。普通流量按批次写入并在 Relay 正常关闭时刷新；额度授予和兑换则同步持久化。
+启用 `--usage-metering-enabled` 后，Relay 会按账户维护流量额度：认证后的 MCP HTTP 请求/响应字节，以及经 Broker 转发的 Agent WebSocket 载荷字节都会计入额度。额度耗尽后，新的请求会返回 HTTP `402`。每个账户默认 100 MiB，可用 `--usage-default-quota-bytes` 或管理员控制台调整。管理员可以直接给账户增加额度，也可以创建一次性激活码；用户在 `/account` 兑换。额度增加会累加并在重启后保留。计数器和激活码哈希保存在私有的 `usage-state.json` 中，与 `oauth-state.json` 的授权状态分离。普通流量按批次写入并在 Relay 正常关闭时刷新；额度授予和兑换则同步持久化。
 
-激励广告由 Relay 和伴侣应用共同完成。配置 AdMob 应用/广告单元、HTTPS `--usage-unlock-endpoint`，并在 Relay 环境变量中设置 `CHAT_WITH_CLI_ADMOB_VERIFIER_SECRET` 后，管理员才能启用奖励额度。伴侣应用必须先向 AdMob 验证奖励，再用共享密钥签发短期 entitlement，并把用户带回 Relay 的兑换地址。Relay 会检查账户 subject、过期时间、额度上限和一次性 ID；验证密钥绝不能放进 TOML、浏览器代码或 Relay 状态文件。
-
-entitlement 格式为 `base64url(json).base64url(hmac)`，其中 HMAC-SHA256 计算范围是第一段，密钥是验证器密钥。JSON claims 为 `{ "sub": "<用户 ID>", "quota_bytes": <正整数>, "exp": <Unix 秒>, "jti": "<唯一 ID>" }`；Relay 最多接受 24 小时有效期，并将 `jti` 记录为一次性凭据。
-
-AdSense 与流量额度相互独立：同时填入发布商 client ID 和广告位 ID 后，公共首页会在顶部、中部和底部渲染可选的响应式广告位。任一配置为空时都不会加载广告脚本。
+同时填入 AdSense publisher client ID 和广告位 ID 后，公共首页会渲染响应式广告。用户侧网页还会检查 AdSense 加载器本身是否可访问：如果 Firefox Enhanced Tracking Protection、uBlock/AdBlock 等导致 `adsbygoogle.js` 无法加载，网页应用会显示不可关闭的恢复提示，要求为本站允许广告后刷新。管理员页、首次设置页、OAuth/安全页面，以及全部 MCP/Agent/API 流量均明确豁免，避免广告故障把管理员锁在门外或破坏协议流量。Google 正常返回 `unfilled` 不会被误判为广告屏蔽；此时只会自动收起空广告位。
 
 Relay 和 `relay setup` 都提供相关选项：
 

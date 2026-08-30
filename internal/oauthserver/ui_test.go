@@ -56,7 +56,9 @@ func TestLocalUIAssetsAndMonetizationContract(t *testing.T) {
 			Client  string `json:"client_id"`
 		} `json:"adsense"`
 		AdMob struct {
-			Enabled bool `json:"enabled"`
+			Enabled      bool   `json:"enabled"`
+			AppID        string `json:"app_id"`
+			RewardUnitID string `json:"reward_unit_id"`
 		} `json:"admob"`
 		UsageUnlock struct {
 			Enabled      bool   `json:"enabled"`
@@ -67,16 +69,25 @@ func TestLocalUIAssetsAndMonetizationContract(t *testing.T) {
 	if err := json.Unmarshal(configResponse.Body.Bytes(), &contract); err != nil {
 		t.Fatal(err)
 	}
-	if !contract.AdSense.Enabled || contract.AdSense.Client != "ca-pub-test" || !contract.AdMob.Enabled || !contract.UsageUnlock.Enabled || contract.UsageUnlock.Endpoint != "https://rewards.example/unlock" || contract.UsageUnlock.Verification == "" {
+	if !contract.AdSense.Enabled || contract.AdSense.Client != "ca-pub-test" || contract.AdMob.Enabled || contract.AdMob.AppID != "" || contract.AdMob.RewardUnitID != "" || contract.UsageUnlock.Enabled || contract.UsageUnlock.Endpoint != "" || contract.UsageUnlock.Verification != "parked" {
 		t.Fatalf("unexpected monetization contract: %+v", contract)
 	}
 
 	landing := httptest.NewRecorder()
 	h.ServeHTTP(landing, httptest.NewRequest(http.MethodGet, s.absolute("/?lang=zh-CN"), nil))
 	body := landing.Body.String()
-	for _, expected := range []string{"data-locale=\"zh-CN\"", "data-i18n", "data-adsense-client=\"ca-pub-test\"", "data-admob-app-id=\"ca-app-pub-test~123\"", "https://rewards.example/unlock"} {
+	for _, expected := range []string{"data-locale=\"zh-CN\"", "data-i18n", "data-adsense-client=\"ca-pub-test\""} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("landing page is missing %q: %s", expected, body)
+		}
+	}
+	if strings.Contains(body, "data-admob-app-id") || strings.Contains(body, "Open reward app") {
+		t.Fatalf("landing page unexpectedly exposes parked AdMob reward UI: %s", body)
+	}
+	js := expandedAppJS
+	for _, expected := range []string{"cwc-adblock-gate", "AdSense script unavailable", "Enhanced Tracking Protection", "data-ad-status", "/api/monetization/config"} {
+		if !strings.Contains(js, expected) {
+			t.Fatalf("app JS is missing AdSense recovery behavior %q", expected)
 		}
 	}
 	if strings.Contains(body, "<style") || !strings.Contains(body, "/assets/app.css") || !strings.Contains(body, "/assets/app.js") {
