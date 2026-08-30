@@ -2205,8 +2205,8 @@ func TestDeviceRevocationClearsPendingAuthorizationAndCodes(t *testing.T) {
 	}
 }
 
-func TestTokenExchangeRequiresExactResource(t *testing.T) {
-	s, err := New(Config{PublicURL: "http://127.0.0.1:19032", Password: "resource-required-password-12345", StateDir: t.TempDir()})
+func TestTokenExchangeMayOmitBoundResourceButCannotRetarget(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19032", Password: "resource-compatible-password-12345", StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2219,19 +2219,51 @@ func TestTokenExchangeRequiresExactResource(t *testing.T) {
 	s.clients["resource-client"] = Client{ID: "resource-client", Approved: true, RedirectURIs: []string{redirect}}
 	s.devices["resource-device"] = ownerID
 	resource := s.absolute("/mcp/resource-device")
-	s.codes[tokenKey("resource-code")] = authCode{pendingAuth: pendingAuth{ClientID: "resource-client", UserID: ownerID, RedirectURI: redirect, Resource: resource, Scope: "mcp offline_access", CodeChallenge: challenge}, Expires: time.Now().Add(time.Minute)}
+	makeCode := func(value string) {
+		s.codes[tokenKey(value)] = authCode{pendingAuth: pendingAuth{ClientID: "resource-client", UserID: ownerID, RedirectURI: redirect, Resource: resource, Scope: "mcp offline_access", CodeChallenge: challenge}, Expires: time.Now().Add(time.Minute)}
+	}
+	makeCode("resource-code")
 	s.mu.Unlock()
+
+	// RFC 8707 resource is already bound into the authorization code. ChatGPT
+	// and other public clients may omit it at the token endpoint; omission must
+	// inherit the grant, never widen it.
 	form := url.Values{"grant_type": {"authorization_code"}, "code": {"resource-code"}, "client_id": {"resource-client"}, "redirect_uri": {redirect}, "code_verifier": {verifier}}
 	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr := httptest.NewRecorder()
 	s.handleToken(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("omitted resource exchange status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var tokenResponse struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &tokenResponse); err != nil || tokenResponse.AccessToken == "" {
+		t.Fatalf("bad token response: %+v err=%v", tokenResponse, err)
+	}
+	if !s.VerifyAccess(tokenResponse.AccessToken, resource) {
+		t.Fatal("token issued without repeated resource did not retain its bound resource")
+	}
+	if s.VerifyAccess(tokenResponse.AccessToken, s.absolute("/mcp/other-device")) || s.VerifyAccess(tokenResponse.AccessToken, s.absolute("/mcp")) {
+		t.Fatal("omitted resource widened a device-bound authorization grant")
+	}
+
+	// Explicit retargeting is still forbidden.
+	s.mu.Lock()
+	makeCode("resource-code-wrong")
+	s.mu.Unlock()
+	wrong := url.Values{"grant_type": {"authorization_code"}, "code": {"resource-code-wrong"}, "client_id": {"resource-client"}, "redirect_uri": {redirect}, "code_verifier": {verifier}, "resource": {s.absolute("/mcp/other-device")}}
+	req = httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(wrong.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr = httptest.NewRecorder()
+	s.handleToken(rr, req)
 	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_target") {
-		t.Fatalf("missing resource exchange status=%d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("retargeted resource exchange status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
-func TestRefreshRequiresExactResource(t *testing.T) {
+func TestRefreshMayOmitBoundResourceButCannotRetarget(t *testing.T) {
 	s, err := New(Config{PublicURL: "http://127.0.0.1:19033", Password: "refresh-resource-password-12345", StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -2246,19 +2278,115 @@ func TestRefreshRequiresExactResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, badResource := range []string{"", s.absolute("/mcp/other-device")} {
-		form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {"refresh-resource-client"}}
-		if badResource != "" {
-			form.Set("resource", badResource)
-		}
-		req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		rr := httptest.NewRecorder()
-		s.handleToken(rr, req)
-		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_grant") {
-			t.Fatalf("resource=%q status=%d body=%s", badResource, rr.Code, rr.Body.String())
+
+	// A wrong explicit target is rejected without consuming the valid refresh.
+	wrong := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {"refresh-resource-client"}, "resource": {s.absolute("/mcp/other-device")}}
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(wrong.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	s.handleToken(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_grant") {
+		t.Fatalf("wrong refresh resource status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Omission inherits the refresh record's exact resource.
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {"refresh-resource-client"}}
+	req = httptest.NewRequest(http.MethodPost, s.absolute("/oauth/token"), strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr = httptest.NewRecorder()
+	s.handleToken(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("omitted refresh resource status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || response.AccessToken == "" || response.RefreshToken == "" {
+		t.Fatalf("bad refresh response: %+v err=%v", response, err)
+	}
+	if !s.VerifyAccess(response.AccessToken, resource) {
+		t.Fatal("refresh without repeated resource lost its original binding")
+	}
+	if s.VerifyAccess(response.AccessToken, s.absolute("/mcp/other-device")) || s.VerifyAccess(response.AccessToken, s.absolute("/mcp")) {
+		t.Fatal("refresh without resource widened its original binding")
+	}
+}
+
+func TestAuthorizeMayOmitResourceOnlyForStableAccountMCP(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19034", Password: "authorize-resource-password-12345", StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const redirect = "https://chatgpt.com/connector_platform_oauth_redirect"
+	clientID := "chatgpt-resource-compat"
+	challenge := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	s.mu.Lock()
+	s.clients[clientID] = Client{ID: clientID, Name: "ChatGPT", RedirectURIs: []string{redirect}, IssuedAt: time.Now().Unix()}
+	s.mu.Unlock()
+
+	values := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {clientID},
+		"redirect_uri":          {redirect},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"scope":                 {"mcp offline_access"},
+		"state":                 {"chatgpt-resource-compat-state"},
+	}
+	rr := httptest.NewRecorder()
+	s.handleAuthorizeGET(rr, httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize?"+values.Encode()), nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("resource-omitting authorize status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	s.mu.Lock()
+	if len(s.pending) != 1 {
+		s.mu.Unlock()
+		t.Fatalf("pending authorizations=%d want=1", len(s.pending))
+	}
+	for _, pending := range s.pending {
+		if pending.Resource != s.absolute("/mcp") || pending.Scope != "mcp offline_access" {
+			s.mu.Unlock()
+			t.Fatalf("omitted resource was not normalized to account MCP: %+v", pending)
 		}
 	}
+	s.pending = map[string]pendingAuth{}
+	s.mu.Unlock()
+
+	// Explicit foreign resources are still rejected.
+	badValues := cloneURLValues(values)
+	badValues.Set("resource", "https://attacker.example/mcp")
+	rr = httptest.NewRecorder()
+	s.handleAuthorizeGET(rr, httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize?"+badValues.Encode()), nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("foreign authorize resource status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Device-bound Agent OAuth clients never inherit /mcp: they must still prove
+	// their exact immutable /agent/id/... resource.
+	identity, err := deviceidentity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundClientID := "device-bound-resource-compat"
+	s.mu.Lock()
+	s.clients[boundClientID] = Client{ID: boundClientID, Name: "chat-with-cli agent laptop", RedirectURIs: []string{redirect}, DeviceID: identity.ID(), DevicePublicKey: deviceidentity.EncodePublicKey(identity.PublicKey()), DeviceKeyVerified: true, IssuedAt: time.Now().Unix()}
+	s.mu.Unlock()
+	boundValues := cloneURLValues(values)
+	boundValues.Set("client_id", boundClientID)
+	rr = httptest.NewRecorder()
+	s.handleAuthorizeGET(rr, httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize?"+boundValues.Encode()), nil))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("device-bound client inherited account resource: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func cloneURLValues(in url.Values) url.Values {
+	out := make(url.Values, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
 }
 
 func TestImmutableDeviceClaimRequiresMatchingEd25519Key(t *testing.T) {
@@ -4382,5 +4510,18 @@ func TestAccountMCPProtectedResourceMetadata(t *testing.T) {
 	}
 	if metadata["resource"] != s.absolute("/mcp") {
 		t.Fatalf("account metadata resource=%#v", metadata["resource"])
+	}
+
+	authorization := httptest.NewRecorder()
+	mux.ServeHTTP(authorization, httptest.NewRequest(http.MethodGet, s.absolute("/.well-known/oauth-authorization-server"), nil))
+	if authorization.Code != http.StatusOK {
+		t.Fatalf("authorization metadata status=%d body=%s", authorization.Code, authorization.Body.String())
+	}
+	var authMetadata map[string]any
+	if err := json.Unmarshal(authorization.Body.Bytes(), &authMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if authMetadata["resource_indicators_supported"] != true {
+		t.Fatalf("authorization metadata does not advertise RFC 8707 resource indicators: %#v", authMetadata)
 	}
 }

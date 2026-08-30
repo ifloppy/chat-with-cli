@@ -1294,6 +1294,7 @@ func (s *Server) handleAuthorizationMetadata(w http.ResponseWriter, _ *http.Requ
 		"token_endpoint_auth_methods_supported":          []string{"none"},
 		"code_challenge_methods_supported":               []string{"S256"},
 		"authorization_response_iss_parameter_supported": true,
+		"resource_indicators_supported":                  true,
 	})
 }
 
@@ -1807,7 +1808,11 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth authorization request is too large or has invalid PKCE parameters")
 		return
 	}
-	kind, device, resource, ok := s.resourceParts(q.Get("resource"))
+	rawResource := strings.TrimSpace(q.Get("resource"))
+	if rawResource == "" {
+		rawResource = s.absolute("/mcp")
+	}
+	kind, device, resource, ok := s.resourceParts(rawResource)
 	if !ok {
 		s.oauthPageError(w, http.StatusBadRequest, "OAuth resource must be the local /mcp account URL, /mcp/<device>, or /agent/<device> URL")
 		return
@@ -2437,8 +2442,9 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code binding check failed")
 		return
 	}
-	if resource == "" || resource != code.Resource {
-		oauthError(w, http.StatusBadRequest, "invalid_target", "resource is required and must exactly match the authorization grant")
+	resource = strings.TrimSpace(resource)
+	if resource != "" && resource != code.Resource {
+		oauthError(w, http.StatusBadRequest, "invalid_target", "resource must match the authorization grant when supplied")
 		return
 	}
 	kind, _, _, resourceOK := s.resourceParts(code.Resource)
@@ -2464,13 +2470,13 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) exchangeRefresh(w http.ResponseWriter, r *http.Request) {
 	refreshValue := r.Form.Get("refresh_token")
 	clientID := r.Form.Get("client_id")
-	resource := r.Form.Get("resource")
+	resource := strings.TrimSpace(r.Form.Get("resource"))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupLocked(time.Now())
 	key := tokenKey(refreshValue)
 	record, ok := s.refresh[key]
-	if !ok || record.ClientID != clientID || resource == "" || resource != record.Resource {
+	if !ok || record.ClientID != clientID || (resource != "" && resource != record.Resource) {
 		if used, replay := s.refreshUsed[key]; replay && (clientID == "" || used.ClientID == clientID) {
 			s.resetAgentSessionForResourceLocked(used.Resource)
 			s.revokeFamilyLocked(used.Family)
