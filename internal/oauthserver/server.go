@@ -300,6 +300,114 @@ type DeviceStatus struct {
 	Capabilities protocol.AgentCapabilities
 }
 
+// OwnedMCPDevice is a bounded account-facing view of one workstation. It does
+// not contain bearer credentials, public keys, or another account's metadata.
+type OwnedMCPDevice struct {
+	Route   string
+	ID      string
+	Name    string
+	Online  bool
+	Enabled bool
+}
+
+// OwnedMCPDevices returns only workstations currently owned by userID. The
+// account-level MCP endpoint uses this to let the client choose a device
+// without granting authority over any route outside the account.
+func (s *Server) OwnedMCPDevices(userID string) []OwnedMCPDevice {
+	s.mu.Lock()
+	s.cleanupLocked(time.Now())
+	user, ok := s.users[userID]
+	if !ok || user.ID != userID || user.Disabled {
+		s.mu.Unlock()
+		return nil
+	}
+	devices := make([]OwnedMCPDevice, 0)
+	for route, ownerID := range s.devices {
+		if ownerID != userID {
+			continue
+		}
+		record := s.deviceRecords[route]
+		name := record.DisplayName
+		if name == "" {
+			name = strings.TrimPrefix(route, "id/")
+		}
+		id := record.ID
+		if strings.HasPrefix(route, "id/") {
+			id = strings.TrimPrefix(route, "id/")
+		}
+		devices = append(devices, OwnedMCPDevice{
+			Route: route, ID: id, Name: name,
+			Enabled: s.resourceOwnedByUserLocked(userID, s.absolute("/mcp/"+route), "mcp"),
+		})
+	}
+	provider := s.statusProvider
+	s.mu.Unlock()
+
+	if provider != nil {
+		statuses := provider()
+		for i := range devices {
+			devices[i].Online = statuses[devices[i].Route].Online
+		}
+	}
+	sort.Slice(devices, func(i, j int) bool {
+		left, right := strings.ToLower(devices[i].Name), strings.ToLower(devices[j].Name)
+		if left == right {
+			return devices[i].Route < devices[j].Route
+		}
+		return left < right
+	})
+	return devices
+}
+
+// ResolveOwnedMCPDevice resolves an immutable ID, canonical route, or unique
+// display name only within userID's currently enabled devices. Ownership and
+// disable/revocation state are checked on every call.
+func (s *Server) ResolveOwnedMCPDevice(userID, selector string) (string, bool) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return "", false
+	}
+	direct := ""
+	if id, ok := protocol.NormalizeDeviceID(selector); ok {
+		direct = "id/" + id
+	} else if route, ok := canonicalDeviceRoute(selector); ok {
+		direct = route
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanupLocked(time.Now())
+	user, ok := s.users[userID]
+	if !ok || user.ID != userID || user.Disabled {
+		return "", false
+	}
+	ownedAndEnabled := func(route string) bool {
+		return s.devices[route] == userID && s.resourceOwnedByUserLocked(userID, s.absolute("/mcp/"+route), "mcp")
+	}
+	if direct != "" {
+		if ownedAndEnabled(direct) {
+			return direct, true
+		}
+		return "", false
+	}
+
+	match := ""
+	for route, ownerID := range s.devices {
+		if ownerID != userID || !ownedAndEnabled(route) {
+			continue
+		}
+		name := s.deviceRecords[route].DisplayName
+		if name == "" || !strings.EqualFold(name, selector) {
+			continue
+		}
+		if match != "" && match != route {
+			return "", false
+		}
+		match = route
+	}
+	return match, match != ""
+}
+
 type mutableStateSnapshot struct {
 	clients                map[string]Client
 	access                 map[string]tokenRecord
@@ -1108,6 +1216,9 @@ func (s *Server) resourceOwnershipIntactLocked(userID, resource, requiredScope s
 		(requiredScope == "agent:connect" && kind != "agent") {
 		return false
 	}
+	if requiredScope == "mcp" && device == "" {
+		return true
+	}
 	if s.disabledDevices[device] || s.retiredDevices[device] {
 		return false
 	}
@@ -1147,6 +1258,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/monetization", s.handleAdminMonetization)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleAuthorizationMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleRootResourceMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleAccountMCPResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/{device}", s.handleMCPResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/id/{id}", s.handleMCPResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/agent/{device}", s.handleAgentResourceMetadata)
@@ -1196,6 +1308,10 @@ func (s *Server) resourceMetadata(resource, requiredScope string) map[string]any
 
 func (s *Server) handleRootResourceMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.resourceMetadata(s.base.String(), "mcp"))
+}
+
+func (s *Server) handleAccountMCPResourceMetadata(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.resourceMetadata(s.absolute("/mcp"), "mcp"))
 }
 
 func (s *Server) handleMCPResourceMetadata(w http.ResponseWriter, r *http.Request) {
@@ -1566,7 +1682,11 @@ func (s *Server) resourceParts(raw string) (kind, device, canonical string, ok b
 	if !strings.EqualFold(u.Scheme, s.base.Scheme) || !strings.EqualFold(u.Host, s.base.Host) {
 		return "", "", "", false
 	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	trimmedPath := strings.Trim(u.Path, "/")
+	if trimmedPath == "mcp" {
+		return "mcp", "", s.absolute("/mcp"), true
+	}
+	parts := strings.Split(trimmedPath, "/")
 	if len(parts) < 2 || len(parts) > 3 || (parts[0] != "mcp" && parts[0] != "agent") {
 		return "", "", "", false
 	}
@@ -1689,7 +1809,7 @@ func (s *Server) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 	}
 	kind, device, resource, ok := s.resourceParts(q.Get("resource"))
 	if !ok {
-		s.oauthPageError(w, http.StatusBadRequest, "OAuth resource must be a local /mcp/<device> or /agent/<device> URL")
+		s.oauthPageError(w, http.StatusBadRequest, "OAuth resource must be the local /mcp account URL, /mcp/<device>, or /agent/<device> URL")
 		return
 	}
 	scope, ok := normalizeScope(q.Get("scope"), kind)
@@ -2026,6 +2146,11 @@ func (s *Server) authorizeResourceLocked(userID, clientID, resource string) erro
 	}
 	if s.killSwitch || (kind == "mcp" && !s.mcpEnabled) || (kind == "agent" && !s.agentEnabled) {
 		return errors.New("this capability is temporarily disabled by the administrator")
+	}
+	if kind == "mcp" && device == "" {
+		// The account-level MCP grant authorizes the account, not a particular
+		// workstation. Device ownership is revalidated on every routed tool call.
+		return nil
 	}
 	if s.retiredDevices[device] {
 		return errors.New("this device identity was permanently revoked; generate a new device identity")
@@ -2488,6 +2613,9 @@ func (s *Server) resourceOwnedByUserLocked(userID, resource, requiredScope strin
 	if (requiredScope == "mcp" && kind != "mcp") || (requiredScope == "agent:connect" && kind != "agent") {
 		return false
 	}
+	if requiredScope == "mcp" && device == "" {
+		return true
+	}
 	if record, exists := s.deviceRecords[device]; exists && (record.Disabled || (record.OwnerID != "" && record.OwnerID != userID)) {
 		return false
 	}
@@ -2502,6 +2630,20 @@ func (s *Server) verifyAccessKey(credentialHash, resource, requiredScope string)
 	defer s.mu.Unlock()
 	s.cleanupLocked(time.Now())
 	return s.verifyAccessKeyLocked(credentialHash, resource, requiredScope)
+}
+
+func (s *Server) accessUserIDForKey(credentialHash, resource, requiredScope string) (string, bool) {
+	if credentialHash == "" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanupLocked(time.Now())
+	if !s.verifyAccessKeyLocked(credentialHash, resource, requiredScope) {
+		return "", false
+	}
+	record := s.access[credentialHash]
+	return record.UserID, record.UserID != ""
 }
 
 func (s *Server) verifyAccessKeyLocked(credentialHash, resource, requiredScope string) bool {
@@ -2524,6 +2666,9 @@ func (s *Server) resourceEnabledLocked(resource, requiredScope string) bool {
 	kind, device, _, ok := s.resourceParts(resource)
 	if !ok || (requiredScope == "mcp" && kind != "mcp") || (requiredScope == "agent:connect" && kind != "agent") {
 		return false
+	}
+	if requiredScope == "mcp" && device == "" {
+		return true
 	}
 	if s.disabledDevices[device] || s.retiredDevices[device] {
 		return false
@@ -2870,8 +3015,13 @@ func (s *Server) ProtectScopedResource(requiredScope string, next http.Handler) 
 			return
 		}
 		token := bearerValue(r.Header.Get("Authorization"))
-		if s.VerifyAccessScope(token, resource, requiredScope) {
-			credentialHash := tokenKey(token)
+		credentialHash := ""
+		authenticatedUserID := ""
+		if token != "" {
+			credentialHash = tokenKey(token)
+			authenticatedUserID, _ = s.accessUserIDForKey(credentialHash, resource, requiredScope)
+		}
+		if authenticatedUserID != "" {
 			if requiredScope == "agent:connect" && !s.verifyAgentDeviceProof(r, resource, credentialHash) {
 				w.Header().Set("Cache-Control", "no-store")
 				http.Error(w, "device proof required or invalid", http.StatusUnauthorized)
@@ -2913,7 +3063,8 @@ func (s *Server) ProtectScopedResource(requiredScope string, next http.Handler) 
 					return
 				}
 			}
-			ctx, cancel := context.WithCancel(authzctx.WithChecker(r.Context(), checker))
+			authorizedContext := authzctx.WithUserID(r.Context(), authenticatedUserID)
+			ctx, cancel := context.WithCancel(authzctx.WithChecker(authorizedContext, checker))
 			defer cancel()
 			go func() {
 				ticker := time.NewTicker(100 * time.Millisecond)
@@ -2971,7 +3122,7 @@ func (s *Server) SetAgentSessionResetter(resetter func(device string)) {
 
 func (s *Server) resetAgentSessionForResourceLocked(resource string) {
 	_, device, _, ok := s.resourceParts(resource)
-	if ok && s.agentSessionResetter != nil {
+	if ok && device != "" && s.agentSessionResetter != nil {
 		s.agentSessionResetter(device)
 	}
 }

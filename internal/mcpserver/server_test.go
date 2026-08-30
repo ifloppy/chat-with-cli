@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -312,5 +314,121 @@ func TestRawStreamableHTTPToolsListAdvertisesAllTools(t *testing.T) {
 				t.Fatalf("raw descriptor missing annotation %s: %#v", key, descriptor)
 			}
 		}
+	}
+}
+
+type fakeAccountCaller struct {
+	device string
+	method string
+	raw    json.RawMessage
+}
+
+func (f *fakeAccountCaller) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	return nil, fmt.Errorf("unexpected direct account call")
+}
+
+func (f *fakeAccountCaller) Devices(context.Context) ([]AccountDevice, error) {
+	return []AccountDevice{{Selector: "id/0123456789abcdef0123456789abcdef", ID: "0123456789abcdef0123456789abcdef", Name: "laptop", Online: true, Enabled: true}}, nil
+}
+
+func (f *fakeAccountCaller) CallDevice(_ context.Context, device, method string, raw json.RawMessage) (json.RawMessage, error) {
+	f.device, f.method, f.raw = device, method, append(json.RawMessage(nil), raw...)
+	return []byte(`{}`), nil
+}
+
+func TestAccountEndpointAddsDeviceRoutingWithoutChangingCoreCatalog(t *testing.T) {
+	ctx := context.Background()
+	caller := &fakeAccountCaller{}
+	server := New(caller)
+	client := mcp.NewClient(&mcp.Implementation{Name: "account-test", Version: "1"}, nil)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	listed, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Tools) != 32 {
+		t.Fatalf("account tool count=%d want=32", len(listed.Tools))
+	}
+	seenDevices := false
+	for _, tool := range listed.Tools {
+		if tool.Name == "devices_list" {
+			seenDevices = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+				t.Fatalf("devices_list is not marked read-only: %#v", tool.Annotations)
+			}
+			continue
+		}
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Required   []string                  `json:"required"`
+			Properties map[string]map[string]any `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode %s schema: %v", tool.Name, err)
+		}
+		if schema.Properties["device"]["type"] != "string" || !slices.Contains(schema.Required, "device") {
+			t.Fatalf("%s does not require string device selector: %s", tool.Name, raw)
+		}
+	}
+	if !seenDevices {
+		t.Fatal("account endpoint did not advertise devices_list")
+	}
+	if len(ToolCatalog()) != 31 {
+		t.Fatalf("core tool catalog changed size: %d", len(ToolCatalog()))
+	}
+
+	devices, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "devices_list", Arguments: map[string]any{}})
+	if err != nil || devices.IsError {
+		t.Fatalf("devices_list failed: result=%#v err=%v", devices, err)
+	}
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "system_info", Arguments: map[string]any{"device": "id/0123456789abcdef0123456789abcdef"}})
+	if err != nil || result.IsError {
+		t.Fatalf("routed system_info failed: result=%#v err=%v", result, err)
+	}
+	if caller.device != "id/0123456789abcdef0123456789abcdef" || caller.method != "system_info" || string(caller.raw) != "{}" {
+		t.Fatalf("unexpected routed call: device=%q method=%q raw=%s", caller.device, caller.method, caller.raw)
+	}
+}
+
+func TestAccountEndpointRejectsDeviceToolWithoutSelector(t *testing.T) {
+	ctx := context.Background()
+	caller := &fakeAccountCaller{}
+	server := New(caller)
+	client := mcp.NewClient(&mcp.Implementation{Name: "account-test", Version: "1"}, nil)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "system_info", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("missing device selector unexpectedly succeeded: %#v", result)
+	}
+	if caller.method != "" {
+		t.Fatalf("missing device selector reached caller: %#v", caller)
 	}
 }

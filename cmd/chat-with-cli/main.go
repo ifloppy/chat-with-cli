@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/ifloppy/chat-with-cli/internal/agent"
+	"github.com/ifloppy/chat-with-cli/internal/authzctx"
 	"github.com/ifloppy/chat-with-cli/internal/config"
 	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/engine"
@@ -384,11 +385,17 @@ func loopbackListen(address string) bool {
 }
 
 func envBool(name string) bool {
+	return envBoolDefault(name, false)
+}
+
+func envBoolDefault(name string, defaultValue bool) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
 	case "1", "true", "yes", "on":
 		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		return defaultValue
 	}
 }
 
@@ -488,6 +495,51 @@ func relayDeviceRoute(r *http.Request) string {
 		return "id/" + id
 	}
 	return ""
+}
+
+type relayAccountCaller struct {
+	Broker *relay.Broker
+	OAuth  *oauthserver.Server
+	UserID string
+}
+
+func (c relayAccountCaller) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	return nil, errors.New("account MCP calls require an explicit device selector")
+}
+
+func (c relayAccountCaller) Devices(ctx context.Context) ([]mcpserver.AccountDevice, error) {
+	if c.Broker == nil || c.OAuth == nil || c.UserID == "" || !authzctx.Allowed(ctx) {
+		return nil, errors.New("account MCP authorization is unavailable")
+	}
+	owned := c.OAuth.OwnedMCPDevices(c.UserID)
+	devices := make([]mcpserver.AccountDevice, 0, len(owned))
+	for _, device := range owned {
+		devices = append(devices, mcpserver.AccountDevice{
+			Selector: device.Route, ID: device.ID, Name: device.Name, Online: device.Online, Enabled: device.Enabled,
+		})
+	}
+	return devices, nil
+}
+
+func (c relayAccountCaller) CallDevice(ctx context.Context, selector, method string, raw json.RawMessage) (json.RawMessage, error) {
+	if c.Broker == nil || c.OAuth == nil || c.UserID == "" || !authzctx.Allowed(ctx) {
+		return nil, errors.New("account MCP authorization is unavailable")
+	}
+	route, ok := c.OAuth.ResolveOwnedMCPDevice(c.UserID, selector)
+	if !ok {
+		return nil, errors.New("selected device is unavailable, disabled, ambiguous, or not owned by this account")
+	}
+	// Compose the account token checker with current device ownership. This
+	// remains fail-closed during long RPCs if a workstation is disabled,
+	// revoked, or transferred while the request is in flight.
+	deviceCtx := authzctx.WithChecker(ctx, func() bool {
+		if !authzctx.Allowed(ctx) {
+			return false
+		}
+		_, stillOwned := c.OAuth.ResolveOwnedMCPDevice(c.UserID, route)
+		return stillOwned
+	})
+	return c.Broker.Call(deviceCtx, route, method, raw)
 }
 
 func defaultAgentStateDir() string {
@@ -816,7 +868,11 @@ func runRelay(args []string) error {
 		return mcpserver.New(relay.RemoteCaller{Broker: broker, Device: device})
 	}, relayStreamableHTTPOptions(*listen, *publicURL))
 	legacyHandler = maxRequestBody(8<<20, legacyHandler)
-	if envBool("CHAT_WITH_CLI_MCP_DIAGNOSTICS") {
+	// Discovery logging contains only RPC method, request path, and HTTP status.
+	// Keep it on by default so an empty ChatGPT Actions list is diagnosable;
+	// operators may explicitly disable it with CHAT_WITH_CLI_MCP_DIAGNOSTICS=0.
+	diagnosticsEnabled := envBoolDefault("CHAT_WITH_CLI_MCP_DIAGNOSTICS", true)
+	if diagnosticsEnabled {
 		pathHandler = mcpDiagnosticHandler(pathHandler)
 		legacyHandler = mcpDiagnosticHandler(legacyHandler)
 		log.Printf("MCP discovery diagnostics enabled (method/path/status only)")
@@ -848,13 +904,22 @@ func runRelay(args []string) error {
 			return out
 		})
 		oauth.RegisterRoutes(mux)
+		var accountHandler http.Handler = mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+			userID, _ := authzctx.UserID(r.Context())
+			return mcpserver.New(relayAccountCaller{Broker: broker, OAuth: oauth, UserID: userID})
+		}, relayStreamableHTTPOptions(*listen, *publicURL))
+		accountHandler = maxRequestBody(8<<20, accountHandler)
+		if diagnosticsEnabled {
+			accountHandler = mcpDiagnosticHandler(accountHandler)
+		}
+		mux.Handle("/mcp", oauth.ProtectScopedResource("mcp", accountHandler))
 		mux.Handle("/mcp/{device}", oauth.ProtectScopedResource("mcp", pathHandler))
 		mux.Handle("/mcp/id/{id}", oauth.ProtectScopedResource("mcp", pathHandler))
 		mux.Handle("/agent/", agentPathMux(
 			oauth.AgentChallengeHandler(),
 			oauth.ProtectScopedResource("agent:connect", broker.AgentHandler()),
 		))
-		log.Printf("%s OAuth instance; MCP endpoint: %s/mcp/<device>", strings.ToLower(*mode), strings.TrimRight(*publicURL, "/"))
+		log.Printf("%s OAuth instance; account MCP endpoint: %s/mcp; device MCP endpoint: %s/mcp/id/<device-id>", strings.ToLower(*mode), strings.TrimRight(*publicURL, "/"), strings.TrimRight(*publicURL, "/"))
 	} else {
 		mux.Handle("/mcp/{device}", bearerAuth(*clientToken, pathHandler))
 		mux.Handle("/mcp/id/{id}", bearerAuth(*clientToken, pathHandler))
@@ -1186,10 +1251,11 @@ func runAgentCommand(command string, args []string) error {
 		log.Printf("Agent authentication: browser OAuth (credentials: %s)", *credentials)
 	}
 	log.Printf("agent %q connecting to %s", *device, *relayURL)
+	log.Printf("Account MCP endpoint: %s/mcp", strings.TrimRight(*relayURL, "/"))
 	if *deviceID != "" {
-		log.Printf("MCP endpoint for this device: %s/mcp/id/%s", strings.TrimRight(*relayURL, "/"), *deviceID)
+		log.Printf("Device-pinned MCP endpoint: %s/mcp/id/%s", strings.TrimRight(*relayURL, "/"), *deviceID)
 	} else {
-		log.Printf("MCP endpoint for this device: %s/mcp/%s", strings.TrimRight(*relayURL, "/"), *device)
+		log.Printf("Legacy device-pinned MCP endpoint: %s/mcp/%s", strings.TrimRight(*relayURL, "/"), *device)
 	}
 	return client.Run(ctx)
 }

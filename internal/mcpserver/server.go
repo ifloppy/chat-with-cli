@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/ifloppy/chat-with-cli/internal/engine"
 	"github.com/ifloppy/chat-with-cli/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -15,6 +16,102 @@ var Version = version.Value
 
 type Caller interface {
 	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)
+}
+
+// AccountDevice is a device visible through the account-level MCP endpoint.
+// Selector is the value clients pass back as the required device argument.
+type AccountDevice struct {
+	Selector string `json:"selector"`
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name"`
+	Online   bool   `json:"online"`
+	Enabled  bool   `json:"enabled"`
+}
+
+type AccountDeviceListOutput struct {
+	Devices []AccountDevice `json:"devices"`
+}
+
+// AccountCaller is used only by the account-level /mcp resource. Each actual
+// device call carries an explicit selector, allowing the Relay to revalidate
+// current ownership for every operation instead of keeping shared selection
+// state between stateless MCP requests.
+type AccountCaller interface {
+	Caller
+	Devices(context.Context) ([]AccountDevice, error)
+	CallDevice(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
+}
+
+func accountInputSchema[In any](caller Caller) any {
+	if _, ok := caller.(AccountCaller); !ok {
+		return nil
+	}
+	schema, err := jsonschema.For[In](nil)
+	if err != nil {
+		panic(fmt.Errorf("build account tool input schema: %w", err))
+	}
+	if schema.Properties == nil {
+		schema.Properties = map[string]*jsonschema.Schema{}
+	}
+	schema.Properties["device"] = &jsonschema.Schema{
+		Type:        "string",
+		Description: "Device selector returned by devices_list. Required on the account-level MCP endpoint.",
+	}
+	found := false
+	for _, name := range schema.Required {
+		if name == "device" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		schema.Required = append(schema.Required, "device")
+	}
+	order := []string{"device"}
+	for _, name := range schema.PropertyOrder {
+		if name != "device" {
+			order = append(order, name)
+		}
+	}
+	schema.PropertyOrder = order
+	return schema
+}
+
+func callTool(ctx context.Context, req *mcp.CallToolRequest, caller Caller, method string, raw json.RawMessage) (json.RawMessage, error) {
+	account, ok := caller.(AccountCaller)
+	if !ok {
+		return caller.Call(ctx, method, raw)
+	}
+	if req == nil || req.Params == nil {
+		return nil, fmt.Errorf("account MCP call is missing arguments")
+	}
+	args, err := json.Marshal(req.Params.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("encode account MCP arguments: %w", err)
+	}
+	var routing struct {
+		Device string `json:"device"`
+	}
+	if err := json.Unmarshal(args, &routing); err != nil || routing.Device == "" {
+		return nil, fmt.Errorf("account MCP call requires a device selector from devices_list")
+	}
+	return account.CallDevice(ctx, routing.Device, method, raw)
+}
+
+func addAccountDevicesTool(server *mcp.Server, caller AccountCaller) {
+	handler := func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, AccountDeviceListOutput, error) {
+		devices, err := caller.Devices(ctx)
+		if err != nil {
+			return nil, AccountDeviceListOutput{}, err
+		}
+		return nil, AccountDeviceListOutput{Devices: devices}, nil
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "devices_list",
+		Title:       "List account devices",
+		Description: "List only the devices currently owned by this authenticated account and return the selector required by every device tool on this endpoint.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(false), IdempotentHint: true, OpenWorldHint: boolPtr(false)},
+	}, handler)
 }
 
 // ToolDescriptor is the security-relevant portion of an MCP tool descriptor.
@@ -69,13 +166,13 @@ func (c LocalCaller) Call(ctx context.Context, method string, raw json.RawMessag
 }
 
 func addTool[In, Out any](server *mcp.Server, caller Caller, name, description string) {
-	handler := func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+	handler := func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
 		var out Out
 		raw, err := json.Marshal(in)
 		if err != nil {
 			return nil, out, err
 		}
-		result, err := caller.Call(ctx, name, raw)
+		result, err := callTool(ctx, req, caller, name, raw)
 		if err != nil {
 			return nil, out, err
 		}
@@ -84,7 +181,7 @@ func addTool[In, Out any](server *mcp.Server, caller Caller, name, description s
 		}
 		return nil, out, nil
 	}
-	tool := &mcp.Tool{Name: name, Title: toolTitle(name), Description: description, Annotations: toolAnnotations(name)}
+	tool := &mcp.Tool{Name: name, Title: toolTitle(name), Description: description, InputSchema: accountInputSchema[In](caller), Annotations: toolAnnotations(name)}
 	mcp.AddTool(server, tool, handler)
 }
 
@@ -140,13 +237,13 @@ func toolAnnotations(name string) *mcp.ToolAnnotations {
 }
 
 func addScreenshotTool(server *mcp.Server, caller Caller) {
-	handler := func(ctx context.Context, _ *mcp.CallToolRequest, in engine.ComputerScreenshotInput) (*mcp.CallToolResult, engine.ComputerScreenshotMetaOutput, error) {
+	handler := func(ctx context.Context, req *mcp.CallToolRequest, in engine.ComputerScreenshotInput) (*mcp.CallToolResult, engine.ComputerScreenshotMetaOutput, error) {
 		var shot engine.ComputerScreenshotOutput
 		raw, err := json.Marshal(in)
 		if err != nil {
 			return nil, engine.ComputerScreenshotMetaOutput{}, err
 		}
-		result, err := caller.Call(ctx, "computer_screenshot", raw)
+		result, err := callTool(ctx, req, caller, "computer_screenshot", raw)
 		if err != nil {
 			return nil, engine.ComputerScreenshotMetaOutput{}, err
 		}
@@ -157,18 +254,18 @@ func addScreenshotTool(server *mcp.Server, caller Caller) {
 		content := []mcp.Content{&mcp.ImageContent{MIMEType: shot.MIMEType, Data: shot.Data}}
 		return &mcp.CallToolResult{Content: content}, meta, nil
 	}
-	tool := &mcp.Tool{Name: "computer_screenshot", Title: toolTitle("computer_screenshot"), Description: "Capture the current desktop and return it directly as MCP image content for visual reasoning.", Annotations: toolAnnotations("computer_screenshot")}
+	tool := &mcp.Tool{Name: "computer_screenshot", Title: toolTitle("computer_screenshot"), Description: "Capture the current desktop and return it directly as MCP image content for visual reasoning.", InputSchema: accountInputSchema[engine.ComputerScreenshotInput](caller), Annotations: toolAnnotations("computer_screenshot")}
 	mcp.AddTool(server, tool, handler)
 }
 
 func addObserveTool(server *mcp.Server, caller Caller) {
-	handler := func(ctx context.Context, _ *mcp.CallToolRequest, in engine.ComputerObserveInput) (*mcp.CallToolResult, engine.ComputerObserveMetaOutput, error) {
+	handler := func(ctx context.Context, req *mcp.CallToolRequest, in engine.ComputerObserveInput) (*mcp.CallToolResult, engine.ComputerObserveMetaOutput, error) {
 		var observed engine.ComputerObserveOutput
 		raw, err := json.Marshal(in)
 		if err != nil {
 			return nil, engine.ComputerObserveMetaOutput{}, err
 		}
-		result, err := caller.Call(ctx, "computer_observe", raw)
+		result, err := callTool(ctx, req, caller, "computer_observe", raw)
 		if err != nil {
 			return nil, engine.ComputerObserveMetaOutput{}, err
 		}
@@ -185,14 +282,22 @@ func addObserveTool(server *mcp.Server, caller Caller) {
 		}
 		return &mcp.CallToolResult{Content: content}, meta, nil
 	}
-	tool := &mcp.Tool{Name: "computer_observe", Title: toolTitle("computer_observe"), Description: "Observe the current GUI in one call using bounded semantic UI data and an optional screenshot. screenshot=auto avoids image transfer when semantic UI is sufficient.", Annotations: toolAnnotations("computer_observe")}
+	tool := &mcp.Tool{Name: "computer_observe", Title: toolTitle("computer_observe"), Description: "Observe the current GUI in one call using bounded semantic UI data and an optional screenshot. screenshot=auto avoids image transfer when semantic UI is sufficient.", InputSchema: accountInputSchema[engine.ComputerObserveInput](caller), Annotations: toolAnnotations("computer_observe")}
 	mcp.AddTool(server, tool, handler)
 }
 
 func New(caller Caller) *mcp.Server {
+	instructions := `For GUI work, start with computer_observe when state is unknown. Prefer computer_ui_invoke for a unique semantic action and computer_ui_get_text/set_text for text fields, then computer_ui_find/tree for inspection. Use screenshots and pointer tools only as fallbacks. For long commands use task_start and task_wait with next_offset. Do not restart a task merely because MCP or chat reconnects. Use checkpoint_write at meaningful development milestones so another agent/session can resume the workspace.`
+	account, accountMode := caller.(AccountCaller)
+	if accountMode {
+		instructions = `This is the account-level MCP endpoint. Start with devices_list when the target device is not already unambiguous. Every other tool requires the device selector returned by devices_list; choose the intended device independently for each call because requests are stateless. ` + instructions
+	}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name: "chat-with-cli", Version: Version,
-	}, &mcp.ServerOptions{Instructions: `For GUI work, start with computer_observe when state is unknown. Prefer computer_ui_invoke for a unique semantic action and computer_ui_get_text/set_text for text fields, then computer_ui_find/tree for inspection. Use screenshots and pointer tools only as fallbacks. For long commands use task_start and task_wait with next_offset. Do not restart a task merely because MCP or chat reconnects. Use checkpoint_write at meaningful development milestones so another agent can resume the workspace.`})
+	}, &mcp.ServerOptions{Instructions: instructions})
+	if accountMode {
+		addAccountDevicesTool(server, account)
+	}
 
 	addTool[struct{}, engine.SystemInfoOutput](server, caller, "system_info",
 		"Show the connected machine, allowed filesystem roots, and whether shell execution is enabled.")

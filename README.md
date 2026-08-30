@@ -71,9 +71,12 @@ systemctl --user daemon-reload
 systemctl --user enable --now chat-with-cli-agent.service
 ```
 
-Use `https://cli.example.com/mcp/id/<immutable-device-id>` as the remote MCP
-endpoint. In ChatGPT or another MCP client, choose OAuth authentication and
-refresh the tool list after authorization. For a developer workstation,
+Use `https://cli.example.com/mcp` as the recommended remote MCP endpoint. One
+OAuth grant can then see only the devices owned by that account, list them with
+`devices_list`, and route each tool call to an explicit device. Immutable
+`/mcp/id/<immutable-device-id>` endpoints remain available when a client should
+be pinned to exactly one workstation. In ChatGPT or another MCP client, choose
+OAuth authentication and refresh the tool list after authorization. For a developer workstation,
 explicitly choose `--profile developer` or enable individual capabilities; see
 [Agent configuration](docs/agent.md).
 
@@ -154,8 +157,10 @@ security audit and first browser login are complete.
 - [Self-host with ChatGPT](docs/self-host-with-chatgpt.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
-The MCP server currently advertises 31 tools. Read-only/destructive/open-world
-annotations and human-readable titles are explicit. The raw Streamable HTTP
+A device-pinned MCP endpoint advertises 31 workstation tools. The account-level
+`/mcp` endpoint advertises those same 31 tools plus read-only `devices_list`;
+its workstation tools require the selector returned by that list.
+Read-only/destructive/open-world annotations and human-readable titles are explicit. The raw Streamable HTTP
 `initialize` and `tools/list` path is covered by a regression test; a client's
 tool cache or policy may still hide tools after a server-side change.
 
@@ -176,8 +181,9 @@ Portal persistence defaults to the Agent process lifetime. See
   KWallet, Keychain, and Credential Manager integrations remain future work.
 - Landlock is Linux-only and filesystem-only. It is defense in depth, not a
   complete container or network sandbox.
-- Legacy name routes remain for alpha compatibility. New deployments should
-  use immutable `/agent/id/<id>` and `/mcp/id/<id>` routes.
+- Legacy name routes remain for alpha compatibility. Agents should use immutable
+  `/agent/id/<id>` routes. MCP clients should normally use account-level `/mcp`;
+  immutable `/mcp/id/<id>` remains available for intentionally device-pinned grants.
 
 ## License
 

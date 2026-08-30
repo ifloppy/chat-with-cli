@@ -40,11 +40,13 @@ systemctl --user enable --now chat-with-cli-agent.service
 
 ## 4. 在 MCP 客户端中添加端点
 
-使用 setup/status 输出的不可变设备 ID：
+普通情况下直接使用 Relay 的账户级 MCP 地址：
 
 ```text
-https://chat-with-cli.iruanp.com/mcp/id/<device-id>
+https://chat-with-cli.iruanp.com/mcp
 ```
+
+OAuth 登录一次后，`devices_list` 只会列出当前账户拥有的设备；其它工具每次调用都携带设备选择器，因此多个对话并发时不会共享一个容易串台的“当前设备”。如果明确希望某个客户端永远只绑定一台机器，仍可使用 `/mcp/id/<device-id>`。
 
 在 ChatGPT 或其他 MCP 客户端选择 OAuth。不要把 owner 密码、setup token 或 Agent 凭据粘贴到聊天、日志或工单中。
 

@@ -285,7 +285,7 @@ func TestPublicWebSurfacesDiscloseOperatorTrustAndSelfHostingPath(t *testing.T) 
 	connect := httptest.NewRecorder()
 	s.handleConnect(connect, httptest.NewRequest(http.MethodGet, s.absolute("/connect"), nil))
 	connectBody := connect.Body.String()
-	if !strings.Contains(connectBody, "Public Relay warning") || !strings.Contains(connectBody, "Self-hosting guide") || !strings.Contains(connectBody, "/mcp/id/&lt;device-id&gt;") {
+	if !strings.Contains(connectBody, "Public Relay warning") || !strings.Contains(connectBody, "Self-hosting guide") || !strings.Contains(connectBody, "http://127.0.0.1:19208/mcp") {
 		t.Fatalf("connect page is missing trust/self-host guidance: %s", connectBody)
 	}
 

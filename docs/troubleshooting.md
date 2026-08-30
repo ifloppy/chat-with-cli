@@ -26,13 +26,16 @@ only when you already have an MCP bearer token and want authenticated
 
 ## Agent/MCP failures
 
-- Use the exact immutable `/agent/id/<id>` and `/mcp/id/<id>` paths.
+- Agents should use the exact immutable `/agent/id/<id>` path. MCP clients should
+  normally use the stable account `/mcp` resource; use `/mcp/id/<id>` only for
+  an intentionally device-pinned grant.
 - Confirm the Agent's local credential has not expired and that the Relay
   admin has not disabled the device, Agent, or token family.
 - If MCP shows zero tools, compare the raw server `tools/list` result with the
-  client cache and use its Refresh Tools action. The server regression test
-  expects 31 descriptors.
-- A disconnected Agent is expected to make MCP calls fail; the Relay never
+  client cache and use its Refresh Tools action. `/mcp` should advertise 32
+  descriptors; a device-pinned endpoint should advertise 31. Discovery itself
+  does not require an Agent to be online.
+- A disconnected Agent is expected to make device tool calls fail; the Relay never
   dials the workstation inbound.
 
 ## Desktop failures

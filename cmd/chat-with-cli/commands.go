@@ -285,7 +285,7 @@ func runAgentSetup(args []string) error {
 	}
 	base := strings.TrimRight(*relayURL, "/")
 	fmt.Printf("Agent configuration written to %s\n\n", *configPath)
-	fmt.Printf("Device name: %s\nImmutable device ID: %s\nDevice identity: %s%s\nMCP endpoint: %s/mcp/id/%s\n", *device, *deviceID, *identityPath, map[bool]string{true: " (created)", false: ""}[createdIdentity], base, *deviceID)
+	fmt.Printf("Device name: %s\nImmutable device ID: %s\nDevice identity: %s%s\nAccount MCP endpoint: %s/mcp\nDevice-pinned MCP endpoint: %s/mcp/id/%s\n", *device, *deviceID, *identityPath, map[bool]string{true: " (created)", false: ""}[createdIdentity], base, base, *deviceID)
 	fmt.Println("Filesystem roots exposed to MCP read tools:")
 	home, _ := os.UserHomeDir()
 	for _, root := range *roots {

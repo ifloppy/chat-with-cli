@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ifloppy/chat-with-cli/internal/authzctx"
 	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/relay"
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -64,6 +65,7 @@ func startOAuthMCPServer(t *testing.T) (*Server, string, func()) {
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
 	oauthServer.RegisterRoutes(mux)
+	mux.Handle("/mcp", oauthServer.ProtectResource(mcpHandler))
 	mux.Handle("/mcp/device-a", oauthServer.ProtectResource(mcpHandler))
 	mux.Handle("/mcp/device-b", oauthServer.ProtectResource(mcpHandler))
 	httpServer := &http.Server{Handler: mux}
@@ -175,6 +177,50 @@ func TestOAuthMCPAuthorizationFlow(t *testing.T) {
 		t.Fatal("access token must not authorize another device")
 	}
 }
+func TestOAuthAccountMCPAuthorizationFlow(t *testing.T) {
+	oauthServer, base, cleanup := startOAuthMCPServer(t)
+	defer cleanup()
+	redirect := "http://127.0.0.1:43120/callback"
+	handler, err := auth.NewAuthorizationCodeHandler(&auth.AuthorizationCodeHandlerConfig{
+		DynamicClientRegistrationConfig: &auth.DynamicClientRegistrationConfig{Metadata: &oauthex.ClientRegistrationMetadata{
+			RedirectURIs: []string{redirect}, TokenEndpointAuthMethod: "none",
+			GrantTypes: []string{"authorization_code", "refresh_token"}, ResponseTypes: []string{"code"}, ClientName: "chat-with-cli account test",
+		}},
+		RedirectURL: redirect, AuthorizationCodeFetcher: browserFetcher(t, "owner", "correct-horse-battery-staple-0123456789"), RequestRefreshToken: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "account-test-client", Version: "1"}, nil)
+	transport := &mcp.StreamableClientTransport{Endpoint: base + "/mcp", OAuthHandler: handler}
+	session, err := client.Connect(context.Background(), transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	tools, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools.Tools) != 1 || tools.Tools[0].Name != "ping" {
+		t.Fatalf("unexpected account tools: %#v", tools.Tools)
+	}
+	ts, err := handler.TokenSource(context.Background())
+	if err != nil || ts == nil {
+		t.Fatalf("token source: %v", err)
+	}
+	token, err := ts.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !oauthServer.VerifyAccess(token.AccessToken, base+"/mcp") {
+		t.Fatal("account access token should authorize /mcp")
+	}
+	if oauthServer.VerifyAccess(token.AccessToken, base+"/mcp/device-a") {
+		t.Fatal("account access token must remain distinct from device-resource tokens")
+	}
+}
+
 func TestOAuthStateSurvivesRestartAndRefreshRotates(t *testing.T) {
 	stateDir := t.TempDir()
 	cfg := Config{PublicURL: "http://127.0.0.1:18888", Password: "persistent-test-password-0123456789", StateDir: stateDir}
@@ -4197,5 +4243,144 @@ func TestAgentProofRechecksLiveAccessBeforeConsumingChallenge(t *testing.T) {
 	s.mu.Unlock()
 	if consumed != 0 {
 		t.Fatal("revoked proof consumed a challenge")
+	}
+}
+
+func TestAccountMCPGrantRoutesOnlyCurrentOwnedDevices(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19120", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const aliceOne = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const aliceTwo = "abababababababababababababababab"
+	const bobOne = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	s.mu.Lock()
+	alice, err := s.createUserLocked("alice-account-mcp", "alice-account-mcp-password-12345")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	bob, err := s.createUserLocked("bob-account-mcp", "bob-account-mcp-password-123456")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	for _, pair := range []struct {
+		route string
+		owner string
+		name  string
+	}{
+		{"id/" + aliceOne, alice.ID, "Alice Laptop"},
+		{"id/" + aliceTwo, alice.ID, "Alice Desktop"},
+		{"id/" + bobOne, bob.ID, "Bob Laptop"},
+	} {
+		s.devices[pair.route] = pair.owner
+		record := s.ensureDeviceRecordLocked(pair.route, pair.owner)
+		record.OwnerID = pair.owner
+		record.DisplayName = pair.name
+		s.deviceRecords[pair.route] = record
+	}
+	s.clients["account-client"] = Client{ID: "account-client", Approved: true}
+	aliceToken, _, _, err := s.issueTokensLocked("account-client", alice.ID, s.absolute("/mcp"), "mcp offline_access")
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	bobToken, _, _, err := s.issueTokensLocked("account-client", bob.ID, s.absolute("/mcp"), "mcp offline_access")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !s.VerifyAccess(aliceToken, s.absolute("/mcp")) || !s.VerifyAccess(bobToken, s.absolute("/mcp")) {
+		t.Fatal("account MCP grant was not valid for its account resource")
+	}
+	if s.VerifyAccess(aliceToken, s.absolute("/mcp/id/"+aliceOne)) {
+		t.Fatal("account token unexpectedly became a device-resource token")
+	}
+
+	aliceDevices := s.OwnedMCPDevices(alice.ID)
+	if len(aliceDevices) != 2 {
+		t.Fatalf("alice device count=%d want=2: %#v", len(aliceDevices), aliceDevices)
+	}
+	for _, device := range aliceDevices {
+		if device.Route == "id/"+bobOne {
+			t.Fatal("bob device leaked into alice account inventory")
+		}
+	}
+	for _, selector := range []string{aliceOne, "id/" + aliceOne, "Alice Laptop"} {
+		if route, ok := s.ResolveOwnedMCPDevice(alice.ID, selector); !ok || route != "id/"+aliceOne {
+			t.Fatalf("alice selector %q resolved to %q ok=%v", selector, route, ok)
+		}
+	}
+	if route, ok := s.ResolveOwnedMCPDevice(alice.ID, bobOne); ok || route != "" {
+		t.Fatalf("alice resolved bob device: route=%q ok=%v", route, ok)
+	}
+
+	var contextUser string
+	protected := s.ProtectScopedResource("mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contextUser, _ = authzctx.UserID(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, s.absolute("/mcp"), nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	rr := httptest.NewRecorder()
+	protected.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent || contextUser != alice.ID {
+		t.Fatalf("account middleware status=%d context user=%q want=%q", rr.Code, contextUser, alice.ID)
+	}
+
+	// Disabling a workstation removes it from routing immediately without
+	// revoking the account-level grant itself.
+	s.mu.Lock()
+	s.disabledDevices["id/"+aliceTwo] = true
+	record := s.deviceRecords["id/"+aliceTwo]
+	record.Disabled = true
+	s.deviceRecords["id/"+aliceTwo] = record
+	s.mu.Unlock()
+	if _, ok := s.ResolveOwnedMCPDevice(alice.ID, aliceTwo); ok {
+		t.Fatal("disabled alice device remained routable")
+	}
+	if !s.VerifyAccess(aliceToken, s.absolute("/mcp")) {
+		t.Fatal("disabling one device revoked the account-level MCP grant")
+	}
+
+	// A proper ownership transfer must immediately remove the route from Alice
+	// and make it resolvable only inside Bob's account.
+	s.mu.Lock()
+	s.devices["id/"+aliceOne] = bob.ID
+	record = s.deviceRecords["id/"+aliceOne]
+	record.OwnerID = bob.ID
+	s.deviceRecords["id/"+aliceOne] = record
+	s.mu.Unlock()
+	if _, ok := s.ResolveOwnedMCPDevice(alice.ID, aliceOne); ok {
+		t.Fatal("transferred device remained routable by previous owner")
+	}
+	if route, ok := s.ResolveOwnedMCPDevice(bob.ID, aliceOne); !ok || route != "id/"+aliceOne {
+		t.Fatalf("new owner could not resolve transferred device: route=%q ok=%v", route, ok)
+	}
+}
+
+func TestAccountMCPProtectedResourceMetadata(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19121", StateDir: t.TempDir(), Mode: ModePublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, s.absolute("/.well-known/oauth-protected-resource/mcp"), nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("metadata status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["resource"] != s.absolute("/mcp") {
+		t.Fatalf("account metadata resource=%#v", metadata["resource"])
 	}
 }

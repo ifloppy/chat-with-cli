@@ -253,3 +253,18 @@ func TestRelayStreamableOptionsOnlyRelaxExplicitReverseProxyTopology(t *testing.
 		}
 	}
 }
+
+func TestEnvBoolDefault(t *testing.T) {
+	t.Setenv("CWC_TEST_BOOL", "")
+	if !envBoolDefault("CWC_TEST_BOOL", true) {
+		t.Fatal("empty environment should preserve true default")
+	}
+	t.Setenv("CWC_TEST_BOOL", "off")
+	if envBoolDefault("CWC_TEST_BOOL", true) {
+		t.Fatal("explicit off did not disable default-on flag")
+	}
+	t.Setenv("CWC_TEST_BOOL", "yes")
+	if !envBoolDefault("CWC_TEST_BOOL", false) {
+		t.Fatal("explicit yes did not enable default-off flag")
+	}
+}

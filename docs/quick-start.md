@@ -65,12 +65,15 @@ systemctl --user enable --now chat-with-cli-agent.service
 
 The generated config stores the Relay URL and immutable device ID, so `login`
 can reuse them without manual transcription. Immutable IDs are canonicalized to
-lowercase and are the resource identity; the device name is only a display
-label and legacy route. Use the ID endpoint in MCP clients:
+lowercase and are the workstation identity; the device name is only a display
+label and legacy route. Use the stable account endpoint in normal MCP clients:
 
 ```text
-https://cli.example.com/mcp/id/<immutable-id>
+https://cli.example.com/mcp
 ```
+
+The account grant can list and route only that user's devices. Use
+`/mcp/id/<immutable-id>` only when deliberately pinning a client to one device.
 
 `agent setup --install-systemd` writes a hardened user unit but deliberately
 does not enable or start it. Review the unit, complete browser OAuth, and use
