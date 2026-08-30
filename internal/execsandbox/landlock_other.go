@@ -4,6 +4,6 @@ package execsandbox
 
 import "errors"
 
-func Apply(_ []string, _ bool) error {
+func Apply(_ []string, _ bool, _ string) error {
 	return errors.New("Landlock exec sandbox is supported on Linux only")
 }

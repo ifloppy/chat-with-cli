@@ -97,7 +97,7 @@ explicitly choose `--profile read-write` (legacy alias: `developer`) or enable i
 | Filesystem read | only inside `--root` | add a narrowly scoped root |
 | Filesystem/checkpoint write | off | `--allow-file-write` |
 | Arbitrary shell / PTY | off | `--allow-exec` |
-| Exec filesystem boundary | none unless requested | `--exec-sandbox=landlock` on Linux |
+| Exec filesystem boundary | none for read-only; coding profiles select Landlock on Linux | `--exec-sandbox=landlock` on Linux |
 | Screen read (screenshots) | off | `--allow-screen` |
 | Accessibility read (AT-SPI) | off | `--allow-accessibility` |
 | Keyboard, pointer, semantic UI writes | off | `--allow-computer-use` |
@@ -167,8 +167,8 @@ security audit and first browser login are complete.
 - [Self-host with ChatGPT](docs/self-host-with-chatgpt.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
-A device-pinned MCP endpoint advertises 31 workstation tools. The account-level
-`/mcp` endpoint advertises those same 31 tools plus read-only `devices_list`;
+A device-pinned MCP endpoint advertises 34 workstation tools. The account-level
+`/mcp` endpoint advertises those same 34 tools plus read-only `devices_list`;
 its workstation tools require the selector returned by that list.
 Read-only/destructive/open-world annotations and human-readable titles are explicit. The raw Streamable HTTP
 `initialize` and `tools/list` path is covered by a regression test; a client's

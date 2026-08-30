@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
@@ -42,11 +43,66 @@ func verifyExpectedSHA256(data []byte, expected string) error {
 	if err != nil || expected == "" {
 		return err
 	}
-	actual := sha256Hex(data)
+	return verifySHA256(expected, sha256Hex(data))
+}
+
+func verifySHA256(expected, actual string) error {
 	if actual != expected {
 		return fmt.Errorf("file changed since it was read: expected sha256 %s, found %s", expected, actual)
 	}
 	return nil
+}
+
+func formatByteLimit(limit int64) string {
+	const (
+		kiB = int64(1 << 10)
+		miB = int64(1 << 20)
+	)
+	switch {
+	case limit > 0 && limit%miB == 0:
+		return fmt.Sprintf("%d MiB", limit/miB)
+	case limit > 0 && limit%kiB == 0:
+		return fmt.Sprintf("%d KiB", limit/kiB)
+	default:
+		return fmt.Sprintf("%d bytes", limit)
+	}
+}
+
+func maximumFileSizeError(kind string, limit int64) error {
+	return fmt.Errorf("file exceeds maximum %s size (%s)", kind, formatByteLimit(limit))
+}
+
+// hashFileSHA256 streams a complete regular file through sha256 instead of
+// loading it into memory. The caller owns the file descriptor; its position
+// is reset to the beginning so callers can seek to their requested range
+// afterwards.
+func (e *Engine) hashFileSHA256(file *os.File) (string, error) {
+	stat, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !stat.Mode().IsRegular() {
+		return "", errors.New("path is not a regular file")
+	}
+	if stat.Size() > e.cfg.MaxHashBytes {
+		return "", maximumFileSizeError("SHA-256 snapshot", e.cfg.MaxHashBytes)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	hasher := sha256.New()
+	readLimit := e.cfg.MaxHashBytes + 1
+	if readLimit <= 0 || readLimit < e.cfg.MaxHashBytes {
+		readLimit = e.cfg.MaxHashBytes
+	}
+	n, err := io.Copy(hasher, io.LimitReader(file, readLimit))
+	if err != nil {
+		return "", err
+	}
+	if n > e.cfg.MaxHashBytes {
+		return "", maximumFileSizeError("SHA-256 snapshot", e.cfg.MaxHashBytes)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func (e *Engine) verifyFileSHA256(path, expected string) error {
@@ -59,14 +115,11 @@ func (e *Engine) verifyFileSHA256(path, expected string) error {
 		return fmt.Errorf("verify expected_sha256: %w", err)
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, int64(e.cfg.MaxReadBytes)+1))
+	actual, err := e.hashFileSHA256(file)
 	if err != nil {
 		return err
 	}
-	if len(data) > e.cfg.MaxReadBytes {
-		return errors.New("file exceeds maximum size for expected_sha256 precondition")
-	}
-	return verifyExpectedSHA256(data, expected)
+	return verifySHA256(expected, actual)
 }
 
 func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
@@ -84,8 +137,8 @@ func (e *Engine) readFileContext(ctx context.Context, in FileReadInput) (FileRea
 	if limit <= 0 {
 		limit = 64 * 1024
 	}
-	if limit > e.cfg.MaxReadBytes {
-		limit = e.cfg.MaxReadBytes
+	if limit > e.cfg.MaxReadChunkBytes {
+		limit = e.cfg.MaxReadChunkBytes
 	}
 	file, path, err := e.secureOpenRead(in.Path)
 	if err != nil {
@@ -103,12 +156,11 @@ func (e *Engine) readFileContext(ctx context.Context, in FileReadInput) (FileRea
 		return FileReadOutput{}, err
 	}
 	sha := ""
-	if stat.Size() <= int64(e.cfg.MaxReadBytes) {
-		hasher := sha256.New()
-		if _, err := io.Copy(hasher, file); err != nil {
+	if stat.Size() <= e.cfg.MaxHashBytes {
+		sha, err = e.hashFileSHA256(file)
+		if err != nil {
 			return FileReadOutput{}, err
 		}
-		sha = hex.EncodeToString(hasher.Sum(nil))
 	}
 	if in.Offset > stat.Size() {
 		in.Offset = stat.Size()
@@ -163,11 +215,36 @@ func (e *Engine) writeFileContext(ctx context.Context, in FileWriteInput) error 
 		if err := e.checkContext(ctx); err != nil {
 			return err
 		}
-		_, err := e.secureAtomicWrite(in.Path, []byte(in.Content), 0o644)
+		var err error
+		if strings.TrimSpace(in.ExpectedSHA256) == "" {
+			_, err = e.secureAtomicWrite(in.Path, []byte(in.Content), 0o644)
+		} else {
+			_, err = e.secureAtomicWriteIfUnchanged(ctx, in.Path, []byte(in.Content), 0o644, in.ExpectedSHA256)
+		}
 		return err
-	case "append":
-		if err := e.verifyFileSHA256(in.Path, in.ExpectedSHA256); err != nil {
-			return err
+	case "append", "append_unchecked":
+		// The explicit mode and the explicit flag are equivalent opt-ins. The
+		// mode is useful for clients that want the unsafe behavior to be visible
+		// in the operation name; the flag keeps the escape hatch available to
+		// clients that only model write modes.
+		unchecked := mode == "append_unchecked" || in.UnsafeAllowUncheckedAppend
+		file, _, openErr := e.secureOpenRead(in.Path)
+		existing := openErr == nil
+		if file != nil {
+			_ = file.Close()
+		}
+		if openErr != nil && !errors.Is(openErr, os.ErrNotExist) {
+			return openErr
+		}
+		if existing {
+			if strings.TrimSpace(in.ExpectedSHA256) == "" && !unchecked {
+				return errors.New("expected_sha256 is required when appending to an existing file; call fs_read first or explicitly enable unsafe_allow_unchecked_append")
+			}
+			if strings.TrimSpace(in.ExpectedSHA256) != "" {
+				if err := e.verifyFileSHA256(in.Path, in.ExpectedSHA256); err != nil {
+					return err
+				}
+			}
 		}
 		if err := e.checkContext(ctx); err != nil {
 			return err
@@ -460,6 +537,12 @@ func (e *Engine) patchFileContext(ctx context.Context, in FilePatchInput) (FileP
 	if in.OldText == "" {
 		return FilePatchOutput{}, errors.New("old_text must not be empty")
 	}
+	if bytes.IndexByte([]byte(in.OldText), 0) >= 0 || bytes.IndexByte([]byte(in.NewText), 0) >= 0 {
+		return FilePatchOutput{}, errors.New("fs_patch does not support binary text containing NUL bytes")
+	}
+	if !utf8.ValidString(in.OldText) || !utf8.ValidString(in.NewText) {
+		return FilePatchOutput{}, errors.New("fs_patch supports UTF-8 text only; invalid UTF-8 is treated as binary")
+	}
 	if strings.TrimSpace(in.ExpectedSHA256) == "" {
 		return FilePatchOutput{}, errors.New("expected_sha256 is required for fs_patch; call fs_read first")
 	}
@@ -471,13 +554,19 @@ func (e *Engine) patchFileContext(ctx context.Context, in FilePatchInput) (FileP
 	if err != nil {
 		return FilePatchOutput{}, err
 	}
-	data, err := io.ReadAll(io.LimitReader(file, int64(e.cfg.MaxReadBytes)+1))
+	data, err := io.ReadAll(io.LimitReader(file, e.cfg.MaxPatchBytes+1))
 	_ = file.Close()
 	if err != nil {
 		return FilePatchOutput{}, err
 	}
-	if len(data) > e.cfg.MaxReadBytes {
-		return FilePatchOutput{}, errors.New("file exceeds maximum patch size")
+	if int64(len(data)) > e.cfg.MaxPatchBytes {
+		return FilePatchOutput{}, maximumFileSizeError("patch", e.cfg.MaxPatchBytes)
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return FilePatchOutput{}, errors.New("fs_patch does not support binary files (NUL byte found)")
+	}
+	if !utf8.Valid(data) {
+		return FilePatchOutput{}, errors.New("fs_patch supports UTF-8 text only; binary or invalid UTF-8 files are rejected")
 	}
 	if err := verifyExpectedSHA256(data, in.ExpectedSHA256); err != nil {
 		return FilePatchOutput{}, err
@@ -493,11 +582,57 @@ func (e *Engine) patchFileContext(ctx context.Context, in FilePatchInput) (FileP
 	if err := e.checkContext(ctx); err != nil {
 		return FilePatchOutput{}, err
 	}
-	writtenPath, err := e.secureAtomicWrite(in.Path, patched, 0o644)
+	writtenPath, err := e.secureAtomicWriteIfUnchanged(ctx, in.Path, patched, 0o644, in.ExpectedSHA256)
 	if err != nil {
 		return FilePatchOutput{}, err
 	}
 	return FilePatchOutput{Path: writtenPath, Replacements: count}, nil
+}
+
+func (e *Engine) DeleteFile(in FileDeleteInput) error {
+	return e.deleteFileContext(context.Background(), in)
+}
+
+func (e *Engine) deleteFileContext(ctx context.Context, in FileDeleteInput) error {
+	if err := e.checkContext(ctx); err != nil {
+		return err
+	}
+	if !e.cfg.AllowFileWrite {
+		return errors.New("filesystem write is disabled; start the agent with --allow-file-write")
+	}
+	return e.secureDelete(ctx, in.Path, in.ExpectedSHA256, in.AllowEmptyDir)
+}
+
+func (e *Engine) MoveFile(in FileMoveInput) (FileMoveOutput, error) {
+	return e.moveFileContext(context.Background(), in)
+}
+
+func (e *Engine) moveFileContext(ctx context.Context, in FileMoveInput) (FileMoveOutput, error) {
+	if err := e.checkContext(ctx); err != nil {
+		return FileMoveOutput{}, err
+	}
+	if !e.cfg.AllowFileWrite {
+		return FileMoveOutput{}, errors.New("filesystem write is disabled; start the agent with --allow-file-write")
+	}
+	return e.secureMove(ctx, in)
+}
+
+func (e *Engine) MakeDirectory(in FileMkdirInput) error {
+	return e.makeDirectoryContext(context.Background(), in)
+}
+
+// Mkdir is a short compatibility alias for callers that use the filesystem
+// operation name directly.
+func (e *Engine) Mkdir(in FileMkdirInput) error { return e.MakeDirectory(in) }
+
+func (e *Engine) makeDirectoryContext(ctx context.Context, in FileMkdirInput) error {
+	if err := e.checkContext(ctx); err != nil {
+		return err
+	}
+	if !e.cfg.AllowFileWrite {
+		return errors.New("filesystem write is disabled; start the agent with --allow-file-write")
+	}
+	return e.secureMkdir(ctx, in.Path)
 }
 
 func atomicWriteFile(path string, data []byte) error {

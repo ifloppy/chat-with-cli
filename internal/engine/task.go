@@ -128,7 +128,7 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 	id := protocol.NewID()
 	logPath := filepath.Join(m.dir, id+".log")
 	tempDir := ""
-	if m.engine.cfg.ExecSandbox == "landlock" && m.engine.cfg.AllowFileWrite {
+	if m.engine.cfg.ExecSandbox == "landlock" {
 		tempDir = filepath.Join(m.dir, id+".tmp")
 		if err := os.Mkdir(tempDir, 0o700); err != nil {
 			return TaskInfo{}, fmt.Errorf("create private task temp directory: %w", err)
@@ -171,6 +171,24 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 		cmd.Env = setEnv(cmd.Env, "TMPDIR", tempDir)
 		cmd.Env = setEnv(cmd.Env, "TMP", tempDir)
 		cmd.Env = setEnv(cmd.Env, "TEMP", tempDir)
+		// A Landlock child cannot read the operator's real home directory. Give
+		// common tools a private synthetic home so git, Go, npm, and similar
+		// tooling do not fail while probing private dotfiles or caches outside
+		// the workspace. The directory is already granted to the child and is
+		// removed when the task finishes.
+		cmd.Env = setEnv(cmd.Env, "HOME", tempDir)
+		cmd.Env = setEnv(cmd.Env, "USERPROFILE", tempDir)
+		cmd.Env = setEnv(cmd.Env, "XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+		cmd.Env = setEnv(cmd.Env, "XDG_CACHE_HOME", filepath.Join(tempDir, "cache"))
+		cmd.Env = setEnv(cmd.Env, "XDG_DATA_HOME", filepath.Join(tempDir, "data"))
+		cmd.Env = setEnv(cmd.Env, "XDG_STATE_HOME", filepath.Join(tempDir, "state"))
+		cmd.Env = setEnv(cmd.Env, "GIT_CONFIG_GLOBAL", filepath.Join(tempDir, "gitconfig"))
+		cmd.Env = setEnv(cmd.Env, "GOPATH", filepath.Join(tempDir, "go"))
+		cmd.Env = setEnv(cmd.Env, "GOMODCACHE", filepath.Join(tempDir, "go", "pkg", "mod"))
+		cmd.Env = setEnv(cmd.Env, "GOCACHE", filepath.Join(tempDir, "go-cache"))
+		cmd.Env = setEnv(cmd.Env, "npm_config_cache", filepath.Join(tempDir, "npm-cache"))
+		cmd.Env = setEnv(cmd.Env, "PIP_CACHE_DIR", filepath.Join(tempDir, "pip-cache"))
+		cmd.Env = setEnv(cmd.Env, "CARGO_HOME", filepath.Join(tempDir, "cargo"))
 	}
 	if err := m.engine.checkContext(ctx); err != nil {
 		_ = logFile.Close()
@@ -309,8 +327,8 @@ func (m *TaskManager) readContext(ctx context.Context, in ReadTaskInput) (ReadTa
 	if limit <= 0 {
 		limit = 64 * 1024
 	}
-	if limit > m.engine.cfg.MaxReadBytes {
-		limit = m.engine.cfg.MaxReadBytes
+	if limit > m.engine.cfg.MaxReadChunkBytes {
+		limit = m.engine.cfg.MaxReadChunkBytes
 	}
 	file, err := securefile.Open(filepath.Join(m.dir, in.TaskID+".log"), os.O_RDONLY, 0, "task log")
 	if err != nil {
@@ -497,10 +515,8 @@ func (e *Engine) command(command, cwd, tempDir string) (*exec.Cmd, error) {
 	if e.cfg.ExecSandbox == "none" {
 		return shellCommand(command), nil
 	}
-	for _, root := range e.roots {
-		if e.rootCoversProtectedPath(root) {
-			return nil, fmt.Errorf("Landlock root %q contains chat-with-cli private state; choose a narrower root or disable shell execution", root)
-		}
+	if err := e.ValidateExecConfiguration(); err != nil {
+		return nil, err
 	}
 	executable, err := os.Executable()
 	if err != nil {

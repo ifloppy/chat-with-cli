@@ -87,12 +87,16 @@ func Apply(roots []string, allowWrite bool, tempDir string) error {
 			return fmt.Errorf("allow runtime device %s: %w", path, err)
 		}
 	}
-	if allowWrite {
-		tempDir = filepath.Clean(strings.TrimSpace(tempDir))
-		if tempDir == "." || tempDir == "" {
-			return errors.New("write-enabled Landlock sandbox requires a private temporary directory")
+	tempDir = filepath.Clean(strings.TrimSpace(tempDir))
+	if allowWrite && (tempDir == "." || tempDir == "") {
+		return errors.New("write-enabled Landlock sandbox requires a private temporary directory")
+	}
+	if tempDir != "." && tempDir != "" {
+		access := readAccess
+		if allowWrite {
+			access |= writeAccess
 		}
-		if err := grant(tempDir, readAccess|writeAccess); err != nil {
+		if err := grant(tempDir, access); err != nil {
 			return fmt.Errorf("allow private temporary path %s: %w", tempDir, err)
 		}
 	}

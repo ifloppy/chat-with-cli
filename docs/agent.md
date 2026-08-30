@@ -36,11 +36,27 @@ Capabilities can also be selected separately:
 ```
 
 `agent setup` prints every configured filesystem root and warns when `/` or the
-whole home directory is exposed. Prefer an explicit project/workspace root;
-read-only still means every readable file under that root can be returned to an
+whole home directory is exposed. Coding profiles use a project-like root by
+default; when Landlock is enabled, setup rejects a root that overlaps the
+private `chat-with-cli` state/configuration paths because that would make every
+shell task fail closed. Prefer an explicit project/workspace root; read-only
+still means every readable file under that root can be returned to an
 authorized MCP client. A root is not a shell sandbox. With `--allow-exec`, a
 shell without Landlock still has the Agent user's normal filesystem, network,
 process, and environment access. Landlock is filesystem-only defense in depth.
+
+## Coding file workflow
+
+For an existing source file, call `fs_read` first and pass its returned
+`sha256` to `fs_patch` or `fs_write` rewrite. `fs_patch` requires the exact
+match count and rejects stale snapshots; it is the preferred operation for a
+localized edit. Use `fs_mkdir`, `fs_move`, and `fs_delete` for lifecycle changes.
+Deleting an existing file also requires its snapshot, moving a file requires a
+source snapshot, and replacing an existing move destination requires a second
+destination snapshot. Existing append requires a snapshot unless the explicit
+`unsafe_allow_unchecked_append` log-style escape hatch is requested. Then use
+`task_start`/`task_wait` for formatters, tests, builds, and `git diff`/`git
+status`.
 
 ## OAuth and device identity
 
@@ -117,7 +133,7 @@ security-first default; do not rely on remote PTY tasks surviving disconnects.
 
 ## MCP tool audit output
 
-Foreground `agent` and `connect` sessions print the complete 31-tool MCP
+Foreground `agent` and `connect` sessions print the complete 34-tool MCP
 inventory when they start. Each entry includes its read-only/mutating and
 open-world classification, plus the local capability summary. Every inbound
 MCP call is then printed by tool name before authorization and execution. This

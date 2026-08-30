@@ -40,6 +40,11 @@ type Engine struct {
 	portal               *portalRemoteDesktopSession
 	portalRestoreToken   string
 	portalTokenLoaded    bool
+
+	// beforeFileCommit is intentionally unexported and exists to make the
+	// final compare-and-replace window deterministic in regression tests. It is
+	// never set by normal callers.
+	beforeFileCommit func()
 }
 
 const (
@@ -48,8 +53,21 @@ const (
 )
 
 func New(cfg Config) (*Engine, error) {
-	if cfg.MaxReadBytes <= 0 {
-		cfg.MaxReadBytes = 256 * 1024
+	if cfg.MaxReadChunkBytes <= 0 {
+		if cfg.MaxReadBytes > 0 {
+			cfg.MaxReadChunkBytes = cfg.MaxReadBytes
+		} else {
+			cfg.MaxReadChunkBytes = DefaultMaxReadChunkBytes
+		}
+	}
+	// Keep the legacy field populated for callers that inspect Config after
+	// construction. New code should use the more precise limit names.
+	cfg.MaxReadBytes = cfg.MaxReadChunkBytes
+	if cfg.MaxHashBytes <= 0 {
+		cfg.MaxHashBytes = DefaultMaxHashBytes
+	}
+	if cfg.MaxPatchBytes <= 0 {
+		cfg.MaxPatchBytes = DefaultMaxPatchBytes
 	}
 	if cfg.MaxTaskLogBytes <= 0 {
 		cfg.MaxTaskLogBytes = 64 << 20
@@ -334,6 +352,33 @@ func (e *Engine) rootCoversProtectedPath(root string) bool {
 	return false
 }
 
+func (e *Engine) rootTouchesProtectedPath(root string) bool {
+	for _, protected := range e.protected {
+		if pathWithin(root, protected) || pathWithin(protected, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateExecConfiguration rejects a Landlock configuration that cannot
+// start successfully. Private state is intentionally protected from Engine
+// filesystem tools; granting a shell a root that contains that state would
+// make the shell fail closed on every task. Keep this check separate from New
+// so callers that only construct an Engine retain the existing validation
+// boundary in command, while CLI/configuration paths can fail earlier.
+func (e *Engine) ValidateExecConfiguration() error {
+	if !e.cfg.AllowExec || e.cfg.ExecSandbox != "landlock" {
+		return nil
+	}
+	for _, root := range e.roots {
+		if e.rootTouchesProtectedPath(root) {
+			return fmt.Errorf("Landlock root %q contains chat-with-cli private state; choose a narrower root or disable shell execution", root)
+		}
+	}
+	return nil
+}
+
 func (e *Engine) ResolvePath(path string) (string, error) {
 	if path == "" {
 		return e.roots[0], nil
@@ -448,6 +493,8 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 			AllowExec: e.cfg.AllowExec, ExecSandbox: e.cfg.ExecSandbox,
 			AllowScreen: e.cfg.AllowScreen, AllowAccessibility: e.cfg.AllowAccessibility,
 			AllowComputerControl: e.cfg.AllowComputerControl, MaxActiveTasks: e.cfg.MaxActiveTasks,
+			MaxReadChunkBytes: e.cfg.MaxReadChunkBytes, MaxHashBytes: e.cfg.MaxHashBytes,
+			MaxPatchBytes:    e.cfg.MaxPatchBytes,
 			KillSwitchActive: e.killSwitchActive(),
 		}, nil
 	case "computer_info":
@@ -625,6 +672,30 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 			return nil, err
 		}
 		return e.patchFileContext(ctx, in)
+	case "fs_delete":
+		in, err := decode[FileDeleteInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.deleteFileContext(ctx, in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
+	case "fs_move":
+		in, err := decode[FileMoveInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		return e.moveFileContext(ctx, in)
+	case "fs_mkdir":
+		in, err := decode[FileMkdirInput](raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.makeDirectoryContext(ctx, in); err != nil {
+			return nil, err
+		}
+		return Ack{OK: true}, nil
 	case "fs_list":
 		in, err := decode[FileListInput](raw)
 		if err != nil {

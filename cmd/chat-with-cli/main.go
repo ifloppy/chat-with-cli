@@ -204,7 +204,7 @@ func runExecSandbox(args []string) error {
 
 func addEngineFlags(fs *flag.FlagSet) (*stringList, *string, *bool, *bool, *string, *bool, *bool, *bool, *string, *string, *string, *int) {
 	roots := new(stringList)
-	fs.Var(roots, "root", "allowed filesystem root (repeatable; defaults to current directory)")
+	fs.Var(roots, "root", "allowed filesystem root (repeatable; read-only defaults to current directory; coding profiles prefer a project-like directory)")
 	profile := fs.String("profile", "", "capability profile: read-only, read-write, desktop-computer-use, all, or custom; legacy developer/computer-use aliases remain accepted")
 	allowFileWrite := fs.Bool("allow-file-write", false, "allow filesystem and checkpoint writes inside allowed roots")
 	fs.BoolVar(allowFileWrite, "allow-fs-write", false, "alias for --allow-file-write")
@@ -274,12 +274,24 @@ func applyExecSandboxDefault(fs *flag.FlagSet, profile string, allowExec bool, e
 }
 
 func newEngine(roots []string, allowFileWrite, allowExec bool, execSandbox string, allowScreen, allowAccessibility, allowComputer bool, computerPersist, stateDir, killSwitchPath string, protectedPaths []string, maxActiveTasks int) (*engine.Engine, error) {
-	return engine.New(engine.Config{
+	eng, err := engine.New(engine.Config{
 		Roots: roots, AllowFileWrite: allowFileWrite, AllowExec: allowExec, ExecSandbox: execSandbox, AllowScreen: allowScreen || allowComputer,
 		AllowAccessibility:   allowAccessibility || allowComputer,
 		AllowComputerControl: allowComputer, ComputerPersistMode: computerPersist,
-		StateDir: stateDir, KillSwitchPath: killSwitchPath, ProtectedPaths: protectedPaths, MaxReadBytes: 256 * 1024, MaxActiveTasks: maxActiveTasks,
+		StateDir: stateDir, KillSwitchPath: killSwitchPath, ProtectedPaths: protectedPaths,
+		MaxReadChunkBytes: engine.DefaultMaxReadChunkBytes,
+		MaxHashBytes:      engine.DefaultMaxHashBytes,
+		MaxPatchBytes:     engine.DefaultMaxPatchBytes,
+		MaxActiveTasks:    maxActiveTasks,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := eng.ValidateExecConfiguration(); err != nil {
+		_ = eng.Close()
+		return nil, err
+	}
+	return eng, nil
 }
 
 func runLocal(args []string) error {
@@ -293,6 +305,7 @@ func runLocal(args []string) error {
 		return err
 	}
 	applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
+	applyCodingRootDefault(roots, *allowFileWrite, *allowExec)
 	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, nil, *maxActiveTasks)
 	if err != nil {
 		return err
@@ -353,6 +366,7 @@ func runServe(args []string) error {
 		return fmt.Errorf("refusing unauthenticated non-loopback listen %q", *listen)
 	}
 	applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
+	applyCodingRootDefault(roots, *allowFileWrite, *allowExec)
 	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, nil, *maxActiveTasks)
 	if err != nil {
 		return err
@@ -1114,7 +1128,7 @@ func approvalCategory(method string) string {
 		return "status"
 	case "fs_read", "fs_list", "fs_search", "checkpoint_read":
 		return "filesystem-read"
-	case "fs_write", "fs_patch", "checkpoint_write":
+	case "fs_write", "fs_patch", "fs_delete", "fs_move", "fs_mkdir", "checkpoint_write":
 		return "filesystem-write"
 	case "task_start", "task_read", "task_wait", "task_list", "task_send", "task_stop":
 		return "shell-exec"
@@ -1292,6 +1306,7 @@ func runAgentCommand(command string, args []string) error {
 	default:
 		return fmt.Errorf("invalid --approval-mode %q; use configured, ask, or allow-all", *approvalMode)
 	}
+	applyCodingRootDefault(roots, *allowFileWrite, *allowExec)
 	*token = envOr(*token, "CHAT_WITH_CLI_AGENT_TOKEN")
 	if !flagWasSet(fs, "credentials") && strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS")) != "" {
 		*credentials = strings.TrimSpace(os.Getenv("CHAT_WITH_CLI_CREDENTIALS"))

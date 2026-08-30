@@ -208,6 +208,9 @@ var toolTitles = map[string]string{
 	"computer_ui_tree":     "Inspect UI tree",
 	"computer_ui_wait":     "Wait for UI element",
 	"fs_list":              "List files",
+	"fs_delete":            "Delete file",
+	"fs_mkdir":             "Create directory",
+	"fs_move":              "Move file",
 	"fs_patch":             "Patch file",
 	"fs_read":              "Read file",
 	"fs_search":            "Search files",
@@ -227,8 +230,10 @@ func toolAnnotations(name string) *mcp.ToolAnnotations {
 	switch name {
 	case "system_info", "computer_info", "computer_screenshot", "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "computer_ui_get_text", "task_read", "task_wait", "task_list", "audit_recent", "fs_read", "fs_list", "fs_search", "checkpoint_read":
 		return &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(false), IdempotentHint: true, OpenWorldHint: boolPtr(false)}
-	case "fs_write", "fs_patch", "checkpoint_write":
+	case "fs_write", "fs_patch", "fs_delete", "fs_move", "checkpoint_write":
 		return &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
+	case "fs_mkdir":
+		return &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(false), IdempotentHint: true, OpenWorldHint: boolPtr(false)}
 	case "computer_ui_focus", "computer_ui_action", "computer_ui_invoke", "computer_ui_set_text", "computer_move", "computer_click", "computer_scroll", "computer_type", "computer_key", "task_start", "task_send", "task_stop":
 		return &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(true)}
 	default:
@@ -287,7 +292,7 @@ func addObserveTool(server *mcp.Server, caller Caller) {
 }
 
 func New(caller Caller) *mcp.Server {
-	instructions := `For GUI work, start with computer_observe when state is unknown. Prefer computer_ui_invoke for a unique semantic action and computer_ui_get_text/set_text for text fields, then computer_ui_find/tree for inspection. Use screenshots and pointer tools only as fallbacks. For long commands use task_start and task_wait with next_offset. Do not restart a task merely because MCP or chat reconnects. Use checkpoint_write at meaningful development milestones so another agent/session can resume the workspace.`
+	instructions := `For coding work, use fs_search to locate code, fs_read to inspect it and obtain a SHA-256 snapshot, then prefer fs_patch for localized edits. Use fs_write rewrite for new files or intentional full-file replacement, and pass the fresh expected_sha256 for existing files. Use fs_mkdir, fs_move, and fs_delete for lifecycle changes instead of shell workarounds. After edits, use task_start/task_wait for gofmt, formatters, tests, builds, and git diff/status; task_wait returns incremental output through next_offset. If a write reports a snapshot mismatch, reread the file and reconsider the patch. For GUI work, start with computer_observe when state is unknown. Prefer computer_ui_invoke for a unique semantic action and computer_ui_get_text/set_text for text fields, then computer_ui_find/tree for inspection. Use screenshots and pointer tools only as fallbacks. Do not restart a task merely because MCP or chat reconnects. Use checkpoint_write at meaningful development milestones so another agent/session can resume the workspace.`
 	account, accountMode := caller.(AccountCaller)
 	if accountMode {
 		instructions = `This is the account-level MCP endpoint. Start with devices_list when the target device is not already unambiguous. Every other tool requires the device selector returned by devices_list; choose the intended device independently for each call because requests are stateless. ` + instructions
@@ -342,11 +347,17 @@ func New(caller Caller) *mcp.Server {
 		"Read recent bounded local audit metadata (time, method, duration, success) without request arguments or result contents.")
 
 	addTool[engine.FileReadInput, engine.FileReadOutput](server, caller, "fs_read",
-		"Read a bounded byte range from a regular file inside an allowed root. Use next_offset for large files. Files small enough for surgical patching also return sha256 for optimistic write/patch preconditions.")
+		"Read a bounded byte range from a regular file inside an allowed root. Use next_offset for large files. The byte chunk limit is independent from snapshot hashing: files within the hash limit return a complete sha256 even when only one chunk is returned; an empty sha256 means the file is above that limit.")
 	addTool[engine.FileWriteInput, engine.Ack](server, caller, "fs_write",
-		"Rewrite or append a file inside an allowed root. Parent directories are created as needed. Rewriting an existing file requires expected_sha256 from fs_read so stale writes fail closed.")
+		"Rewrite or append a file inside an allowed root. Use rewrite for new files or intentional full-file replacement. Existing rewrite requires expected_sha256 from fs_read and uses an atomic compare-and-replace; prefer fs_patch for localized source-code edits. Existing append also requires a snapshot unless mode=append_unchecked or unsafe_allow_unchecked_append=true is explicitly selected for log-style writes.")
 	addTool[engine.FilePatchInput, engine.FilePatchOutput](server, caller, "fs_patch",
-		"Surgically replace exact text only when the expected match count is satisfied. expected_sha256 from fs_read is required so stale patches fail closed.")
+		"Before modifying an existing file, call fs_read and use the returned SHA-256. Prefer fs_patch over full-file fs_write for small surgical code edits. The patch fails if the exact old_text match count differs or the file changed since it was read, including a change during final compare-and-replace. Binary files containing NUL bytes or invalid UTF-8 are rejected.")
+	addTool[engine.FileDeleteInput, engine.Ack](server, caller, "fs_delete",
+		"Delete a regular file or, with allow_empty_dir=true, an empty directory inside an allowed root. Read an existing file first and pass expected_sha256; symlinks, hardlinks, protected paths, recursive deletion, and root deletion are rejected.")
+	addTool[engine.FileMoveInput, engine.FileMoveOutput](server, caller, "fs_move",
+		"Safely move an existing regular file between paths inside allowed roots. Read the source first and pass expected_sha256. Existing destinations are never replaced by default; overwrite requires expected_destination_sha256 as an additional precondition. Symlinks and hardlinks are rejected.")
+	addTool[engine.FileMkdirInput, engine.Ack](server, caller, "fs_mkdir",
+		"Create a directory inside an allowed root, including missing parents. The operation is idempotent when the directory already exists and rejects symlink paths, protected paths, and non-directory collisions.")
 	addTool[engine.FileListInput, engine.FileListOutput](server, caller, "fs_list",
 		"List a directory tree with bounded depth while skipping common dependency/cache noise by default.")
 	addTool[engine.FileSearchInput, engine.FileSearchOutput](server, caller, "fs_search",

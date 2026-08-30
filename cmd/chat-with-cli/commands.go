@@ -486,14 +486,10 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	}
 
 	hostname, _ := os.Hostname()
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = "."
-	}
 	relayDefault := values.String(defaultPublicRelayURL, "agent.relay_url")
 	deviceDefault := values.String(hostname, "agent.device")
 	roots := values.Strings("agent.root")
-	rootDefault := cwd
+	rootDefault := recommendedWorkspaceRoot()
 	if len(roots) > 0 {
 		rootDefault = roots[0]
 	}
@@ -650,15 +646,14 @@ func runAgentSetup(args []string) error {
 		return fmt.Errorf("invalid exec sandbox %q", *execSandbox)
 	}
 	if len(*roots) == 0 {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		*roots = append(*roots, cwd)
+		*roots = append(*roots, recommendedWorkspaceRoot())
 	}
 	for i, root := range *roots {
 		normalized, err := normalizeExistingDirectory(root)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("invalid --root %q: directory does not exist; choose an existing project root or create one such as %s", root, systemdQuote(filepath.Join("$HOME", "project")))
+			}
 			return fmt.Errorf("invalid --root %q: %w", root, err)
 		}
 		(*roots)[i] = normalized
@@ -667,26 +662,6 @@ func runAgentSetup(args []string) error {
 	*stateDir, err = normalizeUserPath(*stateDir)
 	if err != nil {
 		return fmt.Errorf("invalid --state-dir: %w", err)
-	}
-	if strings.TrimSpace(*identityPath) == "" {
-		*identityPath = deviceidentity.DefaultPath(*stateDir)
-	}
-	*identityPath, err = normalizeUserPath(*identityPath)
-	if err != nil {
-		return fmt.Errorf("invalid --identity: %w", err)
-	}
-	identity, createdIdentity, err := deviceidentity.LoadOrCreate(*identityPath)
-	if err != nil {
-		return fmt.Errorf("load or create device identity: %w", err)
-	}
-	derivedDeviceID := identity.ID()
-	if requestedDeviceID != "" && requestedDeviceID != derivedDeviceID {
-		return fmt.Errorf("--device-id %s does not match the Ed25519 device identity %s; device IDs are cryptographically derived and cannot be reassigned", requestedDeviceID, derivedDeviceID)
-	}
-	*deviceID = derivedDeviceID
-	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, DeviceIdentity: identity}
-	if _, err := manager.Resource(); err != nil {
-		return fmt.Errorf("invalid --relay: %w", err)
 	}
 	*configPath, err = normalizeUserPath(*configPath)
 	if err != nil {
@@ -701,6 +676,33 @@ func runAgentSetup(args []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid --kill-switch-file: %w", err)
 		}
+	}
+	if strings.TrimSpace(*identityPath) == "" {
+		*identityPath = deviceidentity.DefaultPath(*stateDir)
+	}
+	*identityPath, err = normalizeUserPath(*identityPath)
+	if err != nil {
+		return fmt.Errorf("invalid --identity: %w", err)
+	}
+	privatePaths := []string{*stateDir, *configPath, *credentials, *identityPath, *killSwitchPath}
+	if configDir, configErr := os.UserConfigDir(); configErr == nil && configDir != "" {
+		privatePaths = append(privatePaths, filepath.Join(configDir, "chat-with-cli"))
+	}
+	if err := validateAgentLandlockRoots(*roots, *allowExec, *execSandbox, privatePaths...); err != nil {
+		return err
+	}
+	identity, createdIdentity, err := deviceidentity.LoadOrCreate(*identityPath)
+	if err != nil {
+		return fmt.Errorf("load or create device identity: %w", err)
+	}
+	derivedDeviceID := identity.ID()
+	if requestedDeviceID != "" && requestedDeviceID != derivedDeviceID {
+		return fmt.Errorf("--device-id %s does not match the Ed25519 device identity %s; device IDs are cryptographically derived and cannot be reassigned", requestedDeviceID, derivedDeviceID)
+	}
+	*deviceID = derivedDeviceID
+	manager := &oauthclient.Manager{RelayURL: strings.TrimSpace(*relayURL), Device: strings.TrimSpace(*device), DeviceID: *deviceID, DeviceIdentity: identity}
+	if _, err := manager.Resource(); err != nil {
+		return fmt.Errorf("invalid --relay: %w", err)
 	}
 	values := map[string]any{
 		"agent.relay_url":           strings.TrimSpace(*relayURL),
@@ -841,6 +843,88 @@ func normalizeExistingDirectory(value string) (string, error) {
 		return "", errors.New("path is not a directory")
 	}
 	return filepath.Clean(path), nil
+}
+
+func recommendedWorkspaceCandidates() []string {
+	home, _ := os.UserHomeDir()
+	if strings.TrimSpace(home) == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(home, "project"),
+		filepath.Join(home, "projects"),
+		filepath.Join(home, "src"),
+	}
+}
+
+// recommendedWorkspaceRoot keeps a setup started from $HOME (or one of its
+// ancestors) from silently turning the entire home directory into a coding
+// root. Existing project-like directories are preferred; when none exists,
+// the first suggestion is shown and normal setup validation asks the operator
+// to choose or create a root.
+func recommendedWorkspaceRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	home, _ := os.UserHomeDir()
+	if strings.TrimSpace(home) == "" || !pathWithin(cwd, home) {
+		return cwd
+	}
+	for _, candidate := range recommendedWorkspaceCandidates() {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	if candidates := recommendedWorkspaceCandidates(); len(candidates) > 0 {
+		return candidates[0]
+	}
+	return cwd
+}
+
+func applyCodingRootDefault(roots *stringList, allowFileWrite, allowExec bool) {
+	if roots == nil || len(*roots) != 0 || (!allowFileWrite && !allowExec) {
+		return
+	}
+	*roots = append(*roots, recommendedWorkspaceRoot())
+}
+
+func pathsOverlap(left, right string) bool {
+	left = comparablePath(left)
+	right = comparablePath(right)
+	return pathWithin(left, right) || pathWithin(right, left)
+}
+
+func comparablePath(value string) string {
+	path, err := filepath.Abs(strings.TrimSpace(value))
+	if err != nil {
+		return filepath.Clean(value)
+	}
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return path
+}
+
+func pathWithin(root, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func validateAgentLandlockRoots(roots []string, allowExec bool, sandbox string, privatePaths ...string) error {
+	if !allowExec || !strings.EqualFold(strings.TrimSpace(sandbox), "landlock") {
+		return nil
+	}
+	for _, root := range roots {
+		for _, privatePath := range privatePaths {
+			if strings.TrimSpace(privatePath) == "" || !pathsOverlap(root, privatePath) {
+				continue
+			}
+			return fmt.Errorf("cannot create a Landlock coding configuration: root %q overlaps chat-with-cli private state %q; choose a narrower workspace root such as %s or explicitly use --exec-sandbox=none if you accept the weaker boundary", root, filepath.Clean(privatePath), systemdQuote(filepath.Join("$HOME", "project")))
+		}
+	}
+	return nil
 }
 
 func normalizeExistingFile(value string) (string, error) {

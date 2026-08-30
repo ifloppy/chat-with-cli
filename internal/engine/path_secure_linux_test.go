@@ -56,7 +56,11 @@ func TestSecureFileOperationsStillWorkInsideRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := eng.WriteFile(FileWriteInput{Path: path, Content: " beta", Mode: "append"}); err != nil {
+	snapshot, err := eng.ReadFile(FileReadInput{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.WriteFile(FileWriteInput{Path: path, Content: " beta", Mode: "append", ExpectedSHA256: snapshot.SHA256}); err != nil {
 		t.Fatal(err)
 	}
 	read, err := eng.ReadFile(FileReadInput{Path: path})

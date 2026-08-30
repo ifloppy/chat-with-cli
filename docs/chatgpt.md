@@ -20,8 +20,8 @@ endpoint URL.
 
 ## What the server advertises
 
-A device-pinned endpoint exposes 31 workstation tools. The account `/mcp`
-endpoint exposes 32: `devices_list` plus the same 31 workstation tools, with a
+A device-pinned endpoint exposes 34 workstation tools. The account `/mcp`
+endpoint exposes 35: `devices_list` plus the same 34 workstation tools, with a
 required `device` selector added to their input schemas. Every descriptor has a name, human-readable title,
 description, input schema, and explicit read-only/destructive/open-world
 annotations. Screenshot tools return MCP image content rather than base64 text
@@ -42,7 +42,7 @@ client's cache, account policy, plan, or safety filtering.
 4. Run `chat-with-cli doctor --relay ... --device-id ...`. For a separately
    issued MCP bearer token, add `--mcp-token`; this performs authenticated
    `initialize` and `tools/list` checks without displaying the token.
-5. If the server-side raw check returns 32 on `/mcp` (or 31 on a device-pinned
+5. If the server-side raw check returns 35 on `/mcp` (or 34 on a device-pinned
    endpoint) while the client still shows zero, refresh/re-add the client. Relay
    discovery diagnostics log only RPC method, path, and status by default; set
    `CHAT_WITH_CLI_MCP_DIAGNOSTICS=0` to disable them. Never log Authorization

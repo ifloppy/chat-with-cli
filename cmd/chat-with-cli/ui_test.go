@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -82,15 +83,73 @@ func TestPromptCapabilityProfileAllAndCustom(t *testing.T) {
 	}
 }
 
+func TestAgentSetupRejectsLandlockRootOverlappingPrivateState(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(base, "config.toml")
+	credentials := filepath.Join(base, "credentials.json")
+	stateDir := filepath.Join(workspace, ".agent-state")
+	err := runAgentSetup([]string{
+		"--config", configPath, "--state-dir", stateDir, "--credentials", credentials,
+		"--relay", "https://relay.example.test", "--root", workspace,
+		"--device", "landlock-overlap-device", "--profile", "A",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot create a Landlock coding configuration") {
+		t.Fatalf("overlapping Landlock setup was accepted: %v", err)
+	}
+	if _, statErr := os.Lstat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("rejected setup wrote config: %v", statErr)
+	}
+}
+
+func TestCodingCapabilityDefaultsNeverSelectTheEntireHomeDirectory(t *testing.T) {
+	var roots stringList
+	applyCodingRootDefault(&roots, true, true)
+	if len(roots) != 1 {
+		t.Fatalf("coding default roots=%v", roots)
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && filepath.Clean(roots[0]) == filepath.Clean(home) {
+		t.Fatalf("coding default selected the entire home directory: %q", roots[0])
+	}
+	var readOnlyRoots stringList
+	applyCodingRootDefault(&readOnlyRoots, false, false)
+	if len(readOnlyRoots) != 0 {
+		t.Fatalf("read-only default unexpectedly selected a root: %v", readOnlyRoots)
+	}
+}
+
+func TestNewEngineRejectsUnusableLandlockConfiguration(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Landlock is Linux-only")
+	}
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(workspace, ".agent-state")
+	if _, err := newEngine([]string{workspace}, true, true, "landlock", false, false, false, "process", stateDir, "", nil, 1); err == nil || !strings.Contains(err.Error(), "contains chat-with-cli private state") {
+		t.Fatalf("unusable Landlock configuration was accepted: %v", err)
+	}
+}
+
 func TestAgentSetupAllProfileEnablesEveryCapability(t *testing.T) {
 	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(dir, "config.toml")
 	stateDir := filepath.Join(dir, "state")
 	if err := runAgentSetup([]string{
 		"--config", configPath,
 		"--state-dir", stateDir,
 		"--relay", "https://relay.example.test",
-		"--root", dir,
+		"--root", workspace,
 		"--device", "test-device",
 		"--profile", "A",
 	}); err != nil {
@@ -113,16 +172,23 @@ func TestAgentSetupAllProfileEnablesEveryCapability(t *testing.T) {
 			t.Fatalf("all profile config missing %q:\n%s", expected, text)
 		}
 	}
+	if runtime.GOOS == "linux" && !strings.Contains(text, `exec_sandbox = "landlock"`) {
+		t.Fatalf("coding profile did not select the Landlock default:\n%s", text)
+	}
 }
 
 func TestRotateRetiredAgentIdentityPreservesOldKeyAndUpdatesConfig(t *testing.T) {
 	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(dir, "config.toml")
 	stateDir := filepath.Join(dir, "state")
 	credentials := filepath.Join(dir, "credentials.json")
 	if err := runAgentSetup([]string{
 		"--config", configPath, "--state-dir", stateDir, "--credentials", credentials,
-		"--relay", "https://relay.example.test", "--root", dir,
+		"--relay", "https://relay.example.test", "--root", workspace,
 		"--device", "rotate-device", "--profile", "A",
 	}); err != nil {
 		t.Fatal(err)
@@ -210,12 +276,16 @@ func TestInteractiveSetupUpdatesExistingConfigInsteadOfFailing(t *testing.T) {
 
 func TestMissingConfiguredIdentityIsRecoverableAndAccountDoesNotFail(t *testing.T) {
 	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(dir, "config.toml")
 	stateDir := filepath.Join(dir, "state")
 	credentials := filepath.Join(dir, "credentials.json")
 	if err := runAgentSetup([]string{
 		"--config", configPath, "--state-dir", stateDir, "--credentials", credentials,
-		"--relay", "https://relay.example.test", "--root", dir,
+		"--relay", "https://relay.example.test", "--root", workspace,
 		"--device", "missing-key-device", "--profile", "A",
 	}); err != nil {
 		t.Fatal(err)

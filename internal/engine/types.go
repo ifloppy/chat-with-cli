@@ -2,6 +2,14 @@ package engine
 
 import "time"
 
+const (
+	// DefaultMaxReadChunkBytes bounds one fs_read/task_read response. It is
+	// deliberately independent from the limits used for hashing and patching.
+	DefaultMaxReadChunkBytes = 256 * 1024
+	DefaultMaxHashBytes      = 64 << 20
+	DefaultMaxPatchBytes     = 16 << 20
+)
+
 type Config struct {
 	Roots                []string
 	AllowFileWrite       bool
@@ -14,9 +22,15 @@ type Config struct {
 	StateDir             string
 	KillSwitchPath       string
 	ProtectedPaths       []string
-	MaxReadBytes         int
-	MaxTaskLogBytes      int64
-	MaxActiveTasks       int
+	// MaxReadBytes is retained as a source-compatible alias for older callers.
+	// When MaxReadChunkBytes is zero, New uses this value for the read chunk
+	// limit. New always normalizes both fields to the effective chunk size.
+	MaxReadBytes      int
+	MaxReadChunkBytes int
+	MaxHashBytes      int64
+	MaxPatchBytes     int64
+	MaxTaskLogBytes   int64
+	MaxActiveTasks    int
 }
 
 type StartTaskInput struct {
@@ -56,10 +70,34 @@ type FileReadInput struct {
 }
 
 type FileWriteInput struct {
-	Path           string `json:"path"`
-	Content        string `json:"content"`
-	Mode           string `json:"mode,omitempty" jsonschema:"rewrite or append"`
-	ExpectedSHA256 string `json:"expected_sha256,omitempty" jsonschema:"optional SHA-256 from fs_read; reject the write if the existing file changed since it was read"`
+	Path                       string `json:"path"`
+	Content                    string `json:"content"`
+	Mode                       string `json:"mode,omitempty" jsonschema:"rewrite, append, or append_unchecked"`
+	ExpectedSHA256             string `json:"expected_sha256,omitempty" jsonschema:"SHA-256 from fs_read; required when rewriting or appending to an existing file unless unsafe_allow_unchecked_append is true"`
+	UnsafeAllowUncheckedAppend bool   `json:"unsafe_allow_unchecked_append,omitempty" jsonschema:"explicitly allow an append without a snapshot hash; use only for log-style concurrent append; mode=append_unchecked is an equivalent explicit opt-in"`
+}
+
+type FileDeleteInput struct {
+	Path           string `json:"path" jsonschema:"file or empty directory inside an allowed root"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty" jsonschema:"SHA-256 from fs_read; required when deleting an existing regular file"`
+	AllowEmptyDir  bool   `json:"allow_empty_dir,omitempty" jsonschema:"allow deletion of an empty directory; recursive deletion is never supported"`
+}
+
+type FileMoveInput struct {
+	Source                    string `json:"source" jsonschema:"existing regular file inside an allowed root"`
+	Destination               string `json:"destination" jsonschema:"new path inside an allowed root"`
+	ExpectedSHA256            string `json:"expected_sha256" jsonschema:"SHA-256 from fs_read for the source file"`
+	Overwrite                 bool   `json:"overwrite,omitempty" jsonschema:"explicitly allow replacing an existing destination; requires expected_destination_sha256"`
+	ExpectedDestinationSHA256 string `json:"expected_destination_sha256,omitempty" jsonschema:"SHA-256 from fs_read for the existing destination when overwrite is true"`
+}
+
+type FileMoveOutput struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+
+type FileMkdirInput struct {
+	Path string `json:"path" jsonschema:"directory path inside an allowed root"`
 }
 
 type FileListInput struct {
@@ -137,6 +175,9 @@ type SystemInfoOutput struct {
 	AllowAccessibility   bool     `json:"allow_accessibility"`
 	AllowComputerControl bool     `json:"allow_computer_control"`
 	MaxActiveTasks       int      `json:"max_active_tasks"`
+	MaxReadChunkBytes    int      `json:"max_read_chunk_bytes"`
+	MaxHashBytes         int64    `json:"max_hash_bytes"`
+	MaxPatchBytes        int64    `json:"max_patch_bytes"`
 	KillSwitchActive     bool     `json:"kill_switch_active"`
 }
 

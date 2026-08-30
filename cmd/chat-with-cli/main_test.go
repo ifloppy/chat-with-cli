@@ -181,6 +181,10 @@ func TestApprovalCategoryCoversSensitiveMethods(t *testing.T) {
 	cases := map[string]string{
 		"fs_read":             "filesystem-read",
 		"fs_write":            "filesystem-write",
+		"fs_patch":            "filesystem-write",
+		"fs_delete":           "filesystem-write",
+		"fs_move":             "filesystem-write",
+		"fs_mkdir":            "filesystem-write",
 		"task_start":          "shell-exec",
 		"computer_screenshot": "screen-read",
 		"computer_ui_tree":    "desktop-read",
