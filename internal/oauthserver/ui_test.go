@@ -115,7 +115,7 @@ func TestOAuthAuthorizationPageKeepsNativeFormSemanticsAndConstrainedLayout(t *t
 	req := httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize"), nil)
 	s.renderAuthorizationWithCSRFRequest(rr, req, "request", Client{ID: "client", Name: "ChatGPT", RedirectURIs: []string{"https://chatgpt.com/connector_platform_oauth_redirect"}}, s.absolute("/mcp"), "mcp offline_access", "https://chatgpt.com/connector_platform_oauth_redirect", "csrf", User{}, false)
 	body := rr.Body.String()
-	for _, expected := range []string{`class="oauth-shell"`, `class="oauth-card"`, `class="oauth-form"`, `name="decision" value="login"`, `/assets/app.css?v=3`} {
+	for _, expected := range []string{`class="oauth-shell"`, `class="oauth-card"`, `class="oauth-form"`, `name="decision" value="login"`, `/assets/app.css?v=4`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("OAuth page is missing %q: %s", expected, body)
 		}
@@ -142,5 +142,30 @@ func TestSharedUIJavaScriptDoesNotMutateNativeFormControls(t *testing.T) {
 	}
 	if strings.Contains(appJS, `submit.disabled = true`) {
 		t.Fatal("shared UI JavaScript disables the successful submitter before form data is constructed")
+	}
+}
+
+func TestUIAssetsRevalidateAcrossDeployments(t *testing.T) {
+	s, err := New(Config{PublicURL: "http://127.0.0.1:19303", StateDir: t.TempDir(), Password: "asset-cache-password-12345"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	first := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.css?v=4", nil)
+	s.handleUIAsset(first, req)
+	if first.Code != http.StatusOK || first.Header().Get("Cache-Control") != "public, no-cache" {
+		t.Fatalf("asset cache policy status=%d cache=%q", first.Code, first.Header().Get("Cache-Control"))
+	}
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("UI asset response omitted ETag")
+	}
+	second := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/assets/app.css?v=4", nil)
+	req.Header.Set("If-None-Match", etag)
+	s.handleUIAsset(second, req)
+	if second.Code != http.StatusNotModified || second.Body.Len() != 0 {
+		t.Fatalf("conditional asset status=%d body=%q", second.Code, second.Body.String())
 	}
 }

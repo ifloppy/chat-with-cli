@@ -52,3 +52,9 @@ permissions and symlink errors in config, credentials, and state directories.
 Only one Relay process should use a state directory. Keep the current unit
 inactive until its paths, capabilities, OAuth login, and generated hardening
 have been reviewed.
+
+### Actions are empty after OAuth or after a tool update
+
+ChatGPT keeps a reviewed snapshot of an app's MCP actions. After changing app permissions/action controls or after the Relay changes its tool definitions, use **Refresh** / **Scan tools** in the app settings to pull the current action set. A successful OAuth login alone does not force the ChatGPT UI to replace its stored action snapshot.
+
+For Relay-side diagnosis, `server/discover` and `tools/list` returning HTTP 200 means action discovery succeeded; an Actions panel that updates only after Refresh is then a ChatGPT-side refresh/state issue rather than an MCP transport failure.

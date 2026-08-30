@@ -2,8 +2,10 @@ package oauthserver
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
 	"strings"
@@ -1392,8 +1394,17 @@ func (s *Server) handleUIAsset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	sum := sha256.Sum256([]byte(content))
+	etag := fmt.Sprintf("\"%x\"", sum)
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	// Always revalidate UI assets. The ETag keeps unchanged reloads cheap while
+	// preventing a previous deployment's CSS/JS from surviving a Relay update.
+	w.Header().Set("Cache-Control", "public, no-cache")
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	_, _ = w.Write([]byte(content))
 }
 
@@ -1438,7 +1449,7 @@ func executeSecurityTemplate(w http.ResponseWriter, r *http.Request, tmpl *templ
 	} else {
 		html = strings.Replace(html, "<html", `<html lang="en" data-locale="`+locale+`"`, 1)
 	}
-	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=3">`, 1)
+	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=4">`, 1)
 	html = injectUINonce(html, r)
 	_, err := w.Write([]byte(html))
 	return err
@@ -1472,11 +1483,11 @@ func executeUITemplate(w http.ResponseWriter, r *http.Request, tmpl *template.Te
 	} else {
 		html = strings.Replace(html, "<html", `<html lang="en" data-locale="`+locale+`"`, 1)
 	}
-	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=3">`, 1)
+	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=4">`, 1)
 	if !strings.Contains(html, `data-ui-controls`) {
 		html = strings.Replace(html, "<body>", `<body><div class="ui-controls-floating" data-ui-controls></div>`, 1)
 	}
-	html = strings.Replace(html, "</body>", `<script src="/assets/app.js?v=3" defer></script></body>`, 1)
+	html = strings.Replace(html, "</body>", `<script src="/assets/app.js?v=4" defer></script></body>`, 1)
 	html = injectUINonce(html, r)
 	_, err := w.Write([]byte(html))
 	return err

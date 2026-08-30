@@ -52,3 +52,9 @@ The compatibility regression sequence is intentionally narrow: minimal
 descriptor, schema, output schema, title/annotations, tool count, then client
 refresh. This repository does not claim that a particular external ChatGPT
 cache or plan policy is fixed by descriptor changes alone.
+
+### Actions are empty after OAuth or after a tool update
+
+ChatGPT keeps a reviewed snapshot of an app's MCP actions. After changing app permissions/action controls or after the Relay changes its tool definitions, use **Refresh** / **Scan tools** in the app settings to pull the current action set. A successful OAuth login alone does not force the ChatGPT UI to replace its stored action snapshot.
+
+For Relay-side diagnosis, `server/discover` and `tools/list` returning HTTP 200 means action discovery succeeded; an Actions panel that updates only after Refresh is then a ChatGPT-side refresh/state issue rather than an MCP transport failure.
