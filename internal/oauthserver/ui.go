@@ -1260,7 +1260,7 @@ const appJS = `
   function loadMaterialWeb() {
     if (customElements.get("md-filled-button")) { upgradeMaterialComponents(); return; }
     const script = document.createElement("script");
-    script.src = "/assets/material-web.js?v=1";
+    script.src = "/assets/material-web.js?v=content";
     script.onload = upgradeMaterialComponents;
     document.head.appendChild(script);
   }
@@ -1338,6 +1338,24 @@ const appJS = `
 })();
 `
 
+var (
+	materialWebAssetVersion = uiAssetFingerprint(string(materialWebJS))
+	expandedAppJS           = strings.ReplaceAll(appJS, "/assets/material-web.js?v=content", "/assets/material-web.js?v="+materialWebAssetVersion)
+	appCSSAssetVersion      = uiAssetFingerprint(appCSS)
+	appJSAssetVersion       = uiAssetFingerprint(expandedAppJS)
+)
+
+func uiAssetFingerprint(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func versionUIAssetURLs(html string) string {
+	html = strings.ReplaceAll(html, "/assets/app.css?v=content", "/assets/app.css?v="+appCSSAssetVersion)
+	html = strings.ReplaceAll(html, "/assets/app.js?v=content", "/assets/app.js?v="+appJSAssetVersion)
+	return html
+}
+
 func uiLocale(r *http.Request) string {
 	if r == nil {
 		return "auto"
@@ -1387,7 +1405,7 @@ func (s *Server) handleUIAsset(w http.ResponseWriter, r *http.Request) {
 	case "/assets/app.css":
 		content, contentType = appCSS, "text/css; charset=utf-8"
 	case "/assets/app.js":
-		content, contentType = appJS, "application/javascript; charset=utf-8"
+		content, contentType = expandedAppJS, "application/javascript; charset=utf-8"
 	case "/assets/material-web.js":
 		content, contentType = string(materialWebJS), "application/javascript; charset=utf-8"
 	default:
@@ -1430,7 +1448,8 @@ func executeTemplateWithUINonce(w http.ResponseWriter, r *http.Request, tmpl *te
 	if err := tmpl.Execute(&rendered, data); err != nil {
 		return err
 	}
-	_, err := w.Write([]byte(injectUINonce(rendered.String(), r)))
+	html := versionUIAssetURLs(injectUINonce(rendered.String(), r))
+	_, err := w.Write([]byte(html))
 	return err
 }
 
@@ -1449,8 +1468,8 @@ func executeSecurityTemplate(w http.ResponseWriter, r *http.Request, tmpl *templ
 	} else {
 		html = strings.Replace(html, "<html", `<html lang="en" data-locale="`+locale+`"`, 1)
 	}
-	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=4">`, 1)
-	html = injectUINonce(html, r)
+	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=content">`, 1)
+	html = versionUIAssetURLs(injectUINonce(html, r))
 	_, err := w.Write([]byte(html))
 	return err
 }
@@ -1483,12 +1502,12 @@ func executeUITemplate(w http.ResponseWriter, r *http.Request, tmpl *template.Te
 	} else {
 		html = strings.Replace(html, "<html", `<html lang="en" data-locale="`+locale+`"`, 1)
 	}
-	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=4">`, 1)
+	html = strings.Replace(html, "<head>", `<head><link rel="stylesheet" href="/assets/app.css?v=content">`, 1)
 	if !strings.Contains(html, `data-ui-controls`) {
 		html = strings.Replace(html, "<body>", `<body><div class="ui-controls-floating" data-ui-controls></div>`, 1)
 	}
-	html = strings.Replace(html, "</body>", `<script src="/assets/app.js?v=4" defer></script></body>`, 1)
-	html = injectUINonce(html, r)
+	html = strings.Replace(html, "</body>", `<script src="/assets/app.js?v=content" defer></script></body>`, 1)
+	html = versionUIAssetURLs(injectUINonce(html, r))
 	_, err := w.Write([]byte(html))
 	return err
 }

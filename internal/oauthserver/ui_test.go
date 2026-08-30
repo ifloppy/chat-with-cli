@@ -115,7 +115,7 @@ func TestOAuthAuthorizationPageKeepsNativeFormSemanticsAndConstrainedLayout(t *t
 	req := httptest.NewRequest(http.MethodGet, s.absolute("/oauth/authorize"), nil)
 	s.renderAuthorizationWithCSRFRequest(rr, req, "request", Client{ID: "client", Name: "ChatGPT", RedirectURIs: []string{"https://chatgpt.com/connector_platform_oauth_redirect"}}, s.absolute("/mcp"), "mcp offline_access", "https://chatgpt.com/connector_platform_oauth_redirect", "csrf", User{}, false)
 	body := rr.Body.String()
-	for _, expected := range []string{`class="oauth-shell"`, `class="oauth-card"`, `class="oauth-form"`, `name="decision" value="login"`, `/assets/app.css?v=4`} {
+	for _, expected := range []string{`class="oauth-shell"`, `class="oauth-card"`, `class="oauth-form"`, `name="decision" value="login"`, `/assets/app.css?v=` + appCSSAssetVersion} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("OAuth page is missing %q: %s", expected, body)
 		}
@@ -152,7 +152,7 @@ func TestUIAssetsRevalidateAcrossDeployments(t *testing.T) {
 	}
 	defer s.Close()
 	first := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/assets/app.css?v=4", nil)
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.css?v="+appCSSAssetVersion, nil)
 	s.handleUIAsset(first, req)
 	if first.Code != http.StatusOK || first.Header().Get("Cache-Control") != "public, no-cache" {
 		t.Fatalf("asset cache policy status=%d cache=%q", first.Code, first.Header().Get("Cache-Control"))
@@ -162,10 +162,23 @@ func TestUIAssetsRevalidateAcrossDeployments(t *testing.T) {
 		t.Fatal("UI asset response omitted ETag")
 	}
 	second := httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/assets/app.css?v=4", nil)
+	req = httptest.NewRequest(http.MethodGet, "/assets/app.css?v="+appCSSAssetVersion, nil)
 	req.Header.Set("If-None-Match", etag)
 	s.handleUIAsset(second, req)
 	if second.Code != http.StatusNotModified || second.Body.Len() != 0 {
 		t.Fatalf("conditional asset status=%d body=%q", second.Code, second.Body.String())
+	}
+}
+
+func TestUIAssetURLsAreContentAddressed(t *testing.T) {
+	html := versionUIAssetURLs(`<link rel="stylesheet" href="/assets/app.css?v=content"><script src="/assets/app.js?v=content"></script>`)
+	if !strings.Contains(html, "/assets/app.css?v="+appCSSAssetVersion) || !strings.Contains(html, "/assets/app.js?v="+appJSAssetVersion) {
+		t.Fatalf("content-addressed UI asset URLs missing: %s", html)
+	}
+	if strings.Contains(html, "?v=content") {
+		t.Fatalf("UI asset placeholder leaked to rendered HTML: %s", html)
+	}
+	if !strings.Contains(expandedAppJS, "/assets/material-web.js?v="+materialWebAssetVersion) || strings.Contains(expandedAppJS, "material-web.js?v=content") {
+		t.Fatal("Material Web dependency is not content-addressed")
 	}
 }

@@ -42,3 +42,7 @@ location / {
 Do not copy these snippets without restricting the host, firewall, service
 account, and proxy trust boundary. Run `chat-with-cli doctor --relay
 https://cli.example.com --device-id ...` after deployment.
+
+## CDN caching
+
+UI asset URLs are content-addressed by the Relay, so a CSS/JavaScript change automatically produces a new URL even when a CDN overrides browser cache TTLs. Preserve the Relay's `ETag` and `Cache-Control` headers when possible; do not cache OAuth HTML responses, which are sent with `Cache-Control: no-store`.
