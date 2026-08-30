@@ -18,6 +18,57 @@ import (
 	"github.com/ifloppy/chat-with-cli/internal/securefile"
 )
 
+func normalizedExpectedSHA256(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "", nil
+	}
+	if len(value) != sha256.Size*2 {
+		return "", errors.New("expected_sha256 must be a 64-character hexadecimal SHA-256")
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return "", errors.New("expected_sha256 must be a 64-character hexadecimal SHA-256")
+	}
+	return value, nil
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func verifyExpectedSHA256(data []byte, expected string) error {
+	expected, err := normalizedExpectedSHA256(expected)
+	if err != nil || expected == "" {
+		return err
+	}
+	actual := sha256Hex(data)
+	if actual != expected {
+		return fmt.Errorf("file changed since it was read: expected sha256 %s, found %s", expected, actual)
+	}
+	return nil
+}
+
+func (e *Engine) verifyFileSHA256(path, expected string) error {
+	expected, err := normalizedExpectedSHA256(expected)
+	if err != nil || expected == "" {
+		return err
+	}
+	file, _, err := e.secureOpenRead(path)
+	if err != nil {
+		return fmt.Errorf("verify expected_sha256: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, int64(e.cfg.MaxReadBytes)+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > e.cfg.MaxReadBytes {
+		return errors.New("file exceeds maximum size for expected_sha256 precondition")
+	}
+	return verifyExpectedSHA256(data, expected)
+}
+
 func (e *Engine) ReadFile(in FileReadInput) (FileReadOutput, error) {
 	return e.readFileContext(context.Background(), in)
 }
@@ -51,6 +102,14 @@ func (e *Engine) readFileContext(ctx context.Context, in FileReadInput) (FileRea
 	if err := securefile.CheckSingleLink(stat, "file"); err != nil {
 		return FileReadOutput{}, err
 	}
+	sha := ""
+	if stat.Size() <= int64(e.cfg.MaxReadBytes) {
+		hasher := sha256.New()
+		if _, err := io.Copy(hasher, file); err != nil {
+			return FileReadOutput{}, err
+		}
+		sha = hex.EncodeToString(hasher.Sum(nil))
+	}
 	if in.Offset > stat.Size() {
 		in.Offset = stat.Size()
 	}
@@ -71,6 +130,7 @@ func (e *Engine) readFileContext(ctx context.Context, in FileReadInput) (FileRea
 	next := in.Offset + int64(n)
 	return FileReadOutput{
 		Path: path, Content: string(buf[:n]), NextOffset: next, EOF: next >= stat.Size(),
+		Size: stat.Size(), SHA256: sha,
 	}, nil
 }
 
@@ -85,14 +145,30 @@ func (e *Engine) writeFileContext(ctx context.Context, in FileWriteInput) error 
 	if !e.cfg.AllowFileWrite {
 		return errors.New("filesystem write is disabled; start the agent with --allow-file-write")
 	}
-	switch strings.ToLower(strings.TrimSpace(in.Mode)) {
+	mode := strings.ToLower(strings.TrimSpace(in.Mode))
+	switch mode {
 	case "", "rewrite":
+		if strings.TrimSpace(in.ExpectedSHA256) == "" {
+			file, _, err := e.secureOpenRead(in.Path)
+			if err == nil {
+				_ = file.Close()
+				return errors.New("expected_sha256 is required when rewriting an existing file; call fs_read first")
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		} else if err := e.verifyFileSHA256(in.Path, in.ExpectedSHA256); err != nil {
+			return err
+		}
 		if err := e.checkContext(ctx); err != nil {
 			return err
 		}
 		_, err := e.secureAtomicWrite(in.Path, []byte(in.Content), 0o644)
 		return err
 	case "append":
+		if err := e.verifyFileSHA256(in.Path, in.ExpectedSHA256); err != nil {
+			return err
+		}
 		if err := e.checkContext(ctx); err != nil {
 			return err
 		}
@@ -384,6 +460,9 @@ func (e *Engine) patchFileContext(ctx context.Context, in FilePatchInput) (FileP
 	if in.OldText == "" {
 		return FilePatchOutput{}, errors.New("old_text must not be empty")
 	}
+	if strings.TrimSpace(in.ExpectedSHA256) == "" {
+		return FilePatchOutput{}, errors.New("expected_sha256 is required for fs_patch; call fs_read first")
+	}
 	expected := in.Expected
 	if expected <= 0 {
 		expected = 1
@@ -399,6 +478,9 @@ func (e *Engine) patchFileContext(ctx context.Context, in FilePatchInput) (FileP
 	}
 	if len(data) > e.cfg.MaxReadBytes {
 		return FilePatchOutput{}, errors.New("file exceeds maximum patch size")
+	}
+	if err := verifyExpectedSHA256(data, in.ExpectedSHA256); err != nil {
+		return FilePatchOutput{}, err
 	}
 	if err := e.checkContext(ctx); err != nil {
 		return FilePatchOutput{}, err

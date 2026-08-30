@@ -101,13 +101,17 @@ func TestPatchFileRequiresExactMatchCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	read, err := eng.ReadFile(FileReadInput{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := eng.PatchFile(FilePatchInput{
-		Path: path, OldText: "alpha", NewText: "omega",
+		Path: path, OldText: "alpha", NewText: "omega", ExpectedSHA256: read.SHA256,
 	}); err == nil {
 		t.Fatal("expected ambiguous patch to fail")
 	}
 	out, err := eng.PatchFile(FilePatchInput{
-		Path: path, OldText: "alpha", NewText: "omega", Expected: 2,
+		Path: path, OldText: "alpha", NewText: "omega", Expected: 2, ExpectedSHA256: read.SHA256,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +132,100 @@ func TestPatchFileRequiresExactMatchCount(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o640 {
 		t.Fatalf("mode changed to %o", info.Mode().Perm())
+	}
+}
+
+func TestExistingFileEditsRequireSnapshotHash(t *testing.T) {
+	eng := testEngine(t, false)
+	path := filepath.Join(eng.roots[0], "guarded.go")
+	original := "package guarded\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.PatchFile(FilePatchInput{Path: path, OldText: "guarded", NewText: "changed"}); err == nil || !strings.Contains(err.Error(), "expected_sha256 is required") {
+		t.Fatalf("patch without snapshot hash was not rejected: %v", err)
+	}
+	if err := eng.WriteFile(FileWriteInput{Path: path, Content: "package stale\n", Mode: "rewrite"}); err == nil || !strings.Contains(err.Error(), "expected_sha256 is required") {
+		t.Fatalf("rewrite without snapshot hash was not rejected: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Fatalf("guard failure changed file: %q", data)
+	}
+	created := filepath.Join(eng.roots[0], "new.go")
+	if err := eng.WriteFile(FileWriteInput{Path: created, Content: "package newfile\n", Mode: "rewrite"}); err != nil {
+		t.Fatalf("new file creation incorrectly required a snapshot hash: %v", err)
+	}
+}
+
+func TestFileHashPreconditionRejectsStalePatchAndRewrite(t *testing.T) {
+	eng := testEngine(t, false)
+	path := filepath.Join(eng.roots[0], "concurrent.go")
+	if err := os.WriteFile(path, []byte("package demo\n\nconst Value = 1\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	read, err := eng.ReadFile(FileReadInput{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.SHA256 == "" || read.Size != int64(len(read.Content)) {
+		t.Fatalf("fs_read did not return a usable snapshot hash: %+v", read)
+	}
+
+	newer := "package demo\n\nconst Value = 2 // changed elsewhere\n"
+	if err := os.WriteFile(path, []byte(newer), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.PatchFile(FilePatchInput{
+		Path: path, OldText: "package demo", NewText: "package newer", ExpectedSHA256: read.SHA256,
+	}); err == nil || !strings.Contains(err.Error(), "file changed since it was read") {
+		t.Fatalf("stale patch was not rejected: %v", err)
+	}
+	if err := eng.WriteFile(FileWriteInput{
+		Path: path, Content: "package stale\n", Mode: "rewrite", ExpectedSHA256: read.SHA256,
+	}); err == nil || !strings.Contains(err.Error(), "file changed since it was read") {
+		t.Fatalf("stale rewrite was not rejected: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != newer {
+		t.Fatalf("failed stale edit changed file: %q", data)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("failed stale edit changed mode to %o", info.Mode().Perm())
+	}
+}
+
+func TestFileHashPreconditionAllowsFreshPatch(t *testing.T) {
+	eng := testEngine(t, false)
+	path := filepath.Join(eng.roots[0], "fresh.go")
+	if err := os.WriteFile(path, []byte("const Value = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read, err := eng.ReadFile(FileReadInput{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.PatchFile(FilePatchInput{
+		Path: path, OldText: "Value = 1", NewText: "Value = 2", ExpectedSHA256: read.SHA256,
+	}); err != nil {
+		t.Fatalf("fresh hash-guarded patch failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "const Value = 2\n" {
+		t.Fatalf("unexpected patched content %q", data)
 	}
 }
 

@@ -66,7 +66,7 @@ func TestSecureFileOperationsStillWorkInsideRoot(t *testing.T) {
 	if read.Content != "alpha beta" {
 		t.Fatalf("content=%q", read.Content)
 	}
-	patched, err := eng.PatchFile(FilePatchInput{Path: path, OldText: "beta", NewText: "gamma"})
+	patched, err := eng.PatchFile(FilePatchInput{Path: path, OldText: "beta", NewText: "gamma", ExpectedSHA256: read.SHA256})
 	if err != nil {
 		t.Fatal(err)
 	}

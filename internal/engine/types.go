@@ -56,9 +56,10 @@ type FileReadInput struct {
 }
 
 type FileWriteInput struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Mode    string `json:"mode,omitempty" jsonschema:"rewrite or append"`
+	Path           string `json:"path"`
+	Content        string `json:"content"`
+	Mode           string `json:"mode,omitempty" jsonschema:"rewrite or append"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty" jsonschema:"optional SHA-256 from fs_read; reject the write if the existing file changed since it was read"`
 }
 
 type FileListInput struct {
@@ -107,6 +108,8 @@ type FileReadOutput struct {
 	Content    string `json:"content"`
 	NextOffset int64  `json:"next_offset"`
 	EOF        bool   `json:"eof"`
+	Size       int64  `json:"size"`
+	SHA256     string `json:"sha256,omitempty"`
 }
 
 type FileEntry struct {
@@ -176,10 +179,11 @@ type CheckpointOutput struct {
 }
 
 type FilePatchInput struct {
-	Path     string `json:"path"`
-	OldText  string `json:"old_text" jsonschema:"exact text that must already exist"`
-	NewText  string `json:"new_text" jsonschema:"replacement text"`
-	Expected int    `json:"expected,omitempty" jsonschema:"required match count; defaults to 1"`
+	Path           string `json:"path"`
+	OldText        string `json:"old_text" jsonschema:"exact text that must already exist"`
+	NewText        string `json:"new_text" jsonschema:"replacement text"`
+	Expected       int    `json:"expected,omitempty" jsonschema:"required match count; defaults to 1"`
+	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"SHA-256 from fs_read; required so patches fail if the file changed since it was read"`
 }
 
 type FilePatchOutput struct {

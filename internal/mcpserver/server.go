@@ -342,11 +342,11 @@ func New(caller Caller) *mcp.Server {
 		"Read recent bounded local audit metadata (time, method, duration, success) without request arguments or result contents.")
 
 	addTool[engine.FileReadInput, engine.FileReadOutput](server, caller, "fs_read",
-		"Read a bounded byte range from a regular file inside an allowed root. Use next_offset for large files.")
+		"Read a bounded byte range from a regular file inside an allowed root. Use next_offset for large files. Files small enough for surgical patching also return sha256 for optimistic write/patch preconditions.")
 	addTool[engine.FileWriteInput, engine.Ack](server, caller, "fs_write",
-		"Rewrite or append a file inside an allowed root. Parent directories are created as needed.")
+		"Rewrite or append a file inside an allowed root. Parent directories are created as needed. Rewriting an existing file requires expected_sha256 from fs_read so stale writes fail closed.")
 	addTool[engine.FilePatchInput, engine.FilePatchOutput](server, caller, "fs_patch",
-		"Surgically replace exact text only when the expected match count is satisfied; safer and cheaper than rewriting large files.")
+		"Surgically replace exact text only when the expected match count is satisfied. expected_sha256 from fs_read is required so stale patches fail closed.")
 	addTool[engine.FileListInput, engine.FileListOutput](server, caller, "fs_list",
 		"List a directory tree with bounded depth while skipping common dependency/cache noise by default.")
 	addTool[engine.FileSearchInput, engine.FileSearchOutput](server, caller, "fs_search",
