@@ -78,6 +78,11 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.MaxActiveTasks > 256 {
 		return nil, fmt.Errorf("max active tasks must be <= 256, got %d", cfg.MaxActiveTasks)
 	}
+	redactTerms, err := NormalizeRedactLineTerms(cfg.RedactLineTerms)
+	if err != nil {
+		return nil, err
+	}
+	cfg.RedactLineTerms = redactTerms
 	// Computer control necessarily needs both visual and semantic UI access.
 	cfg.AllowScreen = cfg.AllowScreen || cfg.AllowComputerControl
 	cfg.AllowAccessibility = cfg.AllowAccessibility || cfg.AllowComputerControl

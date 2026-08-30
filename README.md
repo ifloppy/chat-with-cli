@@ -112,6 +112,9 @@ filesystem access while masking Chat with CLI private paths with bubblewrap, and
 state, `[P]` is the recommended broad-HOME choice; the operator can still choose
 Full user access or a narrower Landlock root. Repeat `--protected-path PATH` to
 mask additional operator-selected files/directories in `[P]` mode and filesystem tools.
+Best-effort returned-text redaction is also available with repeatable
+`--redact-line-term TERM`. It is disabled by default and is not a security
+boundary; use protected paths for actual secrets.
 
 Private Relay mode is the default. Public users manage their own devices,
 browser sessions, password, and OAuth token families from `/account`; instance

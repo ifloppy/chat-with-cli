@@ -30,6 +30,7 @@ Capabilities can also be selected separately:
 --exec-sandbox=landlock     restrict shell filesystem access to workspace roots
 --exec-sandbox=protected    keep normal user filesystem access but mask Chat with CLI private paths (Linux + bubblewrap)
 --protected-path PATH       additionally hide this file/directory from filesystem tools and protected shell mode; repeatable
+--redact-line-term TERM      best-effort case-insensitive output redaction; repeatable, disabled by default
 --allow-screen              screenshots
 --allow-accessibility       AT-SPI semantic inspection
 --allow-computer-use        keyboard, pointer, semantic UI writes
@@ -54,6 +55,14 @@ private Chat with CLI paths inside a private mount/PID namespace. Additional
 operator-selected paths can be saved in `agent.protected_paths` or supplied with
 repeatable `--protected-path PATH`. Full mode has no shell filesystem filtering.
 Neither mode removes network/process authority.
+
+`--redact-line-term TERM` optionally replaces returned text lines containing a
+matching term with `[REDACTED LINE]`. Matching is case-insensitive and no terms
+are enabled by default. The filter applies to file reads/search results,
+checkpoints, task output, and returned task command/name metadata; it does not
+modify source files, task logs, or executed commands. This is best-effort output
+filtering, not a security boundary: encoding, transformation, or chunk splitting
+can evade term matching. Put real secrets behind `--protected-path` instead.
 
 ## Coding file workflow
 

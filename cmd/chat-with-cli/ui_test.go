@@ -181,6 +181,41 @@ func TestAgentSetupPersistsAdditionalProtectedPaths(t *testing.T) {
 	}
 }
 
+func TestAgentSetupPersistsAndValidatesRedactLineTerms(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(base, "config.toml")
+	if err := runAgentSetup([]string{
+		"--config", configPath, "--state-dir", filepath.Join(base, "state"),
+		"--relay", "https://relay.example.test", "--root", root,
+		"--device", "redact-term-device", "--profile", "R",
+		"--redact-line-term", " API_KEY ", "--redact-line-term", "api_key",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	values, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terms := values.Strings("agent.redact_line_terms")
+	if len(terms) != 1 || terms[0] != "api_key" {
+		t.Fatalf("redact_line_terms=%v want [api_key]", terms)
+	}
+	badConfig := filepath.Join(base, "bad.toml")
+	err = runAgentSetup([]string{
+		"--config", badConfig, "--state-dir", filepath.Join(base, "bad-state"),
+		"--relay", "https://relay.example.test", "--root", root,
+		"--device", "bad-redact-device", "--profile", "R",
+		"--redact-line-term", "bad\nterm",
+	})
+	if err == nil || !strings.Contains(err.Error(), "redact-line term") {
+		t.Fatalf("invalid redact term error=%v", err)
+	}
+}
+
 func TestAgentSetupRejectsLandlockRootOverlappingPrivateState(t *testing.T) {
 	base := t.TempDir()
 	workspace := filepath.Join(base, "workspace")
@@ -230,7 +265,7 @@ func TestNewEngineRejectsUnusableLandlockConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	stateDir := filepath.Join(workspace, ".agent-state")
-	if _, err := newEngine([]string{workspace}, true, true, "landlock", false, false, false, "process", stateDir, "", nil, 1); err == nil || !strings.Contains(err.Error(), "contains chat-with-cli private state") {
+	if _, err := newEngine([]string{workspace}, true, true, "landlock", false, false, false, "process", stateDir, "", nil, nil, 1); err == nil || !strings.Contains(err.Error(), "contains chat-with-cli private state") {
 		t.Fatalf("unusable Landlock configuration was accepted: %v", err)
 	}
 }

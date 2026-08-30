@@ -22,6 +22,7 @@ type Config struct {
 	StateDir             string
 	KillSwitchPath       string
 	ProtectedPaths       []string
+	RedactLineTerms      []string
 	// MaxReadBytes is retained as a source-compatible alias for older callers.
 	// When MaxReadChunkBytes is zero, New uses this value for the read chunk
 	// limit. New always normalizes both fields to the effective chunk size.

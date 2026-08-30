@@ -24,7 +24,7 @@ chat-with-cli agent setup \
   --install-systemd
 ```
 
-`--root` 默认推荐使用项目目录，但最终权限由本机操作者决定。在交互式设置中，`[L] Landlock` 会把 shell 限制在 workspace roots；`[P] Protected-path filter` 保留当前用户的正常文件系统权限和真实 HOME，但用 bubblewrap 在 shell 视图里遮住 Chat With CLI 的私有认证/identity/state 路径；`[F] Full user access` 完全不做 shell 文件系统过滤。若宽 root 覆盖私有状态，CLI 会优先推荐 `[P]`，也允许你选择 `[F]` 或更窄的 Landlock root。需要额外屏蔽其它敏感文件/目录时，可重复使用 `--protected-path PATH`（配置中保存为 `agent.protected_paths`）。命令会生成设备 Ed25519 身份、Agent 配置和一个未启动的 systemd 用户服务。
+`--root` 默认推荐使用项目目录，但最终权限由本机操作者决定。在交互式设置中，`[L] Landlock` 会把 shell 限制在 workspace roots；`[P] Protected-path filter` 保留当前用户的正常文件系统权限和真实 HOME，但用 bubblewrap 在 shell 视图里遮住 Chat With CLI 的私有认证/identity/state 路径；`[F] Full user access` 完全不做 shell 文件系统过滤。若宽 root 覆盖私有状态，CLI 会优先推荐 `[P]`，也允许你选择 `[F]` 或更窄的 Landlock root。需要额外屏蔽其它敏感文件/目录时，可重复使用 `--protected-path PATH`（配置中保存为 `agent.protected_paths`）。此外可重复使用 `--redact-line-term TERM` 对返回给 Agent 的文本做大小写不敏感的整行脱敏；默认不配置任何敏感词。该功能只用于降低误泄露概率，不是安全边界，编码、拆分或变形后的内容可能绕过匹配；真正的秘密仍应使用 `--protected-path` 隔离。 命令会生成设备 Ed25519 身份、Agent 配置和一个未启动的 systemd 用户服务。
 
 ## 3. OAuth 与连接
 

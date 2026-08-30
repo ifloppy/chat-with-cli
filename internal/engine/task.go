@@ -256,7 +256,7 @@ func (m *TaskManager) Start(ctx context.Context, in StartTaskInput) (TaskInfo, e
 		killStartedProcess()
 		return TaskInfo{}, err
 	}
-	return info, nil
+	return m.engine.redactTaskInfo(info), nil
 }
 
 func compactCommand(command string, max int) string {
@@ -375,7 +375,7 @@ func (m *TaskManager) readContext(ctx context.Context, in ReadTaskInput) (ReadTa
 	stat, _ = file.Stat()
 	finished := info.State != "running" && info.State != "orphaned_running"
 	return ReadTaskOutput{
-		Task: info, Output: string(buf[:n]), NextOffset: next,
+		Task: m.engine.redactTaskInfo(info), Output: m.engine.redactText(string(buf[:n])), NextOffset: next,
 		EOF: finished && next >= stat.Size(),
 	}, nil
 }
@@ -498,7 +498,7 @@ func (m *TaskManager) List() TaskListOutput {
 	}
 	items := make([]TaskInfo, 0, len(all))
 	for _, info := range all {
-		items = append(items, info)
+		items = append(items, m.engine.redactTaskInfo(info))
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].StartedAt.After(items[j].StartedAt) })
 	return TaskListOutput{Tasks: items}

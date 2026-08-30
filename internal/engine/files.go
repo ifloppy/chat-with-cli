@@ -181,7 +181,7 @@ func (e *Engine) readFileContext(ctx context.Context, in FileReadInput) (FileRea
 	}
 	next := in.Offset + int64(n)
 	return FileReadOutput{
-		Path: path, Content: string(buf[:n]), NextOffset: next, EOF: next >= stat.Size(),
+		Path: path, Content: e.redactText(string(buf[:n])), NextOffset: next, EOF: next >= stat.Size(),
 		Size: stat.Size(), SHA256: sha,
 	}, nil
 }
@@ -436,7 +436,7 @@ func (e *Engine) searchFileContent(path string, re *regexp.Regexp, remaining int
 		line++
 		text := scanner.Text()
 		if re.MatchString(text) {
-			hits = append(hits, FileSearchHit{Path: path, Line: line, Text: compactLine(text, 500)})
+			hits = append(hits, FileSearchHit{Path: path, Line: line, Text: e.redactText(compactLine(text, 500))})
 			if len(hits) >= remaining {
 				break
 			}
@@ -520,7 +520,7 @@ func (e *Engine) readCheckpointContext(ctx context.Context, in CheckpointReadInp
 	if err := e.checkContext(ctx); err != nil {
 		return CheckpointOutput{}, err
 	}
-	return CheckpointOutput{Workspace: workspace, Content: string(data)}, nil
+	return CheckpointOutput{Workspace: workspace, Content: e.redactText(string(data))}, nil
 }
 
 func (e *Engine) PatchFile(in FilePatchInput) (FilePatchOutput, error) {

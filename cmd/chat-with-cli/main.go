@@ -273,12 +273,12 @@ func applyExecSandboxDefault(fs *flag.FlagSet, profile string, allowExec bool, e
 	}
 }
 
-func newEngine(roots []string, allowFileWrite, allowExec bool, execSandbox string, allowScreen, allowAccessibility, allowComputer bool, computerPersist, stateDir, killSwitchPath string, protectedPaths []string, maxActiveTasks int) (*engine.Engine, error) {
+func newEngine(roots []string, allowFileWrite, allowExec bool, execSandbox string, allowScreen, allowAccessibility, allowComputer bool, computerPersist, stateDir, killSwitchPath string, protectedPaths, redactLineTerms []string, maxActiveTasks int) (*engine.Engine, error) {
 	eng, err := engine.New(engine.Config{
 		Roots: roots, AllowFileWrite: allowFileWrite, AllowExec: allowExec, ExecSandbox: execSandbox, AllowScreen: allowScreen || allowComputer,
 		AllowAccessibility:   allowAccessibility || allowComputer,
 		AllowComputerControl: allowComputer, ComputerPersistMode: computerPersist,
-		StateDir: stateDir, KillSwitchPath: killSwitchPath, ProtectedPaths: protectedPaths,
+		StateDir: stateDir, KillSwitchPath: killSwitchPath, ProtectedPaths: protectedPaths, RedactLineTerms: redactLineTerms,
 		MaxReadChunkBytes: engine.DefaultMaxReadChunkBytes,
 		MaxHashBytes:      engine.DefaultMaxHashBytes,
 		MaxPatchBytes:     engine.DefaultMaxPatchBytes,
@@ -306,7 +306,7 @@ func runLocal(args []string) error {
 	}
 	applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
 	applyCodingRootDefault(roots, *allowFileWrite, *allowExec)
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, nil, *maxActiveTasks)
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, nil, nil, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
@@ -367,7 +367,7 @@ func runServe(args []string) error {
 	}
 	applyExecSandboxDefault(fs, *profile, *allowExec, execSandbox)
 	applyCodingRootDefault(roots, *allowFileWrite, *allowExec)
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, nil, *maxActiveTasks)
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, nil, nil, *maxActiveTasks)
 	if err != nil {
 		return err
 	}
@@ -1239,6 +1239,8 @@ func runAgentCommand(command string, args []string) error {
 	identityPath := fs.String("identity", "", "Ed25519 device identity path")
 	extraProtectedPaths := new(stringList)
 	fs.Var(extraProtectedPaths, "protected-path", "additional path to hide from filesystem tools and protected shell mode (repeatable)")
+	redactLineTerms := new(stringList)
+	fs.Var(redactLineTerms, "redact-line-term", "best-effort case-insensitive term; redact returned text lines containing it (repeatable)")
 	manualOAuth := fs.Bool("manual-oauth", false, "use headless OAuth and paste the final callback URL instead of opening a local browser")
 	approvalMode := fs.String("approval-mode", approvalConfigured, "configured, ask, or allow-all; ask/allow-all temporarily expose all capabilities for this process")
 	if err := fs.Parse(args); err != nil {
@@ -1311,6 +1313,9 @@ func runAgentCommand(command string, args []string) error {
 	}
 	if !flagWasSet(fs, "protected-path") {
 		*extraProtectedPaths = values.Strings("agent.protected_paths")
+	}
+	if !flagWasSet(fs, "redact-line-term") {
+		*redactLineTerms = values.Strings("agent.redact_line_terms")
 	}
 	if err := applyCapabilityProfile(fs, *profile, allowFileWrite, allowExec, allowScreen, allowAccessibility, allowComputer); err != nil {
 		return err
@@ -1387,7 +1392,7 @@ func runAgentCommand(command string, args []string) error {
 		protectedPaths = append(protectedPaths, *identityPath)
 	}
 	protectedPaths = append(protectedPaths, (*extraProtectedPaths)...)
-	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, protectedPaths, *maxActiveTasks)
+	eng, err := newEngine(*roots, *allowFileWrite, *allowExec, *execSandbox, *allowScreen, *allowAccessibility, *allowComputer, *computerPersist, *stateDir, *killSwitchPath, protectedPaths, *redactLineTerms, *maxActiveTasks)
 	if err != nil {
 		return err
 	}

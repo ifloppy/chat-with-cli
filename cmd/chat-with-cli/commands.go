@@ -19,6 +19,7 @@ import (
 
 	"github.com/ifloppy/chat-with-cli/internal/config"
 	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
+	"github.com/ifloppy/chat-with-cli/internal/engine"
 	"github.com/ifloppy/chat-with-cli/internal/mcpserver"
 	"github.com/ifloppy/chat-with-cli/internal/oauthclient"
 	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
@@ -398,6 +399,9 @@ func rotateConfiguredAgentIdentity(configPath string) (string, string, error) {
 	for _, protectedPath := range values.Strings("agent.protected_paths") {
 		setupArgs = append(setupArgs, "--protected-path", protectedPath)
 	}
+	for _, term := range values.Strings("agent.redact_line_terms") {
+		setupArgs = append(setupArgs, "--redact-line-term", term)
+	}
 	if value := values.String("", "agent.state_dir"); value != "" {
 		setupArgs = append(setupArgs, "--state-dir", value)
 	}
@@ -667,6 +671,9 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	for _, protectedPath := range values.Strings("agent.protected_paths") {
 		setupArgs = append(setupArgs, "--protected-path", protectedPath)
 	}
+	for _, term := range values.Strings("agent.redact_line_terms") {
+		setupArgs = append(setupArgs, "--redact-line-term", term)
+	}
 	setupArgs = append(setupArgs, "--exec-sandbox", sandbox)
 	if persist := values.String("", "agent.computer_persist"); persist != "" {
 		setupArgs = append(setupArgs, "--computer-persist", persist)
@@ -696,6 +703,8 @@ func runAgentSetup(args []string) error {
 	fs.Var(roots, "root", "allowed filesystem root (repeatable)")
 	protectedPaths := new(stringList)
 	fs.Var(protectedPaths, "protected-path", "additional path to hide from filesystem tools and protected shell mode (repeatable)")
+	redactLineTerms := new(stringList)
+	fs.Var(redactLineTerms, "redact-line-term", "best-effort case-insensitive term; redact returned text lines containing it (repeatable)")
 	stateDir := fs.String("state-dir", defaultAgentStateDir(), "agent state directory")
 	identityPath := fs.String("identity", "", "Ed25519 device identity path; generated under the state directory when omitted")
 	credentials := fs.String("credentials", oauthclient.DefaultCredentialsPath(), "OAuth credential store")
@@ -777,6 +786,11 @@ func runAgentSetup(args []string) error {
 	if sandboxMode != "none" && sandboxMode != "landlock" && sandboxMode != "protected" {
 		return fmt.Errorf("invalid exec sandbox %q", *execSandbox)
 	}
+	normalizedRedactTerms, normalizeErr := engine.NormalizeRedactLineTerms(*redactLineTerms)
+	if normalizeErr != nil {
+		return normalizeErr
+	}
+	*redactLineTerms = append((*redactLineTerms)[:0], normalizedRedactTerms...)
 	if sandboxMode == "protected" {
 		if runtime.GOOS != "linux" {
 			return errors.New("protected shell mode is supported on Linux only")
@@ -858,6 +872,7 @@ func runAgentSetup(args []string) error {
 		"agent.device_id":           strings.TrimSpace(*deviceID),
 		"agent.root":                append([]string(nil), *roots...),
 		"agent.protected_paths":     append([]string(nil), *protectedPaths...),
+		"agent.redact_line_terms":   append([]string(nil), *redactLineTerms...),
 		"agent.profile":             strings.ToLower(strings.TrimSpace(*profile)),
 		"agent.state_dir":           strings.TrimSpace(*stateDir),
 		"agent.identity":            strings.TrimSpace(*identityPath),
