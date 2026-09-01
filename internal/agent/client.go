@@ -44,6 +44,23 @@ type ToolCall struct {
 // subsequently denied by AuthorizeRequest.
 type ToolCallObserver func(ToolCall)
 
+const (
+	agentReconnectInterval = 500 * time.Millisecond
+	agentDialTimeout       = 5 * time.Second
+	agentChallengeTimeout  = 5 * time.Second
+)
+
+func waitForReconnect(ctx context.Context) error {
+	timer := time.NewTimer(agentReconnectInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (c *Client) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -67,7 +84,6 @@ func (c *Client) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	backoff := time.Second
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -76,7 +92,16 @@ func (c *Client) Run(ctx context.Context) error {
 		if c.TokenProvider != nil {
 			token, err = c.TokenProvider(ctx)
 			if err != nil {
-				return fmt.Errorf("agent OAuth: %w", err)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				// OAuth refresh/discovery can fail during a brief network or Relay
+				// outage. Treat that as a reconnect condition instead of dropping
+				// back to the interactive menu and requiring operator intervention.
+				if err := waitForReconnect(ctx); err != nil {
+					return err
+				}
+				continue
 			}
 		}
 		err = nil
@@ -92,13 +117,22 @@ func (c *Client) Run(ctx context.Context) error {
 				var statusErr *ChallengeHTTPError
 				if errors.As(proofErr, &statusErr) {
 					if statusErr.StatusCode == http.StatusUnauthorized && c.TokenProvider != nil && c.TokenRejected != nil {
+						// Authentication was explicitly rejected, not merely lost in
+						// transit. Stop work authorized by that credential family, then
+						// discard it and retry with a fresh token.
+						c.Engine.EndRemoteSession()
 						if resetErr := c.TokenRejected(ctx); resetErr != nil {
-							return fmt.Errorf("discard rejected Agent OAuth credential: %w", resetErr)
+							if ctx.Err() != nil {
+								return ctx.Err()
+							}
+							if err := waitForReconnect(ctx); err != nil {
+								return err
+							}
 						}
-						backoff = time.Second
 						continue
 					}
 					if statusErr.StatusCode == http.StatusGone {
+						c.Engine.EndRemoteSession()
 						return fmt.Errorf("obtain Agent device challenge: %w", proofErr)
 					}
 				}
@@ -112,38 +146,28 @@ func (c *Client) Run(ctx context.Context) error {
 				header.Set(deviceidentity.HeaderProof, proof)
 			}
 		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-		} else {
-			dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
+		if err == nil {
+			dialCtx, cancelDial := context.WithTimeout(ctx, agentDialTimeout)
 			conn, _, dialErr := websocket.Dial(dialCtx, endpoint, &websocket.DialOptions{HTTPHeader: header})
 			cancelDial()
 			err = dialErr
 			if err == nil {
 				conn.SetReadLimit(32 << 20)
 				err = c.serve(ctx, conn)
-				// A detached PTY must not keep executing after the remote authority
-				// disappears. Treat every Relay disconnect as the end of that remote
-				// authorization session; reconnect starts from a clean local state.
-				c.Engine.EndRemoteSession()
+				// A transport disconnect is not an authorization revocation. Detached
+				// tasks intentionally survive so a reconnect can resume observing and
+				// controlling them. Explicit credential rejection still fails closed.
 				_ = conn.CloseNow()
-				backoff = time.Second
 			}
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-		if backoff < 30*time.Second {
-			backoff *= 2
+		// Keep reconnect latency bounded and predictable. Do not exponentially
+		// back off: this workstation client prefers rapid recovery over minimizing
+		// reconnect traffic during an outage.
+		if err := waitForReconnect(ctx); err != nil {
+			return err
 		}
 	}
 }
@@ -162,14 +186,14 @@ func IsChallengeHTTPStatus(err error, status int) bool {
 }
 
 func fetchAgentChallenge(ctx context.Context, resource, token string) (string, error) {
-	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	reqCtx, cancel := context.WithTimeout(ctx, agentChallengeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, strings.TrimRight(resource, "/")+"/challenge", nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Timeout: agentChallengeTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err

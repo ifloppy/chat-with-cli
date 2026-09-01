@@ -228,12 +228,20 @@ func (m *Manager) tokenLocked(ctx context.Context, resource, path string) (strin
 	issuer, issuerErr := normalizeRelay(cred.Issuer)
 	base, _ := normalizeRelay(m.RelayURL)
 	if issuerErr == nil && issuer == base && cred.RefreshToken != "" && cred.ClientID != "" {
-		if refreshed, err := refresh(ctx, client, cred); err == nil {
+		refreshed, refreshErr := refresh(ctx, client, cred)
+		if refreshErr == nil {
 			store.Profiles[resource] = refreshed
 			if err := saveStore(path, store); err != nil {
 				return "", err
 			}
 			return refreshed.AccessToken, nil
+		}
+		// A transport failure, timeout, rate limit, or Relay 5xx does not make
+		// the cached refresh credential invalid. Return the transient error so
+		// the Agent reconnect loop can retry it quickly without launching a new
+		// browser authorization flow on every network hiccup.
+		if !refreshRequiresAuthorization(refreshErr) {
+			return "", refreshErr
 		}
 	}
 	cred, err = m.browserAuthorize(ctx, client, resource)
@@ -247,7 +255,22 @@ func (m *Manager) tokenLocked(ctx context.Context, resource, path string) (strin
 	return cred.AccessToken, nil
 }
 
+func refreshRequiresAuthorization(err error) bool {
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	switch statusErr.StatusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	default:
+		return false
+	}
+}
+
 func refresh(ctx context.Context, client *http.Client, cred Credential) (Credential, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {cred.RefreshToken},
@@ -255,7 +278,7 @@ func refresh(ctx context.Context, client *http.Client, cred Credential) (Credent
 		"resource":      {cred.Resource},
 	}
 	var token tokenResponse
-	if err := postFormJSON(ctx, client, strings.TrimRight(cred.Issuer, "/")+"/oauth/token", form, &token); err != nil {
+	if err := postFormJSON(requestCtx, client, strings.TrimRight(cred.Issuer, "/")+"/oauth/token", form, &token); err != nil {
 		return Credential{}, err
 	}
 	if token.AccessToken == "" || token.RefreshToken == "" {

@@ -39,7 +39,7 @@ func TestAgentURLForRouteRequiresSecureRemoteOrigin(t *testing.T) {
 	}
 }
 
-func TestRelayDisconnectEndsRemoteEngineSession(t *testing.T) {
+func TestRelayDisconnectReconnectsQuicklyAndPreservesDetachedTask(t *testing.T) {
 	eng, err := engine.New(engine.Config{Roots: []string{t.TempDir()}, AllowExec: true, StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestRelayDisconnectEndsRemoteEngineSession(t *testing.T) {
 		t.Fatalf("unexpected task_start result: %#v", started)
 	}
 
-	connected := make(chan struct{}, 1)
+	connected := make(chan struct{}, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -65,10 +65,10 @@ func TestRelayDisconnectEndsRemoteEngineSession(t *testing.T) {
 		default:
 		}
 		// Read the capability hello so the Agent reaches its normal serve loop,
-		// then terminate the remote authorization session abruptly.
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, _, _ = conn.Read(ctx)
-		cancel()
+		// then simulate a transient Relay/network disconnect.
+		readCtx, readCancel := context.WithTimeout(context.Background(), time.Second)
+		_, _, _ = conn.Read(readCtx)
+		readCancel()
 		_ = conn.CloseNow()
 	}))
 	defer server.Close()
@@ -77,35 +77,32 @@ func TestRelayDisconnectEndsRemoteEngineSession(t *testing.T) {
 	client := &Client{Engine: eng, URL: server.URL, Device: "disconnect-test", Token: "test-token"}
 	done := make(chan error, 1)
 	go func() { done <- client.Run(ctx) }()
-	select {
-	case <-connected:
-	case <-time.After(time.Second):
-		cancel()
-		t.Fatal("Agent never connected to test Relay")
+	for attempt := 1; attempt <= 2; attempt++ {
+		select {
+		case <-connected:
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatalf("Agent did not establish connection %d quickly", attempt)
+		}
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		out, readErr := eng.Invoke(context.Background(), "task_read", json.RawMessage(`{"task_id":"`+info.ID+`"}`))
-		if readErr == nil {
-			read, ok := out.(engine.ReadTaskOutput)
-			if ok && read.Task.State != "running" {
-				cancel()
-				select {
-				case <-done:
-				case <-time.After(time.Second):
-				}
-				return
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
+	out, err := eng.Invoke(context.Background(), "task_read", json.RawMessage(`{"task_id":"`+info.ID+`"}`))
+	if err != nil {
+		cancel()
+		t.Fatal(err)
 	}
+	read, ok := out.(engine.ReadTaskOutput)
+	if !ok || read.Task.State != "running" {
+		cancel()
+		t.Fatalf("detached task did not survive transient Relay disconnect: %#v", out)
+	}
+
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
+		t.Fatal("Agent did not stop after cancellation")
 	}
-	t.Fatal("detached task survived Relay disconnect")
 }
 
 func TestAgentURLCanonicalizesImmutableIDCase(t *testing.T) {
@@ -223,6 +220,64 @@ func TestToolCallObserverRunsWithoutAuthorization(t *testing.T) {
 	}
 	if resp.Error != "" {
 		t.Fatalf("unexpected engine error: %q", resp.Error)
+	}
+}
+
+func TestTransientOAuthProviderFailureRetriesWithoutExiting(t *testing.T) {
+	connected := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+		_ = conn.CloseNow()
+	}))
+	defer server.Close()
+
+	eng, err := engine.New(engine.Config{Roots: []string{t.TempDir()}, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	providerCalls := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &Client{
+		Engine: eng, URL: server.URL, Device: "oauth-retry-test",
+		TokenProvider: func(context.Context) (string, error) {
+			providerCalls++
+			if providerCalls <= 2 {
+				return "", errors.New("OAuth HTTP request failed")
+			}
+			return "recovered-token", nil
+		},
+	}
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() { done <- client.Run(ctx) }()
+	select {
+	case <-connected:
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			cancel()
+			t.Fatalf("OAuth recovery took too long: %v", elapsed)
+		}
+		cancel()
+	case err := <-done:
+		t.Fatalf("Agent exited instead of retrying transient OAuth failure: %v", err)
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("Agent did not recover from transient OAuth failures quickly")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Agent did not stop after cancellation")
+	}
+	if providerCalls < 3 {
+		t.Fatalf("providerCalls=%d, want at least 3", providerCalls)
 	}
 }
 

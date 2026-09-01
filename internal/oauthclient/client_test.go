@@ -22,6 +22,12 @@ import (
 var requestIDPattern = regexp.MustCompile(`name="request_id" value="([^"]+)"`)
 var csrfTokenPattern = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func startTestOAuthServer(t *testing.T, mode string) (*oauthserver.Server, string, func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -228,6 +234,49 @@ func TestAgentBrowserOAuthPersistsAndRefreshes(t *testing.T) {
 	}
 	if store.Profiles[resource].RefreshToken == oldRefresh {
 		t.Fatal("refresh token was not rotated in credential store")
+	}
+}
+
+func TestTransientRefreshFailureDoesNotStartBrowserAuthorization(t *testing.T) {
+	const base = "http://127.0.0.1:43210"
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	manager := &Manager{RelayURL: base, Device: "retry-device", CredentialsPath: path}
+	resource, err := manager.Resource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := credentialStore{Version: 1, Profiles: map[string]Credential{
+		resource: {
+			Issuer: base, Resource: resource, ClientID: "client-id",
+			AccessToken: "expired-access", RefreshToken: "refresh-token", ExpiresAt: 0,
+		},
+	}}
+	if err := saveStore(path, store); err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		return nil, io.ErrUnexpectedEOF
+	})}
+	manager.OpenBrowser = func(string) error {
+		t.Fatal("transient refresh failure unexpectedly started browser authorization")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := manager.Token(ctx); err == nil || !strings.Contains(err.Error(), "OAuth HTTP request failed") {
+		t.Fatalf("Token error=%v, want transient OAuth transport error", err)
+	}
+	if requests != 1 {
+		t.Fatalf("HTTP requests=%d, want only the refresh attempt", requests)
+	}
+	persisted, err := loadStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Profiles[resource].RefreshToken != "refresh-token" {
+		t.Fatal("transient refresh failure discarded the cached refresh token")
 	}
 }
 
