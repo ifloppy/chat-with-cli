@@ -100,10 +100,94 @@ func TestPromptExecSandboxAllowsExplicitFullUserAccess(t *testing.T) {
 	if !strings.Contains(out.String(), "Full user access") || !strings.Contains(out.String(), "Landlock") || !strings.Contains(out.String(), "Protected-path filter") {
 		t.Fatalf("shell boundary menu missing operator choices: %s", out.String())
 	}
+	if !strings.Contains(out.String(), "polkit") || !strings.Contains(out.String(), "OpenSSH") {
+		t.Fatalf("protected shell compatibility warning missing: %s", out.String())
+	}
 	out.Reset()
 	got, err = promptExecSandbox(bufio.NewReader(strings.NewReader("p\n")), &out, "none")
 	if err != nil || got != "protected" {
 		t.Fatalf("protected shell mode=%q err=%v", got, err)
+	}
+}
+
+func TestAgentSystemdFullUserAccessPreservesPrivilegeHelpers(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binaryPath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	unitPath := filepath.Join(dir, "chat-with-cli-agent.service")
+	if err := runAgentSetup([]string{
+		"--config", configPath,
+		"--state-dir", filepath.Join(dir, "state"),
+		"--credentials", filepath.Join(dir, "credentials.json"),
+		"--relay", "https://relay.example.test",
+		"--root", workspace,
+		"--device", "full-user-systemd-device",
+		"--profile", "A",
+		"--exec-sandbox", "none",
+		"--install-systemd",
+		"--unit", unitPath,
+		"--binary", binaryPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, forbidden := range []string{"NoNewPrivileges=", "RestrictSUIDSGID=", "ProtectSystem=", "ProtectHome=", "PrivateTmp="} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("full user access unit unexpectedly contains %q:\n%s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, " agent --config ") {
+		t.Fatalf("full user access unit has unexpected ExecStart:\n%s", text)
+	}
+}
+
+func TestAgentSystemdSandboxedModeRetainsHardening(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binaryPath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	unitPath := filepath.Join(dir, "chat-with-cli-agent.service")
+	if err := runAgentSetup([]string{
+		"--config", configPath,
+		"--state-dir", filepath.Join(dir, "state"),
+		"--credentials", filepath.Join(dir, "credentials.json"),
+		"--relay", "https://relay.example.test",
+		"--root", workspace,
+		"--device", "sandboxed-systemd-device",
+		"--profile", "A",
+		"--exec-sandbox", "landlock",
+		"--install-systemd",
+		"--unit", unitPath,
+		"--binary", binaryPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"NoNewPrivileges=true", "RestrictSUIDSGID=true", "ProtectSystem=strict", "ProtectHome=read-only", "PrivateTmp=true"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("sandboxed unit missing %q:\n%s", required, text)
+		}
 	}
 }
 

@@ -516,8 +516,8 @@ func promptExecSandbox(reader *bufio.Reader, writer io.Writer, current string) (
 	}
 	fmt.Fprintln(writer, "  Shell execution boundary:")
 	fmt.Fprintln(writer, "  [L] Landlock sandbox      Restrict shell to workspace roots")
-	fmt.Fprintln(writer, "  [P] Protected-path filter Keep normal user filesystem access but mask Chat with CLI private paths")
-	fmt.Fprintln(writer, "  [F] Full user access      No shell filesystem filtering")
+	fmt.Fprintln(writer, "  [P] Protected-path filter Mask Chat with CLI private paths; disables setuid/polkit and can break strict root-owned config checks such as OpenSSH")
+	fmt.Fprintln(writer, "  [F] Full user access      No shell filesystem filtering; preserves normal user-session helpers including polkit")
 	defaultChoice := "L"
 	switch strings.ToLower(strings.TrimSpace(current)) {
 	case "protected":
@@ -617,8 +617,8 @@ func interactiveAgentSetup(reader *bufio.Reader, writer io.Writer) error {
 	if allowExecSelected && sandbox == "landlock" {
 		if conflict := validateAgentLandlockRoots(candidateRoots, true, sandbox, configuredPrivatePaths(values, configPath)...); conflict != nil {
 			fmt.Fprintf(writer, "\n  Landlock cannot be used with the selected broad root because it overlaps Chat with CLI private state.\n")
-			fmt.Fprintln(writer, "  [P] Keep this root and mask Chat with CLI private paths (recommended for a broad HOME)")
-			fmt.Fprintln(writer, "  [F] Keep this root with Full user access and no shell path filtering")
+			fmt.Fprintln(writer, "  [P] Keep this root and mask Chat with CLI private paths (disables setuid/polkit; strict root-owned config checks such as OpenSSH may fail)")
+			fmt.Fprintln(writer, "  [F] Keep this root with Full user access and normal user-session privilege helpers")
 			fmt.Fprintln(writer, "  [N] Choose a narrower workspace root and keep Landlock")
 			fmt.Fprintln(writer, "  [C] Cancel")
 			choice, promptErr := uiPrompt(reader, writer, "Resolve shell boundary [P/F/N/C]", "P")
@@ -940,6 +940,10 @@ func runAgentSetup(args []string) error {
 			// mappings. Landlock remains the filesystem boundary for Developer.
 			memoryHardening = ""
 		}
+		serviceHardening := ""
+		if sandboxMode != "none" {
+			serviceHardening = fmt.Sprintf("NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n%sRestrictSUIDSGID=true\nLockPersonality=true\n%s", writable.String(), memoryHardening)
+		}
 		unit := fmt.Sprintf(`[Unit]
 Description=Chat with CLI Agent
 After=graphical-session.target
@@ -948,16 +952,10 @@ After=graphical-session.target
 ExecStart=%s agent --config %s
 Restart=on-failure
 RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-%sRestrictSUIDSGID=true
-LockPersonality=true
 %s
 [Install]
 WantedBy=default.target
-`, systemdQuote(*binaryPath), systemdQuote(*configPath), writable.String(), memoryHardening)
+`, systemdQuote(*binaryPath), systemdQuote(*configPath), serviceHardening)
 		if err := writeTextFile(*unitPath, unit, 0o600, *force); err != nil {
 			return fmt.Errorf("write systemd user unit: %w", err)
 		}
