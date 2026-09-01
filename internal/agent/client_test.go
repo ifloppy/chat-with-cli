@@ -192,8 +192,9 @@ func TestRequestAuthorizerRunsBeforeEngineInvocation(t *testing.T) {
 			return errors.New("local approval denied")
 		},
 	}
-	resp := c.handle(context.Background(), protocol.Request{ID: "approval-test", Method: "system_info"})
-	if observed.Method != "system_info" {
+	args := json.RawMessage(`{"path":"/workspace"}`)
+	resp := c.handle(context.Background(), protocol.Request{ID: "approval-test", Method: "system_info", Args: args})
+	if observed.Method != "system_info" || string(observed.Args) != string(args) {
 		t.Fatalf("tool observer saw %#v", observed)
 	}
 	if !called {

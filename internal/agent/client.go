@@ -31,12 +31,13 @@ type Client struct {
 	Identity         *deviceidentity.Identity
 }
 
-// ToolCall contains only the method name of an inbound MCP RPC. It is passed
-// to the optional CLI audit observer before local authorization and execution;
-// arguments and results are deliberately not exposed to keep audit output
-// from becoming a second data-exfiltration channel.
+// ToolCall contains the method name and raw arguments of an inbound MCP RPC.
+// It is passed to the optional local CLI audit observer before authorization
+// and execution. Observers must summarize/redact arguments rather than dumping
+// payloads verbatim; results are never exposed here.
 type ToolCall struct {
 	Method string
+	Args   json.RawMessage
 }
 
 // ToolCallObserver observes every valid inbound RPC, including calls that are
@@ -315,7 +316,7 @@ func (c *Client) sendCapabilities(ctx context.Context, conn *websocket.Conn) err
 
 func (c *Client) handle(ctx context.Context, request protocol.Request) protocol.Response {
 	if c.OnToolCall != nil {
-		c.OnToolCall(ToolCall{Method: request.Method})
+		c.OnToolCall(ToolCall{Method: request.Method, Args: request.Args})
 	}
 	if c.AuthorizeRequest != nil {
 		if err := c.AuthorizeRequest(ctx, request); err != nil {

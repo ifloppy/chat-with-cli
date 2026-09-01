@@ -173,12 +173,17 @@ container.
 
 ## Audit and limits
 
-The Agent audit log records bounded metadata only: UTC timestamp, event ID,
-method, duration, and success/failure. It omits tool arguments, file contents,
-terminal input, UI text, and command output. The current and one rotated JSONL
-file are capped at roughly 8 MiB. Admin security events are bounded as well.
-These records are operational evidence, not tamper-evident forensic storage;
-export to a separate append-only system when stronger guarantees are required.
+The durable Agent audit log records bounded metadata only: UTC timestamp, event
+ID, method, duration, and success/failure. It omits tool arguments, file
+contents, terminal input, UI text, and command output. The current and one
+rotated JSONL file are capped at roughly 8 MiB. Separately, the local CLI
+console audit stream shows a human-readable, redacted argument summary so an
+operator can tell which path/query/task/command was requested. Payload-like
+values (file contents, patch text, terminal/UI input, environment values) are
+withheld, secret-like fields are redacted, and displayed scalar values are
+bounded. Admin security events are bounded as well. These records are
+operational evidence, not tamper-evident forensic storage; export to a separate
+append-only system when stronger guarantees are required.
 
 WebSocket frames, screenshots, file reads/searches, task output, active PTY
 tasks, broker calls/connections, OAuth clients, pending authorizations, users,

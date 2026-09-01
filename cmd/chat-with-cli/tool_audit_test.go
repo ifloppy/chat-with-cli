@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -31,16 +32,34 @@ func TestToolAuditPrintsInventoryInAllowAllMode(t *testing.T) {
 	}
 }
 
-func TestToolAuditLogsCallsWithoutArguments(t *testing.T) {
+func TestToolAuditLogsTwoLineArgumentSummaries(t *testing.T) {
 	var out bytes.Buffer
 	audit := newToolAudit(&out)
-	audit.observe(agent.ToolCall{Method: "fs_write"})
-	audit.observe(agent.ToolCall{Method: "unknown\nforged"})
+	audit.observe(agent.ToolCall{Method: "fs_search", Args: json.RawMessage(`{"path":"/workspace/project","pattern":"needle.*go","kind":"content","max_results":25}`)})
+	audit.observe(agent.ToolCall{Method: "fs_patch", Args: json.RawMessage(`{"path":"/workspace/a.go","old_text":"secret\nline","new_text":"replacement","expected_sha256":"deadbeef","api_token":"do-not-print"}`)})
+	audit.observe(agent.ToolCall{Method: "unknown\nforged", Args: json.RawMessage(`{"path":"/tmp/demo"}`)})
 	text := out.String()
-	if !strings.Contains(text, "MCP tool call: fs_write") || !strings.Contains(text, "Unknown MCP tool") {
-		t.Fatalf("call audit missing entries: %s", text)
+
+	for _, want := range []string{
+		"MCP tool: fs_search",
+		`args: kind="content"  max_results=25  path="/workspace/project"  pattern="needle.*go"`,
+		"MCP tool: fs_patch",
+		`api_token=<redacted>`,
+		`new_text=<omitted:11 bytes>`,
+		`old_text=<omitted:11 bytes>`,
+		`path="/workspace/a.go"`,
+		"Unknown MCP tool",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("call audit missing %q:\n%s", want, text)
+		}
 	}
-	if strings.Contains(text, "forged\n") {
-		t.Fatalf("call audit allowed a forged line: %q", text)
+	for _, forbidden := range []string{"do-not-print", "secret", "replacement", "deadbeef", "forged\n"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("call audit leaked/forged %q: %q", forbidden, text)
+		}
+	}
+	if strings.Count(text, "MCP tool:") != 3 || strings.Count(text, "\n  args:") != 3 {
+		t.Fatalf("tool calls are not consistently rendered as two-line records: %q", text)
 	}
 }

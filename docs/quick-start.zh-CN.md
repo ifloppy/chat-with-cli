@@ -38,7 +38,7 @@ chat-with-cli connect
 
 前台连接时可以选择每次请求审批、当前进程全部允许，或仅使用配置文件中的权限。需要后台运行前，请先审阅生成的 unit：
 
-前台 `connect`/`agent` 启动时会打印完整的 34 项 MCP 工具清单和本地能力摘要；每次入站工具调用也会按名称显示，即使选择“全部允许”（`--approval-mode=allow-all`）也不会关闭这条审计输出。参数、文件内容、命令和结果不会打印。
+前台 `connect`/`agent` 启动时会打印完整的 34 项 MCP 工具清单和本地能力摘要；每次入站工具调用会以两行显示：第一行是工具名、风险类别和说明，第二行是经过脱敏/截断的参数摘要，例如文件路径、搜索 pattern/query、任务 ID、工作目录和 shell command。文件内容、patch 的 old/new text、终端/UI 输入、环境变量值以及结果不会原样打印；疑似 secret/token/password 等字段会显示为 `<redacted>`。即使选择“全部允许”（`--approval-mode=allow-all`）也不会关闭这条本地审计输出。
 
 ```bash
 chat-with-cli doctor
