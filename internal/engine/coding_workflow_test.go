@@ -36,7 +36,11 @@ func invokeWorkflow[T any](t *testing.T, eng *Engine, method string, input any) 
 
 func waitWorkflowTask(t *testing.T, eng *Engine, taskID string) (ReadTaskOutput, string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// The workflow deliberately launches real subprocesses (including `go test`).
+	// Under the repository-wide race job those subprocesses compete with the
+	// outer Go test process, so allow enough time for a loaded CI runner without
+	// weakening the per-poll task_wait timeout below.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	var offset int64
 	var output bytes.Buffer
