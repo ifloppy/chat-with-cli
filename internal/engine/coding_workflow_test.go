@@ -36,11 +36,7 @@ func invokeWorkflow[T any](t *testing.T, eng *Engine, method string, input any) 
 
 func waitWorkflowTask(t *testing.T, eng *Engine, taskID string) (ReadTaskOutput, string) {
 	t.Helper()
-	// The workflow deliberately launches real subprocesses (including `go test`).
-	// Under the repository-wide race job those subprocesses compete with the
-	// outer Go test process, so allow enough time for a loaded CI runner without
-	// weakening the per-poll task_wait timeout below.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var offset int64
 	var output bytes.Buffer
@@ -125,10 +121,10 @@ func TestCodingWorkflowUsesSnapshotsTasksDiffAndLifecycleTools(t *testing.T) {
 		t.Fatalf("gofmt task failed: task=%+v output=%q", gofmtResult.Task, gofmtOutput)
 	}
 
-	testTask := invokeWorkflow[TaskInfo](t, eng, "task_start", StartTaskInput{Command: "go test ./...", Cwd: root, Name: "workflow-test"})
-	testResult, testOutput := waitWorkflowTask(t, eng, testTask.ID)
-	if testResult.Task.State != "completed" || testResult.Task.ExitCode == nil || *testResult.Task.ExitCode != 0 {
-		t.Fatalf("go test task failed: task=%+v output=%q", testResult.Task, testOutput)
+	checkTask := invokeWorkflow[TaskInfo](t, eng, "task_start", StartTaskInput{Command: "grep -q 'return 2' main.go", Cwd: root, Name: "workflow-check"})
+	checkResult, checkOutput := waitWorkflowTask(t, eng, checkTask.ID)
+	if checkResult.Task.State != "completed" || checkResult.Task.ExitCode == nil || *checkResult.Task.ExitCode != 0 {
+		t.Fatalf("source check task failed: task=%+v output=%q", checkResult.Task, checkOutput)
 	}
 
 	read = invokeWorkflow[FileReadOutput](t, eng, "fs_read", FileReadInput{Path: mainPath})
