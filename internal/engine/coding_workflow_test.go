@@ -131,7 +131,7 @@ func TestCodingWorkflowUsesSnapshotsTasksDiffAndLifecycleTools(t *testing.T) {
 	invokeWorkflow[FilePatchOutput](t, eng, "fs_patch", FilePatchInput{
 		Path: mainPath, OldText: "return 2", NewText: "return 3", ExpectedSHA256: read.SHA256,
 	})
-	diffTask := invokeWorkflow[TaskInfo](t, eng, "task_start", StartTaskInput{Command: "git diff -- main.go", Cwd: root, Name: "workflow-diff"})
+	diffTask := invokeWorkflow[TaskInfo](t, eng, "task_start", StartTaskInput{Command: "git --no-pager diff -- main.go", Cwd: root, Name: "workflow-diff"})
 	diffResult, diffOutput := waitWorkflowTask(t, eng, diffTask.ID)
 	if diffResult.Task.State != "completed" || diffResult.Task.ExitCode == nil || *diffResult.Task.ExitCode != 0 {
 		t.Fatalf("git diff task failed: task=%+v output=%q", diffResult.Task, diffOutput)
