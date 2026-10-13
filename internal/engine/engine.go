@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/ifloppy/chat-with-cli/internal/mcpgateway"
 )
 
 type Engine struct {
@@ -22,6 +23,7 @@ type Engine struct {
 	protected []string
 	tasks     *TaskManager
 	audit     *auditLog
+	gateway   *mcpgateway.Manager
 
 	killSwitchStop     chan struct{}
 	killSwitchDone     chan struct{}
@@ -316,6 +318,9 @@ func (e *Engine) Close() error {
 // connection context; this method handles background work explicitly.
 func (e *Engine) EndRemoteSession() {
 	e.tasks.StopAll(syscall.SIGKILL)
+	if e.gateway != nil {
+		e.gateway.Close()
+	}
 	_ = e.closePortalSession()
 }
 
@@ -490,6 +495,8 @@ func (e *Engine) invoke(ctx context.Context, method string, raw json.RawMessage)
 		return nil, err
 	}
 	switch method {
+	case "mcp_servers_list", "mcp_tools_search", "mcp_tool_inspect", "mcp_tool_call":
+		return e.invokeGateway(ctx, method, raw)
 	case "system_info":
 		host, _ := os.Hostname()
 		return SystemInfoOutput{

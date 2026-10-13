@@ -202,8 +202,8 @@ func TestToolDescriptorsMeetChatGPTRequirements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 34 {
-		t.Fatalf("tool count=%d want=34", len(listed.Tools))
+	if len(listed.Tools) != 38 {
+		t.Fatalf("tool count=%d want=38", len(listed.Tools))
 	}
 	seen := map[string]bool{}
 	for _, tool := range listed.Tools {
@@ -239,8 +239,8 @@ func TestToolDescriptorsMeetChatGPTRequirements(t *testing.T) {
 
 func TestToolCatalogIsDeterministicAndComplete(t *testing.T) {
 	catalog := ToolCatalog()
-	if len(catalog) != 34 {
-		t.Fatalf("catalog count=%d want=34", len(catalog))
+	if len(catalog) != 38 {
+		t.Fatalf("catalog count=%d want=38", len(catalog))
 	}
 	for i, tool := range catalog {
 		if tool.Name == "" || tool.Title == "" {
@@ -294,8 +294,8 @@ func TestRawStreamableHTTPToolsListAdvertisesAllTools(t *testing.T) {
 		t.Fatalf("tools/list response has no result: %#v", response)
 	}
 	tools, ok := result["tools"].([]any)
-	if !ok || len(tools) != 34 {
-		t.Fatalf("raw tools/list advertised %#v tools, want 34", result["tools"])
+	if !ok || len(tools) != 38 {
+		t.Fatalf("raw tools/list advertised %#v tools, want 38", result["tools"])
 	}
 	for _, raw := range tools {
 		descriptor, ok := raw.(map[string]any)
@@ -357,8 +357,8 @@ func TestAccountEndpointAddsDeviceRoutingWithoutChangingCoreCatalog(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 35 {
-		t.Fatalf("account tool count=%d want=35", len(listed.Tools))
+	if len(listed.Tools) != 39 {
+		t.Fatalf("account tool count=%d want=39", len(listed.Tools))
 	}
 	seenDevices := false
 	for _, tool := range listed.Tools {
@@ -387,7 +387,7 @@ func TestAccountEndpointAddsDeviceRoutingWithoutChangingCoreCatalog(t *testing.T
 	if !seenDevices {
 		t.Fatal("account endpoint did not advertise devices_list")
 	}
-	if len(ToolCatalog()) != 34 {
+	if len(ToolCatalog()) != 38 {
 		t.Fatalf("core tool catalog changed size: %d", len(ToolCatalog()))
 	}
 

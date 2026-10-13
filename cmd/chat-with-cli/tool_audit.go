@@ -131,7 +131,7 @@ func auditSensitiveArgument(key string) bool {
 
 func auditPayloadArgument(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "content", "old_text", "new_text", "input", "text", "body", "payload", "data":
+	case "content", "old_text", "new_text", "input", "text", "body", "payload", "data", "arguments":
 		return true
 	default:
 		return false

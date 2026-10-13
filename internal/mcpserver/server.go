@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/ifloppy/chat-with-cli/internal/engine"
+	"github.com/ifloppy/chat-with-cli/internal/mcpgateway"
 	"github.com/ifloppy/chat-with-cli/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -214,6 +215,10 @@ var toolTitles = map[string]string{
 	"fs_patch":             "Patch file",
 	"fs_read":              "Read file",
 	"fs_search":            "Search files",
+	"mcp_servers_list":     "List downstream MCP servers",
+	"mcp_tools_search":     "Discover downstream MCP tools",
+	"mcp_tool_inspect":     "Inspect downstream MCP schema",
+	"mcp_tool_call":        "Call downstream MCP tool",
 	"fs_write":             "Write file",
 	"system_info":          "Inspect system",
 	"task_list":            "List tasks",
@@ -228,7 +233,7 @@ func toolTitle(name string) string { return toolTitles[name] }
 
 func toolAnnotations(name string) *mcp.ToolAnnotations {
 	switch name {
-	case "system_info", "computer_info", "computer_screenshot", "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "computer_ui_get_text", "task_read", "task_wait", "task_list", "audit_recent", "fs_read", "fs_list", "fs_search", "checkpoint_read":
+	case "system_info", "computer_info", "computer_screenshot", "computer_observe", "computer_ui_tree", "computer_ui_find", "computer_ui_wait", "computer_ui_get_text", "task_read", "task_wait", "task_list", "audit_recent", "fs_read", "fs_list", "fs_search", "checkpoint_read", "mcp_servers_list", "mcp_tools_search", "mcp_tool_inspect":
 		return &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(false), IdempotentHint: true, OpenWorldHint: boolPtr(false)}
 	case "fs_write", "fs_patch", "fs_delete", "fs_move", "checkpoint_write":
 		return &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
@@ -366,5 +371,13 @@ func New(caller Caller) *mcp.Server {
 		"Persist concise workspace progress, decisions, risks, and next steps so a later agent/session can resume accurately.")
 	addTool[engine.CheckpointReadInput, engine.CheckpointOutput](server, caller, "checkpoint_read",
 		"Read the durable checkpoint for a workspace before resuming a long-running development effort.")
+	addTool[struct{}, mcpgateway.ServersListOutput](server, caller, "mcp_servers_list",
+		"List explicitly configured downstream MCP servers on this workstation, including enabled and exposure states.")
+	addTool[mcpgateway.SearchInput, mcpgateway.SearchResult](server, caller, "mcp_tools_search",
+		"Search enabled downstream MCP tools by keyword without loading their schemas. Use mcp_tool_inspect before calling.")
+	addTool[mcpgateway.ToolInput, mcpgateway.ToolInfo](server, caller, "mcp_tool_inspect",
+		"Read one downstream MCP tool's exact input/output JSON schemas before invoking it.")
+	addTool[mcpgateway.CallInput, mcpgateway.ToolResult](server, caller, "mcp_tool_call",
+		"Invoke a tool on an explicitly enabled downstream MCP server. Arguments must match its inspected input schema; downstream permissions and side effects are independent of native filesystem/exec permissions.")
 	return server
 }

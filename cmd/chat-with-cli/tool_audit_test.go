@@ -19,7 +19,7 @@ func TestToolAuditPrintsInventoryInAllowAllMode(t *testing.T) {
 	})
 	text := out.String()
 	for _, want := range []string{
-		"MCP tool audit: 34 advertised tools",
+		"MCP tool audit: 38 advertised tools",
 		"approval mode: allow-all",
 		"WARNING: allow-all enables temporary capabilities",
 		"fs_read",
