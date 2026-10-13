@@ -12,14 +12,17 @@ Computer Use controls.
 > Status: early alpha (`v0.1.0-alpha.5`). Linux is the first supported host.
 > Review [SECURITY.md](SECURITY.md) before exposing a Relay publicly.
 
-After installation, run `chat-with-cli ui` (or simply `chat-with-cli` in an
-interactive terminal) to open the terminal hub. **Connect this workstation** is
-the normal entry point: on first use it creates the local configuration, opens
-browser OAuth when needed, and then connects the Agent. The Account menu shows
-the current OAuth state and provides explicit Login / Logout actions. The hub
-uses `https://chat-with-cli.iruanp.com` as the default public Relay and also
-exposes workstation settings and diagnostics without memorising subcommands. Pass
-`--relay https://your-relay.example` whenever you want to use another Relay.
+Run `chat-with-cli` (or `chat-with-cli ui`) in a terminal for the new
+full-screen Bubble Tea control center. It shows service status, the local MCP
+registry, journal logs and configuration help. Add/toggle/remove MCP entries
+in the TUI, or use `chat-with-cli mcp` commands from scripts. Quitting the TUI
+does **not** stop the Agent. Existing first-time setup and browser OAuth remain
+available via `chat-with-cli menu` or `chat-with-cli connect`. The default
+public Relay is `https://chat-with-cli.iruanp.com`.
+
+Downstream MCP gateway tools are now advertised on the Relay. Agent-side
+connections are opt-in through `~/.config/chat-with-cli/mcp.json`.
+See [MCP Gateway & TUI](docs/mcp-gateway.md) for setup, limitations and security.
 
 ## Five-minute quick start
 
@@ -175,8 +178,8 @@ security audit and first browser login are complete.
 - [Self-host with ChatGPT](docs/self-host-with-chatgpt.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
-A device-pinned MCP endpoint advertises 34 workstation tools. The account-level
-`/mcp` endpoint advertises those same 34 tools plus read-only `devices_list`;
+A device-pinned MCP endpoint advertises 38 workstation tools. The account-level
+`/mcp` endpoint advertises those same 38 tools plus read-only `devices_list`;
 its workstation tools require the selector returned by that list.
 Read-only/destructive/open-world annotations and human-readable titles are explicit. The raw Streamable HTTP
 `initialize` and `tools/list` path is covered by a regression test; a client's

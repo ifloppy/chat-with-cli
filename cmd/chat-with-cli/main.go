@@ -31,12 +31,14 @@ import (
 	"github.com/ifloppy/chat-with-cli/internal/deviceidentity"
 	"github.com/ifloppy/chat-with-cli/internal/engine"
 	"github.com/ifloppy/chat-with-cli/internal/execsandbox"
+	"github.com/ifloppy/chat-with-cli/internal/mcpgateway"
 	"github.com/ifloppy/chat-with-cli/internal/mcpserver"
 	"github.com/ifloppy/chat-with-cli/internal/oauthclient"
 	"github.com/ifloppy/chat-with-cli/internal/oauthserver"
 	"github.com/ifloppy/chat-with-cli/internal/protocol"
 	"github.com/ifloppy/chat-with-cli/internal/relay"
 	"github.com/ifloppy/chat-with-cli/internal/securefile"
+	"github.com/ifloppy/chat-with-cli/internal/tui"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -53,7 +55,7 @@ func (s *stringList) Set(value string) error {
 func main() {
 	if len(os.Args) < 2 {
 		if interactiveTerminalAvailable() {
-			if err := runInteractiveUI(nil); err != nil {
+			if err := tui.Run(""); err != nil {
 				log.Printf("error: %v", err)
 				os.Exit(1)
 			}
@@ -85,9 +87,13 @@ func main() {
 	case "connect":
 		err = runConnect(os.Args[2:])
 	case "ui":
+		err = tui.Run("")
+	case "menu":
 		err = runInteractiveUI(os.Args[2:])
 	case "doctor":
 		err = runDoctor(os.Args[2:])
+	case "mcp":
+		err = runMCP(os.Args[2:])
 	case "status":
 		err = runStatus(os.Args[2:])
 	case "update":
@@ -133,7 +139,9 @@ Usage:
   chat-with-cli relay setup     Create relay config and one-time setup token
   chat-with-cli relay install   Review or apply a checksum-verified binary install
   chat-with-cli connect         Recommended interactive connect; OAuth is automatic
-  chat-with-cli ui              Interactive terminal hub (also opens with no arguments)
+  chat-with-cli ui              Full-screen terminal control center (default in a TTY)
+  chat-with-cli menu            Legacy onboarding/settings menu
+  chat-with-cli mcp [command]   Manage downstream MCP servers and registry
   chat-with-cli agent [flags]   Connect this machine outbound to a relay
   chat-with-cli agent setup     Create agent config and optional user unit
   chat-with-cli login [flags]   Explicit browser OAuth login / re-authorization
@@ -1397,6 +1405,7 @@ func runAgentCommand(command string, args []string) error {
 		return err
 	}
 	defer eng.Close()
+	eng.SetMCPGateway(mcpgateway.New(filepath.Join(filepath.Dir(*configPath), "mcp.json")))
 	ctx, cancel := signalContext()
 	defer cancel()
 	audit := newToolAudit(os.Stderr)
