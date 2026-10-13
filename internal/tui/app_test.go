@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/ifloppy/chat-with-cli/internal/mcpgateway"
 )
 
@@ -52,5 +54,27 @@ func TestTUIInvalidMCPInputIsNotPersisted(t *testing.T) {
 	}
 	if _, err := os.Stat(m.path); !os.IsNotExist(err) {
 		t.Fatalf("unexpected registry creation: %v", err)
+	}
+}
+
+func TestConnectingWhenAgentMayBeRunningIsBlocked(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "config.toml"))
+	m.data.agentProcess = true
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Text: "c"}))
+	if cmd != nil || !strings.Contains(m.notice, "already exists") {
+		t.Fatalf("duplicate connect not blocked: %q command=%v", m.notice, cmd)
+	}
+}
+
+func TestServiceStartRequiresConfirmation(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "config.toml"))
+	m.data.serviceInstalled = true
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 's', Text: "s"}))
+	if cmd != nil || !m.confirmServiceStart {
+		t.Fatalf("start was not gated: %v", cmd)
+	}
+	_, cmd = m.Update(tea.KeyPressMsg(tea.Key{Code: 'n', Text: "n"}))
+	if cmd != nil || m.confirmServiceStart {
+		t.Fatal("start cancellation failed")
 	}
 }

@@ -18,29 +18,36 @@ import (
 var pages = []string{"Dashboard", "MCP Servers", "Logs", "Settings", "Help"}
 
 type snapshot struct {
-	registry mcpgateway.Registry
-	config   config.Values
-	service  string
-	logs     []string
-	err      error
+	registry         mcpgateway.Registry
+	config           config.Values
+	service          string
+	serviceInstalled bool
+	agentProcess     bool
+	logs             []string
+	err              error
 }
 
 type snapshotMsg snapshot
 type tickMsg struct{}
 type noticeMsg string
+type commandDoneMsg struct {
+	action string
+	err    error
+}
 
 type Model struct {
-	path          string
-	configPath    string
-	page          int
-	cursor        int
-	width         int
-	height        int
-	data          snapshot
-	notice        string
-	input         bool
-	inputText     string
-	confirmDelete bool
+	path                string
+	configPath          string
+	page                int
+	cursor              int
+	width               int
+	height              int
+	data                snapshot
+	notice              string
+	input               bool
+	inputText           string
+	confirmDelete       bool
+	confirmServiceStart bool
 }
 
 func New(configPath string) *Model {
@@ -65,10 +72,18 @@ func readSnapshot(configPath, registryPath string) tea.Cmd {
 		} else if s.err == nil {
 			s.err = err
 		}
+		s.agentProcess = otherCLIProcessPresent()
+		if out, err := exec.Command("systemctl", "--user", "show", "--property=LoadState", "--value", "chat-with-cli-agent.service").Output(); err == nil {
+			s.serviceInstalled = strings.TrimSpace(string(out)) == "loaded"
+		}
 		if exec.Command("systemctl", "--user", "is-active", "--quiet", "chat-with-cli-agent.service").Run() == nil {
 			s.service = "running (systemd user)"
+		} else if s.agentProcess {
+			s.service = "another CLI process detected (connection not verified)"
+		} else if s.serviceInstalled {
+			s.service = "service installed but stopped"
 		} else {
-			s.service = "stopped / not managed by systemd"
+			s.service = "no managed Agent process detected"
 		}
 		if out, err := exec.Command("journalctl", "--user", "-u", "chat-with-cli-agent.service", "-n", "18", "--no-pager", "--output=short").CombinedOutput(); err == nil {
 			s.logs = strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -98,6 +113,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tickMsg:
 		return m, tea.Batch(readSnapshot(m.configPath, m.path), refreshCmd())
+	case commandDoneMsg:
+		if v.err != nil {
+			m.notice = v.action + ": " + v.err.Error()
+		} else {
+			m.notice = v.action + " finished"
+		}
+		return m, readSnapshot(m.configPath, m.path)
 	case tea.KeyPressMsg:
 		key := v.String()
 		if m.input {
@@ -118,6 +140,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.inputText += v.Key().Text
 				}
 			}
+			return m, nil
+		}
+		if m.confirmServiceStart {
+			m.confirmServiceStart = false
+			if key == "y" || key == "Y" {
+				return m, func() tea.Msg {
+					out, err := exec.Command("systemctl", "--user", "start", "chat-with-cli-agent.service").CombinedOutput()
+					if err != nil {
+						return commandDoneMsg{action: "Start user service (" + truncate(string(out), 120) + ")", err: err}
+					}
+					return commandDoneMsg{action: "User service started"}
+				}
+			}
+			m.notice = "Service start canceled"
 			return m, nil
 		}
 		if m.confirmDelete {
@@ -168,6 +204,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 1 && len(m.data.registry.Servers) > 0 {
 				m.confirmDelete = true
 			}
+		case "c":
+			if m.data.agentProcess || strings.HasPrefix(m.data.service, "running") {
+				m.notice = "An Agent/CLI process already exists; do not start a duplicate."
+				return m, nil
+			}
+			if m.data.config == nil || m.data.config.String("", "agent.identity") == "" {
+				m.notice = "Configure a workstation first: press o to open the setup menu."
+				return m, nil
+			}
+			return m, tea.ExecProcess(exec.Command(os.Args[0], "connect", "--config", m.configPath, "--approval-mode=configured"), func(err error) tea.Msg { return commandDoneMsg{action: "Foreground Agent", err: err} })
+		case "o":
+			return m, tea.ExecProcess(exec.Command(os.Args[0], "menu"), func(err error) tea.Msg { return commandDoneMsg{action: "Setup menu", err: err} })
+		case "s":
+			if !m.data.serviceInstalled {
+				m.notice = "Systemd user service is not installed; press o for setup."
+				return m, nil
+			}
+			if m.data.agentProcess || strings.HasPrefix(m.data.service, "running") {
+				m.notice = "An Agent/CLI process is already active."
+				return m, nil
+			}
+			m.confirmServiceStart = true
 		case "r":
 			return m, readSnapshot(m.configPath, m.path)
 		}
@@ -304,7 +362,12 @@ func (m *Model) View() tea.View {
 			}
 		}
 		fmt.Fprintf(&b, "  Gateway exposure  %d enabled\n\n", active)
+		b.WriteString("  c Connect in foreground (TUI pauses)   o Setup menu\n")
+		b.WriteString("  s Start installed user service (asks confirmation)\n")
 		b.WriteString("  The TUI is detachable: q quits the UI, not the Agent.\n")
+		if m.confirmServiceStart {
+			b.WriteString("  Start chat-with-cli-agent.service? Press y to confirm.\n")
+		}
 	case 1:
 		b.WriteString("  ID                      TRANSPORT          ENABLED  EXPOSED\n")
 		ids := mcpgateway.ServerIDs(m.data.registry)
@@ -348,7 +411,9 @@ func (m *Model) View() tea.View {
 		b.WriteString("  j / k         Select server       r     Refresh\n")
 		b.WriteString("  q             Quit TUI only       Ctrl+C Quit\n")
 		b.WriteString("  a / e / x / d Add / toggle / expose / delete MCP entry\n\n")
-		b.WriteString("  To connect a new workstation, run chat-with-cli menu.\n")
+		b.WriteString("  c Foreground connect (pauses UI), o Existing setup menu\n")
+		b.WriteString("  s Start installed user service with confirmation\n")
+		b.WriteString("  Foreground process detection does NOT verify network connectivity.\n")
 	}
 	if m.notice != "" {
 		b.WriteString("\n\x1b[33m  " + truncate(m.notice, width-4) + "\x1b[0m\n")
