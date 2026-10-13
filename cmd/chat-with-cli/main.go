@@ -96,6 +96,8 @@ func main() {
 		err = runMCP(os.Args[2:])
 	case "status":
 		err = runStatus(os.Args[2:])
+	case "install-local":
+		err = runInstallLocal(os.Args[2:])
 	case "update":
 		err = runUpdate(os.Args[2:])
 	case "rollback":
@@ -148,6 +150,7 @@ Usage:
   chat-with-cli logout [flags]  Revoke this workstation OAuth session and remove local credentials
   chat-with-cli doctor [flags]  Check relay, OAuth, MCP, and local prerequisites
   chat-with-cli status          Show local configuration/service status
+  chat-with-cli install-local   Review/apply a local binary with verified rollback backup
   chat-with-cli update          Review or apply a verified atomic binary update
   chat-with-cli rollback        Review or restore the verified previous binary
   chat-with-cli token           Generate a strong random token
@@ -578,7 +581,7 @@ func (c relayAccountCaller) Devices(ctx context.Context) ([]mcpserver.AccountDev
 	devices := make([]mcpserver.AccountDevice, 0, len(owned))
 	for _, device := range owned {
 		devices = append(devices, mcpserver.AccountDevice{
-			Selector: device.Route, ID: device.ID, Name: device.Name, Online: device.Online, Enabled: device.Enabled,
+			Selector: device.Route, ID: device.ID, Name: device.Name, Online: device.Online, Enabled: device.Enabled, Gateway: c.Broker.DeviceSupportsGateway(device.Route),
 		})
 	}
 	return devices, nil
@@ -603,6 +606,27 @@ func (c relayAccountCaller) CallDevice(ctx context.Context, selector, method str
 		return stillOwned
 	})
 	return c.Broker.Call(deviceCtx, route, method, raw)
+}
+
+// The account-level endpoint is shared by all devices. Advertise gateway
+// tools only when at least one enabled online device exists and ALL such
+// devices support the feature. Otherwise even legacy clients remain usable.
+// Per-device support is separately available through devices_list.
+func (c relayAccountCaller) GatewayAvailable() bool {
+	if c.Broker == nil || c.OAuth == nil || c.UserID == "" {
+		return false
+	}
+	seen := false
+	for _, d := range c.OAuth.OwnedMCPDevices(c.UserID) {
+		if !d.Enabled || !d.Online {
+			continue
+		}
+		seen = true
+		if !c.Broker.DeviceSupportsGateway(d.Route) {
+			return false
+		}
+	}
+	return seen
 }
 
 func defaultAgentStateDir() string {

@@ -54,4 +54,6 @@ type AgentCapabilities struct {
 	AccessibilityRead bool   `json:"accessibility_read"`
 	ComputerInput     bool   `json:"computer_input"`
 	MaxActiveTasks    int    `json:"max_active_tasks,omitempty"`
+	// Features is an optional list of protocol extensions; legacy Agents omit it.
+	Features []string `json:"features,omitempty"`
 }

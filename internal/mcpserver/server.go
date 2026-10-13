@@ -27,6 +27,7 @@ type AccountDevice struct {
 	Name     string `json:"name"`
 	Online   bool   `json:"online"`
 	Enabled  bool   `json:"enabled"`
+	Gateway  bool   `json:"mcp_gateway,omitempty"`
 }
 
 type AccountDeviceListOutput struct {
@@ -158,6 +159,8 @@ func ToolCatalog() []ToolDescriptor {
 
 type LocalCaller struct{ Engine *engine.Engine }
 
+func (c LocalCaller) GatewayAvailable() bool { return c.Engine != nil && c.Engine.GatewayAvailable() }
+
 func (c LocalCaller) Call(ctx context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
 	value, err := c.Engine.Invoke(ctx, method, raw)
 	if err != nil {
@@ -187,6 +190,17 @@ func addTool[In, Out any](server *mcp.Server, caller Caller, name, description s
 }
 
 func boolPtr(value bool) *bool { return &value }
+
+// If an Agent predates optional feature negotiation, keep all original
+// tools available but do not advertise tools its Engine cannot execute.
+// Callers that do not expose feature state (e.g. static unit test fixtures)
+// retain the historical full tool catalog.
+func gatewayAvailable(c Caller) bool {
+	if cap, ok := c.(interface{ GatewayAvailable() bool }); ok {
+		return cap.GatewayAvailable()
+	}
+	return true
+}
 
 var toolTitles = map[string]string{
 	"audit_recent":         "Read recent audit events",
@@ -371,13 +385,15 @@ func New(caller Caller) *mcp.Server {
 		"Persist concise workspace progress, decisions, risks, and next steps so a later agent/session can resume accurately.")
 	addTool[engine.CheckpointReadInput, engine.CheckpointOutput](server, caller, "checkpoint_read",
 		"Read the durable checkpoint for a workspace before resuming a long-running development effort.")
-	addTool[struct{}, mcpgateway.ServersListOutput](server, caller, "mcp_servers_list",
-		"List explicitly configured downstream MCP servers on this workstation, including enabled and exposure states.")
-	addTool[mcpgateway.SearchInput, mcpgateway.SearchResult](server, caller, "mcp_tools_search",
-		"Search enabled downstream MCP tools by keyword without loading their schemas. Use mcp_tool_inspect before calling.")
-	addTool[mcpgateway.ToolInput, mcpgateway.ToolInfo](server, caller, "mcp_tool_inspect",
-		"Read one downstream MCP tool's exact input/output JSON schemas before invoking it.")
-	addTool[mcpgateway.CallInput, mcpgateway.ToolResult](server, caller, "mcp_tool_call",
-		"Invoke a tool on an explicitly enabled downstream MCP server. Arguments must match its inspected input schema; downstream permissions and side effects are independent of native filesystem/exec permissions.")
+	if gatewayAvailable(caller) {
+		addTool[struct{}, mcpgateway.ServersListOutput](server, caller, "mcp_servers_list",
+			"List explicitly configured downstream MCP servers on this workstation, including enabled and exposure states.")
+		addTool[mcpgateway.SearchInput, mcpgateway.SearchResult](server, caller, "mcp_tools_search",
+			"Search enabled downstream MCP tools by keyword without loading their schemas. Use mcp_tool_inspect before calling.")
+		addTool[mcpgateway.ToolInput, mcpgateway.ToolInfo](server, caller, "mcp_tool_inspect",
+			"Read one downstream MCP tool's exact input/output JSON schemas before invoking it.")
+		addTool[mcpgateway.CallInput, mcpgateway.ToolResult](server, caller, "mcp_tool_call",
+			"Invoke a tool on an explicitly enabled downstream MCP server. Arguments must match its inspected input schema; downstream permissions and side effects are independent of native filesystem/exec permissions.")
+	}
 	return server
 }

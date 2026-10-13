@@ -316,6 +316,13 @@ func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 	}
 }
 
+func gatewayFeatures(eng *engine.Engine) []string {
+	if eng != nil && eng.GatewayAvailable() {
+		return []string{"mcp_gateway_v1"}
+	}
+	return nil
+}
+
 func (c *Client) sendCapabilities(ctx context.Context, conn *websocket.Conn) error {
 	cfg := c.Engine.Config()
 	capabilities, err := json.Marshal(protocol.AgentCapabilities{
@@ -327,6 +334,7 @@ func (c *Client) sendCapabilities(ctx context.Context, conn *websocket.Conn) err
 		AccessibilityRead: cfg.AllowAccessibility || cfg.AllowComputerControl,
 		ComputerInput:     cfg.AllowComputerControl,
 		MaxActiveTasks:    cfg.MaxActiveTasks,
+		Features:          gatewayFeatures(c.Engine),
 	})
 	if err != nil {
 		return err

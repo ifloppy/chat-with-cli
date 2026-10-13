@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -105,6 +106,25 @@ func (c RemoteCaller) Call(ctx context.Context, method string, raw json.RawMessa
 	return c.Broker.Call(ctx, c.Device, method, raw)
 }
 
+// GatewayAvailable reports the currently negotiated feature set, not the
+// Relay binary version. Legacy agents have no feature list and fail closed.
+func (c RemoteCaller) GatewayAvailable() bool {
+	return c.Broker != nil && c.Broker.DeviceSupportsGateway(c.Device)
+}
+
+func (b *Broker) DeviceSupportsGateway(device string) bool {
+	b.mu.RLock()
+	p := b.peers[device]
+	b.mu.RUnlock()
+	if p == nil {
+		return false
+	}
+	p.stateMu.RLock()
+	supported := slices.Contains(p.capabilities.Features, "mcp_gateway_v1")
+	p.stateMu.RUnlock()
+	return supported
+}
+
 func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMessage) (json.RawMessage, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -116,6 +136,9 @@ func (b *Broker) Call(ctx context.Context, device, method string, raw json.RawMe
 	b.mu.RUnlock()
 	if p == nil {
 		return nil, fmt.Errorf("device %q is offline", device)
+	}
+	if strings.HasPrefix(method, "mcp_") && !b.DeviceSupportsGateway(device) {
+		return nil, errors.New("this Agent does not advertise MCP gateway support; upgrade the workstation Agent and refresh MCP tools")
 	}
 	if !authzctx.Allowed(rpcCtx) {
 		return nil, errors.New("caller authorization revoked")

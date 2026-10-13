@@ -13,6 +13,8 @@ func (e *Engine) SetMCPGateway(g *mcpgateway.Manager) {
 	e.gateway = g
 }
 
+func (e *Engine) GatewayAvailable() bool { return e.gateway != nil }
+
 func (e *Engine) invokeGateway(ctx context.Context, method string, raw json.RawMessage) (any, error) {
 	if e.gateway == nil {
 		return nil, errors.New("MCP gateway is not configured on this agent")
