@@ -22,7 +22,9 @@ public Relay is `https://chat-with-cli.iruanp.com`.
 
 Downstream MCP gateway tools are now advertised on the Relay. Agent-side
 connections are opt-in through `~/.config/chat-with-cli/mcp.json`.
-See [MCP Gateway & TUI](docs/mcp-gateway.md) for setup, limitations and security.
+See [MCP Gateway & TUI](docs/mcp-gateway.md) for setup, limitations and security,
+and [Compatibility and safe upgrades](docs/compatibility-upgrade.md) for mixed
+versions, local install previews, and checksum-verified rollback.
 
 ## Five-minute quick start
 
@@ -178,8 +180,9 @@ security audit and first browser login are complete.
 - [Self-host with ChatGPT](docs/self-host-with-chatgpt.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
-A device-pinned MCP endpoint advertises 38 workstation tools. The account-level
-`/mcp` endpoint advertises those same 38 tools plus read-only `devices_list`;
+A device-pinned MCP endpoint advertises 34 native tools for legacy Agents or 38
+when `mcp_gateway_v1` is negotiated. The account-level `/mcp` endpoint adds
+read-only `devices_list` and conditionally advertises Gateway tools;
 its workstation tools require the selector returned by that list.
 Read-only/destructive/open-world annotations and human-readable titles are explicit. The raw Streamable HTTP
 `initialize` and `tools/list` path is covered by a regression test; a client's

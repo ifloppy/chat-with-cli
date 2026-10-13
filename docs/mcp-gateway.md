@@ -9,9 +9,9 @@ In **MCP Servers**, `j/k` selects a server, `a` adds one, `e` toggles enabled,
 
 The first version shows systemd user-service state and recent journal entries.
 It does not yet connect to a live Agent management socket, stream foreground
-Agent logs, perform browser OAuth, or change the existing agent permission
-profile. Use `chat-with-cli menu` for existing interactive setup, or
-`chat-with-cli connect` to run an Agent in the foreground.
+Agent logs, or change the existing agent permission profile. Press `o` for
+the existing setup/OAuth menu, `c` to run a foreground Agent (the TUI pauses),
+or `s` to start an installed systemd user service with confirmation.
 
 Quitting the TUI never stops an already running Agent. The installed systemd
 user service is still managed with `systemctl --user`.
@@ -81,8 +81,9 @@ hundreds of downstream tools to the model's top-level catalog.
   images as top-level ChatGPT content. Oversized/binary results are rejected.
   Complex multi-round-trip input requests are not handled yet.
 - The Relay does not execute downstream tools. The workstation Agent does.
-  The Relay/Agent must be upgraded together before the new tools work; do not
-  restart an active service without planning for its running tasks.
+  Old and new Relay/Agent versions interoperate for existing tools. Gateway tools
+  appear only after a new Agent negotiates the feature with a new Relay; see
+  [compatibility and safe upgrades](compatibility-upgrade.md).
 - The Gateway never auto-imports another client's MCP configuration or takes
   over an existing stdio session. Every server must be explicitly configured.
 

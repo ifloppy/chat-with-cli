@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -23,5 +25,12 @@ jobs:
         run: go vet ./...
       - name: Test with race detector
         run: go test -race ./...
+      - name: Backward compatibility matrix
+        run: |
+          old_dir="$(mktemp -d)"
+          git archive v0.1.0-alpha.5 | tar -x -C "$old_dir"
+          (cd "$old_dir" && go build -o "$RUNNER_TEMP/cwc-old" ./cmd/chat-with-cli)
+          go build -o "$RUNNER_TEMP/cwc-new" ./cmd/chat-with-cli
+          python3 scripts/compat_matrix.py "$RUNNER_TEMP/cwc-old" "$RUNNER_TEMP/cwc-new"
       - name: Build
         run: go build -trimpath ./cmd/chat-with-cli
