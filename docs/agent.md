@@ -152,7 +152,7 @@ security-first default; do not rely on remote PTY tasks surviving disconnects.
 
 ## MCP tool audit output
 
-Foreground `agent` and `connect` sessions print the complete 34-tool MCP
+Foreground `agent` and `connect` sessions print the complete 38-tool MCP
 inventory when they start. Each entry includes its read-only/mutating and
 open-world classification, plus the local capability summary. Every inbound
 MCP call is then printed by tool name before authorization and execution. This
