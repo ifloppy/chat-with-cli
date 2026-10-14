@@ -7,11 +7,26 @@ dashboard. Use Tab or 1–5 to switch pages, `q` to quit, and `r` to refresh.
 In **MCP Servers**, `j/k` selects a server, `a` adds one, `e` toggles enabled,
 `x` toggles exposure, and `d` requests deletion confirmation.
 
-The first version shows systemd user-service state and recent journal entries.
-It does not yet connect to a live Agent management socket, stream foreground
-Agent logs, or change the existing agent permission profile. Press `o` for
-the existing setup/OAuth menu, `c` to run a foreground Agent (the TUI pauses),
-or `s` to start an installed systemd user service with confirmation.
+The TUI displays foreground Agent process detection, managed service status,
+and two live log sources in the Logs tab: **Runtime** (user systemd journal)
+and **Tool audit** (recent redacted local `audit/events.jsonl` metadata).
+Press `l` to open Logs, `g` to switch sources, `f` to pause/resume updates,
+and `r` to refresh. Logs normally refresh every second without leaving TUI.
+Existing foreground Agents are visible through their audit events, but their
+old terminal stderr cannot be retrospectively captured.
+
+Press `c` to start a background Agent through `systemd-run --user`; the
+TUI stays on screen and new Agent runtime logs appear in Logs. If an Agent
+user service is already installed, `c` starts that service instead. Existing
+foreground Agent processes are detected and block accidental duplicate starts.
+The Agent uses the *configured* permission profile; TUI does not silently
+escalate permissions. `o` opens the existing interactive setup/OAuth menu,
+and `s` starts an installed user unit after confirmation.
+
+The current control center does not yet use a dedicated Agent IPC socket or
+allow interactive approval prompts through the TUI itself. If OAuth needs
+initial browser approval or a credential must be renewed, use the existing
+setup/login flow before starting the background Agent.
 
 Quitting the TUI never stops an already running Agent. The installed systemd
 user service is still managed with `systemctl --user`.

@@ -12,11 +12,13 @@ Computer Use controls.
 > Status: early alpha (`v0.1.0-alpha.5`). Linux is the first supported host.
 > Review [SECURITY.md](SECURITY.md) before exposing a Relay publicly.
 
-Run `chat-with-cli` (or `chat-with-cli ui`) in a terminal for the new
+Run `chat-with-cli` (or `chat-with-cli ui`) in a terminal for the
 full-screen Bubble Tea control center. It shows service status, the local MCP
-registry, journal logs and configuration help. Add/toggle/remove MCP entries
-in the TUI, or use `chat-with-cli mcp` commands from scripts. Quitting the TUI
-does **not** stop the Agent. Existing first-time setup and browser OAuth remain
+registry, live journal and tool audit logs, and configuration help. Press `l`
+for live logs (`g` switches runtime/audit sources) and `c` to start the Agent
+in a managed background user service without leaving the UI. Add/toggle/remove
+MCP entries in the TUI, or use `chat-with-cli mcp` commands from scripts.
+Quitting the TUI does **not** stop the Agent. Existing first-time setup and browser OAuth remain
 available via `chat-with-cli menu` or `chat-with-cli connect`. The default
 public Relay is `https://chat-with-cli.iruanp.com`.
 

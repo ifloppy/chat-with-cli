@@ -68,8 +68,11 @@ to the login session. The built-in `update` (verified GitHub release) and
 
 - `chat-with-cli ui`: inspect Dashboard, MCP and journal.
 - `o`: open existing interactive setup in a temporarily suspended TUI.
-- `c`: connect in foreground, temporarily suspending TUI until the Agent exits.
-  Connection is not detached; quit the Agent to resume the TUI.
+- `c`: launch an Agent as a systemd user service in the background without
+  leaving TUI; if an existing user service is installed, start it instead.
+  The TUI refuses to create a duplicate while a foreground Agent is detected.
+- `l`: live logs, `g`: switch runtime journal vs metadata-only tool audit,
+  `f`: pause/resume automatic log refresh.
 - `s`: start an already-installed systemd user service, with a confirmation.
 - `q`: exit TUI without stopping any existing service or Agent.
 
