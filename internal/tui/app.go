@@ -24,6 +24,7 @@ type snapshot struct {
 	serviceInstalled bool
 	agentProcess     bool
 	logs             []string
+	auditLogs        []string
 	err              error
 }
 
@@ -48,6 +49,9 @@ type Model struct {
 	inputText           string
 	confirmDelete       bool
 	confirmServiceStart bool
+	logMode             int // 0=runtime, 1=tool audit metadata
+	follow              bool
+	initialized         bool
 }
 
 func New(configPath string) *Model {
@@ -55,7 +59,7 @@ func New(configPath string) *Model {
 		dir, _ := os.UserConfigDir()
 		configPath = filepath.Join(dir, "chat-with-cli", "config.toml")
 	}
-	return &Model{path: filepath.Join(filepath.Dir(configPath), "mcp.json"), configPath: configPath, width: 80, height: 24}
+	return &Model{path: filepath.Join(filepath.Dir(configPath), "mcp.json"), configPath: configPath, width: 80, height: 24, follow: true}
 }
 
 func Run(configPath string) error {
@@ -67,35 +71,36 @@ func readSnapshot(configPath, registryPath string) tea.Cmd {
 	return func() tea.Msg {
 		var s snapshot
 		s.registry, s.err = mcpgateway.Load(registryPath)
-		if values, err := config.LoadOptional(configPath); err == nil {
+		values, err := config.LoadOptional(configPath)
+		if err == nil {
 			s.config = values
 		} else if s.err == nil {
 			s.err = err
 		}
-		s.agentProcess = otherCLIProcessPresent()
-		if out, err := exec.Command("systemctl", "--user", "show", "--property=LoadState", "--value", "chat-with-cli-agent.service").Output(); err == nil {
-			s.serviceInstalled = strings.TrimSpace(string(out)) == "loaded"
+		state := systemdServiceState()
+		s.serviceInstalled = state.Installed
+		s.service = state.Label
+		s.agentProcess = otherAgentProcessPresent()
+		if !state.Active && s.agentProcess {
+			s.service = "foreground Agent detected (Relay link unverified)"
 		}
-		if exec.Command("systemctl", "--user", "is-active", "--quiet", "chat-with-cli-agent.service").Run() == nil {
-			s.service = "running (systemd user)"
-		} else if s.agentProcess {
-			s.service = "another CLI process detected (connection not verified)"
-		} else if s.serviceInstalled {
-			s.service = "service installed but stopped"
-		} else {
-			s.service = "no managed Agent process detected"
+		if !state.Active && !s.agentProcess && !state.Installed {
+			s.service = "Agent not running"
 		}
-		if out, err := exec.Command("journalctl", "--user", "-u", "chat-with-cli-agent.service", "-n", "18", "--no-pager", "--output=short").CombinedOutput(); err == nil {
-			s.logs = strings.Split(strings.TrimSpace(string(out)), "\n")
-		} else {
-			s.logs = []string{"No systemd journal available; start Agent with chat-with-cli connect to view foreground logs."}
+		s.logs = readJournalLines(100)
+		dir, _ := os.UserHomeDir()
+		defaultState := filepath.Join(dir, ".local", "state", "chat-with-cli")
+		if env := os.Getenv("XDG_STATE_HOME"); env != "" {
+			defaultState = filepath.Join(env, "chat-with-cli")
 		}
+		stateDir := values.String(defaultState, "agent.state_dir")
+		s.auditLogs = readAuditLines(stateDir, 100)
 		return snapshotMsg(s)
 	}
 }
 
 func refreshCmd() tea.Cmd {
-	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -107,6 +112,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = v.Width, v.Height
 	case snapshotMsg:
+		if !m.initialized {
+			// Foreground Agents cannot be retroactively attached to the
+			// journal; show their existing local audit events by default.
+			if v.agentProcess && !strings.HasPrefix(v.service, "running (systemd") {
+				m.logMode = 1
+			}
+			m.initialized = true
+		}
+		if !m.follow {
+			v.logs = m.data.logs
+			v.auditLogs = m.data.auditLogs
+		}
 		m.data = snapshot(v)
 		if m.cursor >= len(mcpgateway.ServerIDs(m.data.registry)) {
 			m.cursor = max(0, len(m.data.registry.Servers)-1)
@@ -116,6 +133,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commandDoneMsg:
 		if v.err != nil {
 			m.notice = v.action + ": " + v.err.Error()
+		} else if v.action == "Managed Agent start" {
+			m.notice = "Managed Agent launch requested; open Logs to verify authentication and connection."
 		} else {
 			m.notice = v.action + " finished"
 		}
@@ -206,14 +225,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "c":
 			if m.data.agentProcess || strings.HasPrefix(m.data.service, "running") {
-				m.notice = "An Agent/CLI process already exists; do not start a duplicate."
+				m.notice = "An Agent is already running. See Logs -> g for recent tool calls."
 				return m, nil
 			}
 			if m.data.config == nil || m.data.config.String("", "agent.identity") == "" {
 				m.notice = "Configure a workstation first: press o to open the setup menu."
 				return m, nil
 			}
-			return m, tea.ExecProcess(exec.Command(os.Args[0], "connect", "--config", m.configPath, "--approval-mode=configured"), func(err error) tea.Msg { return commandDoneMsg{action: "Foreground Agent", err: err} })
+			m.notice = "Starting managed Agent in background..."
+			return m, func() tea.Msg {
+				binary, err := os.Executable()
+				if err != nil {
+					return commandDoneMsg{action: "Find Agent binary", err: err}
+				}
+				return commandDoneMsg{action: "Managed Agent start", err: startManagedAgent(binary, m.configPath)}
+			}
 		case "o":
 			return m, tea.ExecProcess(exec.Command(os.Args[0], "menu"), func(err error) tea.Msg { return commandDoneMsg{action: "Setup menu", err: err} })
 		case "s":
@@ -226,6 +252,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.confirmServiceStart = true
+		case "g":
+			if m.page == 2 {
+				m.logMode = 1 - m.logMode
+			}
+		case "f":
+			if m.page == 2 {
+				m.follow = !m.follow
+				if m.follow {
+					return m, readSnapshot(m.configPath, m.path)
+				}
+			}
+		case "l":
+			m.page = 2
 		case "r":
 			return m, readSnapshot(m.configPath, m.path)
 		}
@@ -362,8 +401,9 @@ func (m *Model) View() tea.View {
 			}
 		}
 		fmt.Fprintf(&b, "  Gateway exposure  %d enabled\n\n", active)
-		b.WriteString("  c Connect in foreground (TUI pauses)   o Setup menu\n")
+		b.WriteString("  c Start background Agent (TUI stays open)   o Setup menu\n")
 		b.WriteString("  s Start installed user service (asks confirmation)\n")
+		b.WriteString("  l Logs: runtime + tool audit, refreshes every second\n")
 		b.WriteString("  The TUI is detachable: q quits the UI, not the Agent.\n")
 		if m.confirmServiceStart {
 			b.WriteString("  Start chat-with-cli-agent.service? Press y to confirm.\n")
@@ -391,14 +431,24 @@ func (m *Model) View() tea.View {
 			b.WriteString("\n  Delete " + id + "? Press y to confirm, any other key to cancel\n")
 		}
 	case 2:
-		b.WriteString("  Agent journal (latest entries; foreground logs are not included):\n\n")
+		source := "Runtime (systemd journal)"
 		lines := m.data.logs
-		maxLines := max(4, m.height-11)
+		if m.logMode == 1 {
+			source = "Tool audit (metadata only)"
+			lines = m.data.auditLogs
+		}
+		followState := "LIVE"
+		if !m.follow {
+			followState = "PAUSED"
+		}
+		fmt.Fprintf(&b, "  %s — %s\n", source, followState)
+		b.WriteString("  g Toggle runtime/audit   f Pause/resume refresh   r Refresh now\n\n")
+		maxLines := max(4, m.height-12)
 		if len(lines) > maxLines {
 			lines = lines[len(lines)-maxLines:]
 		}
 		for _, line := range lines {
-			fmt.Fprintf(&b, "  %s\n", truncate(line, width-5))
+			fmt.Fprintf(&b, "  %s\n", truncate(sanitizeTerminalLog(line), width-5))
 		}
 	case 3:
 		b.WriteString("  Agent settings are stored in the existing config.toml.\n")
@@ -411,7 +461,8 @@ func (m *Model) View() tea.View {
 		b.WriteString("  j / k         Select server       r     Refresh\n")
 		b.WriteString("  q             Quit TUI only       Ctrl+C Quit\n")
 		b.WriteString("  a / e / x / d Add / toggle / expose / delete MCP entry\n\n")
-		b.WriteString("  c Foreground connect (pauses UI), o Existing setup menu\n")
+		b.WriteString("  c Start background Agent without leaving TUI, o Setup menu\n")
+		b.WriteString("  l Logs page, g Switch runtime/audit, f Pause/resume log refresh\n")
 		b.WriteString("  s Start installed user service with confirmation\n")
 		b.WriteString("  Foreground process detection does NOT verify network connectivity.\n")
 	}
@@ -419,7 +470,7 @@ func (m *Model) View() tea.View {
 		b.WriteString("\n\x1b[33m  " + truncate(m.notice, width-4) + "\x1b[0m\n")
 	}
 	b.WriteString("\n" + strings.Repeat("─", min(width, 110)) + "\n")
-	b.WriteString("  q Quit UI   Tab Navigate   r Refresh   5 Help")
+	b.WriteString("  q Quit UI   Tab Navigate   l Logs   r Refresh   5 Help")
 	view := tea.NewView(b.String())
 	view.AltScreen = true
 	view.WindowTitle = "Chat With CLI"

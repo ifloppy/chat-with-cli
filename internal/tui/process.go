@@ -8,10 +8,9 @@ import (
 	"strings"
 )
 
-// otherCLIProcessPresent only detects likely foreground CLI processes. It is
-// deliberately NOT an authenticated Agent health check; show that distinction
-// in the UI and do not claim a network connection from a process name alone.
-func otherCLIProcessPresent() bool {
+// otherAgentProcessPresent finds local foreground Agent processes without
+// confusing other open TUI windows with an Agent. This is not a network check.
+func otherAgentProcessPresent() bool {
 	if runtime.GOOS != "linux" {
 		return false
 	}
@@ -29,14 +28,15 @@ func otherCLIProcessPresent() bool {
 		if err != nil || len(raw) == 0 {
 			continue
 		}
-		first := strings.SplitN(string(raw), "\x00", 2)[0]
-		if filepath.Base(first) != "chat-with-cli" {
+		parts := strings.Split(string(raw), "\x00")
+		if filepath.Base(parts[0]) != "chat-with-cli" {
 			continue
 		}
-		// Self-built test programs may share argv[0]. Use the kernel's process
-		// name as a second check to avoid common shell/grep false positives.
 		comm, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "comm"))
-		if err == nil && strings.TrimSpace(string(comm)) == "chat-with-cli" {
+		if err != nil || strings.TrimSpace(string(comm)) != "chat-with-cli" {
+			continue
+		}
+		if len(parts) > 1 && (parts[1] == "agent" || parts[1] == "connect") {
 			return true
 		}
 	}
