@@ -61,7 +61,7 @@ func TestConnectingWhenAgentMayBeRunningIsBlocked(t *testing.T) {
 	m := New(filepath.Join(t.TempDir(), "config.toml"))
 	m.data.agentProcess = true
 	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Text: "c"}))
-	if cmd != nil || !strings.Contains(m.notice, "already exists") {
+	if cmd != nil || !strings.Contains(m.notice, "already running") {
 		t.Fatalf("duplicate connect not blocked: %q command=%v", m.notice, cmd)
 	}
 }
