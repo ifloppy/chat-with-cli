@@ -10,9 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/ifloppy/chat-with-cli/internal/config"
 	"github.com/ifloppy/chat-with-cli/internal/mcpgateway"
+	"github.com/mattn/go-runewidth"
 )
 
 var pages = []string{"Dashboard", "MCP Servers", "Logs", "Settings", "Help"}
@@ -46,7 +49,7 @@ type Model struct {
 	data                snapshot
 	notice              string
 	input               bool
-	inputText           string
+	addInput            textinput.Model
 	confirmDelete       bool
 	confirmServiceStart bool
 	logMode             int // 0=runtime, 1=tool audit metadata
@@ -59,7 +62,10 @@ func New(configPath string) *Model {
 		dir, _ := os.UserConfigDir()
 		configPath = filepath.Join(dir, "chat-with-cli", "config.toml")
 	}
-	return &Model{path: filepath.Join(filepath.Dir(configPath), "mcp.json"), configPath: configPath, width: 80, height: 24, follow: true}
+	input := textinput.New()
+	input.Prompt = ""
+	input.SetWidth(72)
+	return &Model{path: filepath.Join(filepath.Dir(configPath), "mcp.json"), configPath: configPath, width: 80, height: 24, follow: true, addInput: input}
 }
 
 func Run(configPath string) error {
@@ -111,6 +117,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = v.Width, v.Height
+		m.addInput.SetWidth(max(8, m.width-8))
+		m.addInput.SetCursor(m.addInput.Position())
 	case snapshotMsg:
 		if !m.initialized {
 			// Foreground Agents cannot be retroactively attached to the
@@ -145,19 +153,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch key {
 			case "esc":
 				m.input = false
-				m.inputText = ""
+				m.addInput.Blur()
+				m.addInput.Reset()
 				m.notice = "Add canceled"
 			case "enter":
 				m.addServer()
-			case "backspace":
-				if len(m.inputText) > 0 {
-					runes := []rune(m.inputText)
-					m.inputText = string(runes[:len(runes)-1])
-				}
 			default:
-				if v.Key().Text != "" {
-					m.inputText += v.Key().Text
-				}
+				var cmd tea.Cmd
+				m.addInput, cmd = m.addInput.Update(v)
+				return m, cmd
 			}
 			return m, nil
 		}
@@ -208,8 +212,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "a":
 			if m.page == 1 {
 				m.input = true
-				m.inputText = ""
+				m.addInput.Reset()
 				m.notice = ""
+				return m, m.addInput.Focus()
 			}
 		case "e":
 			if m.page == 1 {
@@ -268,8 +273,78 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			return m, readSnapshot(m.configPath, m.path)
 		}
+	case tea.PasteMsg:
+		if m.input {
+			var cmd tea.Cmd
+			m.addInput, cmd = m.addInput.Update(v)
+			return m, cmd
+		}
+	case tea.MouseClickMsg:
+		if m.input && v.Button == tea.MouseLeft {
+			m.moveAddInputCursor(v.X, v.Y)
+		}
+	default:
+		// Forward cursor-blink and clipboard-result messages to Bubbles.
+		if m.input {
+			var cmd tea.Cmd
+			m.addInput, cmd = m.addInput.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
+}
+
+// addInputY is the terminal row of the input, counting the server list and
+// optional configuration error in the surrounding TUI layout.
+func (m *Model) addInputY() int {
+	y := 10 + max(1, len(m.data.registry.Servers))
+	if m.data.err != nil {
+		y++
+	}
+	return y
+}
+
+// moveAddInputCursor translates a mouse click in the visible input viewport
+// into a rune position. Bubbles owns text editing and horizontal scrolling.
+func (m *Model) moveAddInputCursor(x, y int) {
+	const inputX = 4 // "  > " before the Bubbles field
+	if y != m.addInputY() || x < inputX || x > inputX+m.addInput.Width() {
+		return
+	}
+	value := []rune(m.addInput.Value())
+	if len(value) == 0 {
+		m.addInput.SetCursor(0)
+		return
+	}
+	// The widget's internal viewport offset is private. Compare its rendered,
+	// ANSI-stripped visible text against the value to recover the left edge.
+	// Prefer occurrences containing the current cursor for repeated substrings.
+	visible := []rune(ansi.Strip(m.addInput.View()))
+	start, best, bestDistance := 0, -1, len(value)+1
+	for candidate := 0; candidate < len(value); candidate++ {
+		matched := 0
+		for matched < len(visible) && candidate+matched < len(value) &&
+			visible[matched] == value[candidate+matched] {
+			matched++
+		}
+		distance := max(0, candidate-m.addInput.Position()) +
+			max(0, m.addInput.Position()-(candidate+len(visible)))
+		if matched > best || (matched == best && distance < bestDistance) ||
+			(matched == best && distance == bestDistance && candidate > start) {
+			start, best, bestDistance = candidate, matched, distance
+		}
+	}
+	column := x - inputX
+	position, displayX := start, 0
+	for position < len(value) && displayX < column {
+		w := runewidth.RuneWidth(value[position])
+		if displayX+w > column {
+			break
+		}
+		displayX += w
+		position++
+	}
+	m.addInput.SetCursor(position)
 }
 
 func (m *Model) selected() (string, mcpgateway.ServerConfig, bool) {
@@ -318,7 +393,7 @@ func (m *Model) changeSelected(action string) {
 func (m *Model) addServer() {
 	// This quick-add intentionally only supports single-token arguments.
 	// Complex JSON arrays and secrets can be managed in the registry file.
-	parts := strings.Fields(m.inputText)
+	parts := strings.Fields(m.addInput.Value())
 	if len(parts) < 3 {
 		m.notice = "Use: ID stdio COMMAND [ARGS...]  or  ID http URL"
 		return
@@ -355,7 +430,8 @@ func (m *Model) addServer() {
 	m.data.registry = r
 	m.notice = "Added " + id
 	m.input = false
-	m.inputText = ""
+	m.addInput.Blur()
+	m.addInput.Reset()
 }
 
 func truncate(s string, n int) string {
@@ -424,7 +500,7 @@ func (m *Model) View() tea.View {
 		}
 		b.WriteString("\n  a Add   e Enable/disable   x Expose/hide   d Remove   j/k Select\n")
 		if m.input {
-			b.WriteString("\n  Add MCP: ID stdio COMMAND [ARGS...] | ID http URL\n  > " + m.inputText + "█\n  Enter Save   Esc Cancel\n")
+			b.WriteString("\n  Add MCP: ID stdio COMMAND [ARGS...] | ID http URL\n  > " + m.addInput.View() + "\n  Enter Save   Esc Cancel   Arrows/Home/End Edit   Terminal Paste\n")
 		}
 		if m.confirmDelete {
 			id, _, _ := m.selected()
@@ -473,6 +549,9 @@ func (m *Model) View() tea.View {
 	b.WriteString("  q Quit UI   Tab Navigate   l Logs   r Refresh   5 Help")
 	view := tea.NewView(b.String())
 	view.AltScreen = true
+	if m.input {
+		view.MouseMode = tea.MouseModeCellMotion
+	}
 	view.WindowTitle = "Chat With CLI"
 	return view
 }

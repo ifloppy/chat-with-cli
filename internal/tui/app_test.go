@@ -15,7 +15,7 @@ func TestMCPQuickAddToggleAndDelete(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	m := New(path)
 	m.input = true
-	m.inputText = "example http http://127.0.0.1:3000/mcp"
+	m.addInput.SetValue("example http http://127.0.0.1:3000/mcp")
 	m.addServer()
 	if m.input {
 		t.Fatal("input did not close after valid add")
@@ -47,7 +47,7 @@ func TestMCPQuickAddToggleAndDelete(t *testing.T) {
 func TestTUIInvalidMCPInputIsNotPersisted(t *testing.T) {
 	m := New(filepath.Join(t.TempDir(), "config.toml"))
 	m.input = true
-	m.inputText = "invalid"
+	m.addInput.SetValue("invalid")
 	m.addServer()
 	if !m.input || !strings.Contains(m.notice, "Use:") {
 		t.Fatalf("expected validation error: %#v", m)
