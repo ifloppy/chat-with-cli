@@ -50,6 +50,16 @@ is not an Android/Termux binary. **The selected GitHub release must contain
 the Android asset and its checksum**; releases published before Android support
 are not retroactively compatible.
 
+To install the **latest pushed main-branch fix** before a tagged Release exists,
+use the source installer instead. It installs missing Termux Go/Clang/Git
+packages, builds a native Android binary, and replaces the old executable only
+after a successful build (which needs more storage and time than a release download):
+
+```sh
+pkg install -y curl coreutils
+curl -fsSL https://raw.githubusercontent.com/ifloppy/chat-with-cli/main/scripts/install-termux-source.sh | sh
+```
+
 For a minimal read-only connection (does not start a background service):
 
 ```sh
@@ -58,8 +68,9 @@ chat-with-cli agent setup --device termux-phone --root "$HOME/projects" --profil
 chat-with-cli connect --manual-oauth
 ```
 
-This change adds **installation and release packaging support only**. It
-is not a promise of full Android runtime compatibility. In particular,
+File operations use a guarded, component-by-component `openat` path walk
+instead of `openat2`, which some Android seccomp policies terminate with
+`SIGSYS`. This does **not** promise full Android runtime compatibility. In particular,
 PTY shell execution still uses `/bin/sh` and needs a separate Termux runtime
 fix. Android has no Linux systemd or desktop Computer Use backends, and
 Agent authentication, PTY operation, and background survival still need

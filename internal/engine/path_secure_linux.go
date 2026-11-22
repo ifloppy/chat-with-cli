@@ -15,8 +15,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const secureResolveFlags = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS
-
 func (e *Engine) rootRelativePath(path string) (root, rel string, err error) {
 	candidate := strings.TrimSpace(path)
 	if candidate == "" {
@@ -57,10 +55,7 @@ func (e *Engine) secureOpenRead(path string) (*os.File, string, error) {
 		return nil, "", err
 	}
 	defer unix.Close(rootFD)
-	fd, err := unix.Openat2(rootFD, rel, &unix.OpenHow{
-		Flags:   unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
-		Resolve: secureResolveFlags,
-	})
+	fd, err := secureOpenBeneath(rootFD, rel, unix.O_RDONLY)
 	if err != nil {
 		return nil, "", err
 	}
@@ -97,20 +92,14 @@ func openChildDir(parentFD int, name string, create bool) (int, error) {
 	} else if !errors.Is(statErr, unix.ENOENT) {
 		return -1, statErr
 	}
-	fd, err := unix.Openat2(parentFD, name, &unix.OpenHow{
-		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
-		Resolve: secureResolveFlags,
-	})
+	fd, err := secureOpenBeneath(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY)
 	if err == nil || !create || !errors.Is(err, unix.ENOENT) {
 		return fd, err
 	}
 	if err := unix.Mkdirat(parentFD, name, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
 		return -1, err
 	}
-	return unix.Openat2(parentFD, name, &unix.OpenHow{
-		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
-		Resolve: secureResolveFlags,
-	})
+	return secureOpenBeneath(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY)
 }
 
 func (e *Engine) secureParent(path string, create bool) (fd int, base, canonical string, err error) {
@@ -251,10 +240,7 @@ func (e *Engine) openRegularAt(parentFD int, base, label string) (*os.File, erro
 	if stat.Nlink > 1 {
 		return nil, fmt.Errorf("%s must not have multiple hard links", label)
 	}
-	fd, err := unix.Openat2(parentFD, base, &unix.OpenHow{
-		Flags:   unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
-		Resolve: secureResolveFlags,
-	})
+	fd, err := secureOpenBeneath(parentFD, base, unix.O_RDONLY)
 	if err != nil {
 		return nil, err
 	}
