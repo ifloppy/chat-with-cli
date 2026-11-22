@@ -21,6 +21,8 @@ jobs:
           cache-dependency-path: go.sum
       - name: Format check
         run: test -z "$(gofmt -l .)"
+      - name: Installer regression tests
+        run: sh scripts/test-install.sh
       - name: Vet
         run: go vet ./...
       - name: Test with race detector

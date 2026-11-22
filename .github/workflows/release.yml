@@ -29,7 +29,17 @@ jobs:
             cp "build/$arch/chat-with-cli" "dist/chat-with-cli-linux-$arch"
             tar -C "build/$arch" -czf "dist/chat-with-cli_${GITHUB_REF_NAME}_linux_${arch}.tar.gz" chat-with-cli
           done
-          (cd dist && sha256sum chat-with-cli-linux-* chat-with-cli_*.tar.gz > SHA256SUMS)
+      - name: Install Android NDK (Termux arm64)
+        run: sdkmanager --install 'ndk;28.1.13356709'
+      - name: Build Android Termux binary
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          CC="$SDK_ROOT/ndk/28.1.13356709/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
+          test -x "$CC"
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$CC" \
+            go build -trimpath -ldflags='-s -w' -o dist/chat-with-cli-android-arm64 ./cmd/chat-with-cli
+      - name: Generate release checksums
+        run: (cd dist && sha256sum chat-with-cli-linux-* chat-with-cli-android-arm64 chat-with-cli_*.tar.gz > SHA256SUMS)
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,6 +51,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             dist/chat-with-cli-linux-amd64 \
             dist/chat-with-cli-linux-arm64 \
+            dist/chat-with-cli-android-arm64 \
             dist/chat-with-cli_*.tar.gz \
             dist/SHA256SUMS \
             --verify-tag \

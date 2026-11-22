@@ -19,17 +19,47 @@ default Relay and lets you replace it before writing the Agent configuration.
 The same UI opens when `chat-with-cli` is run without arguments in an
 interactive terminal.
 
-The bootstrap script detects Linux amd64/arm64, resolves the newest GitHub
-release (including prereleases), downloads the matching binary and
-`SHA256SUMS`, verifies SHA-256, and atomically installs to
-`~/.local/bin/chat-with-cli`. It does **not** use sudo, start an Agent, or
-enable a service. Review `install.sh` first if you do not want to execute a
-network-delivered script directly. Pin a release with
-`CHAT_WITH_CLI_VERSION=vX.Y.Z` or choose another destination with
-`CHAT_WITH_CLI_INSTALL_DIR=/path`.
+The bootstrap script detects Linux amd64/arm64 and Termux on Android arm64,
+resolves the newest GitHub release (including prereleases), downloads the matching
+binary and `SHA256SUMS`, verifies SHA-256, and atomically installs to
+`~/.local/bin/chat-with-cli` on Linux or `$PREFIX/bin/chat-with-cli` in Termux.
+It does **not** use sudo, start an Agent, or enable a service. Review
+`install.sh` first if you do not want to execute a network-delivered script
+directly. Pin a release with `CHAT_WITH_CLI_VERSION=vX.Y.Z` or choose another
+destination with `CHAT_WITH_CLI_INSTALL_DIR=/path`.
 
-The installer is deliberately review-first. Without `--apply`, it performs no
-network request and changes no files.
+## Termux on Android (arm64)
+
+Install the minimal download and checksum prerequisites, then run the same
+one-command installer:
+
+```sh
+pkg install -y curl coreutils
+curl -fsSL https://raw.githubusercontent.com/ifloppy/chat-with-cli/main/install.sh | sh
+```
+
+Termux is detected from its environment and the installer selects
+`chat-with-cli-android-arm64`, built using the Android NDK with CGO enabled
+for Android's DNS resolver. Do not substitute the `linux-arm64` release: it
+is not an Android/Termux binary. **The selected GitHub release must contain
+the Android asset and its checksum**; releases published before Android support
+are not retroactively compatible.
+
+For a minimal read-only connection (does not start a background service):
+
+```sh
+mkdir -p "$HOME/projects"
+chat-with-cli agent setup --device termux-phone --root "$HOME/projects" --profile read-only
+chat-with-cli connect --manual-oauth
+```
+
+This change adds **installation and release packaging support only**. It
+is not a promise of full Android runtime compatibility. In particular,
+PTY shell execution still uses `/bin/sh` and needs a separate Termux runtime
+fix. Android has no Linux systemd or desktop Computer Use backends, and
+Agent authentication, PTY operation, and background survival still need
+real-device testing. Do not enable shell execution before those issues
+are addressed; `--root` does **not** sandbox arbitrary shell commands.
 
 ## Install the Relay binary
 
