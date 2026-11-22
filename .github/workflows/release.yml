@@ -20,6 +20,8 @@ jobs:
           cache-dependency-path: go.sum
       - name: Test
         run: go test ./...
+      - name: Check release version
+        run: test "$(cat VERSION)" = "${GITHUB_REF_NAME#v}"
       - name: Build Linux binaries
         run: |
           mkdir -p dist

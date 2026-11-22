@@ -3,4 +3,4 @@
 // and CI builds can stamp a candidate without editing Go source.
 package version
 
-var Value = "0.1.0-alpha.5"
+var Value = "0.1.0-alpha.6"

@@ -23,6 +23,11 @@ The bootstrap script detects Linux amd64/arm64 and Termux on Android arm64,
 resolves the newest GitHub release (including prereleases), downloads the matching
 binary and `SHA256SUMS`, verifies SHA-256, and atomically installs to
 `~/.local/bin/chat-with-cli` on Linux or `$PREFIX/bin/chat-with-cli` in Termux.
+The Termux default is already on PATH in a normal session. If PATH is missing
+that directory, the installer idempotently updates the active Bash, Zsh, or
+Fish startup file; reopening the shell applies the change. Because the
+installer runs as a child (`curl | sh`), it cannot alter the current parent
+shell's environment automatically.
 It does **not** use sudo, start an Agent, or enable a service. Review
 `install.sh` first if you do not want to execute a network-delivered script
 directly. Pin a release with `CHAT_WITH_CLI_VERSION=vX.Y.Z` or choose another

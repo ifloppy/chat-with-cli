@@ -44,10 +44,11 @@ printf 'android arm64\n' > "$TMP/releases/chat-with-cli-android-arm64"
 (cd "$TMP/releases" && sha256sum chat-with-cli-* > SHA256SUMS)
 
 run_install() {
-  env -u PREFIX -u TERMUX_VERSION -u TERMUX__PREFIX -u TERMUX_APP__PACKAGE_NAME \
+  env -u PREFIX -u TERMUX_VERSION -u TERMUX__PREFIX -u TERMUX_APP__PACKAGE_NAME -u SHELL \
     PATH="$TMP/mock-bin:$PATH" \
     CHAT_WITH_CLI_VERSION=v0-test \
     TEST_ASSETS_DIR="$TMP/releases" \
+    SHELL=/bin/bash \
     "$@" sh "$ROOT/install.sh"
 }
 check() {
@@ -62,6 +63,21 @@ check "$TMP/releases/chat-with-cli-linux-amd64" "$TMP/linux-home/.local/bin/chat
 run_install HOME="$TMP/termux" TERMUX_VERSION=0.119 PREFIX="$TMP/termux" TEST_ARCH=aarch64 > "$TMP/termux.log"
 check "$TMP/releases/chat-with-cli-android-arm64" "$TMP/termux/bin/chat-with-cli"
 grep -q 'Android does not provide' "$TMP/termux.log"
+# If PATH is missing the default Termux bin directory, the next Bash session
+# must load it automatically, without creating duplicate entries on reruns.
+grep -q '^# chat-with-cli Termux PATH$' "$TMP/termux/.bashrc"
+grep -Fq 'export PATH="$PREFIX/bin:$PATH"' "$TMP/termux/.bashrc"
+run_install HOME="$TMP/termux" TERMUX_VERSION=0.119 PREFIX="$TMP/termux" TEST_ARCH=aarch64 > /dev/null
+[ "$(grep -c '^# chat-with-cli Termux PATH$' "$TMP/termux/.bashrc")" -eq 1 ]
+# In a normal Termux PATH, the newly installed binary is immediately
+# discoverable without writing any shell configuration.
+mkdir -p "$TMP/fresh-home"
+PATH="$TMP/termux/bin:$PATH" run_install HOME="$TMP/fresh-home" TERMUX_VERSION=0.119 PREFIX="$TMP/termux" TEST_ARCH=aarch64 > /dev/null
+[ ! -e "$TMP/fresh-home/.bashrc" ]
+# Fish users get fish syntax instead of POSIX export syntax.
+mkdir -p "$TMP/fish-home"
+run_install HOME="$TMP/fish-home" SHELL="$TMP/termux/bin/fish" TERMUX_VERSION=0.119 PREFIX="$TMP/termux" TEST_ARCH=aarch64 > /dev/null
+grep -Fq 'fish_add_path -g "$PREFIX/bin"' "$TMP/fish-home/.config/fish/config.fish"
 
 # Explicit installation directory overrides the Termux default.
 mkdir -p "$TMP/other-bin"

@@ -80,7 +80,40 @@ install -m 0755 "$TMP/$ASSET" "$NEW"
 mv -f "$NEW" "$DEST"
 NEW=
 printf 'Installed %s\nSHA256: %s\n' "$DEST" "$ACTUAL"
-case ":${PATH:-}:" in *":$INSTALL_DIR:"*) ;; *) printf 'Add %s to PATH if needed.\n' "$INSTALL_DIR" ;; esac
+case ":${PATH:-}:" in
+  *":$INSTALL_DIR:"*) printf 'Executable is already on PATH.\n' ;;
+  *)
+    if [ "$OS" = android ] && [ "$INSTALL_DIR" = "$TERMUX_PREFIX/bin" ] && [ -n "${HOME:-}" ]; then
+      # A piped installer cannot modify the parent shell's PATH. Save a
+      # guarded, idempotent entry for the next interactive Termux session.
+      marker='# chat-with-cli Termux PATH'
+      case "${SHELL:-}" in
+        */zsh) profile="$HOME/.zshrc"; shell_type=posix ;;
+        */fish) profile="$HOME/.config/fish/config.fish"; shell_type=fish ;;
+        *) profile="$HOME/.bashrc"; shell_type=posix ;;
+      esac
+      if [ -L "$profile" ] || { [ -e "$profile" ] && [ ! -f "$profile" ]; }; then
+        printf 'Could not update PATH: refusing non-regular shell profile %s\n' "$profile" >&2
+      elif [ -f "$profile" ] && grep -Fqx "$marker" "$profile"; then
+        printf 'Termux PATH entry already exists in %s.\n' "$profile"
+      else
+        mkdir -p "$(dirname "$profile")"
+        if [ "$shell_type" = fish ]; then
+          if printf '\n%s\n%s\n' "$marker" 'fish_add_path -g "$PREFIX/bin"' >> "$profile"; then
+            printf 'Added Termux PATH entry to %s.\n' "$profile"
+          fi
+        else
+          if printf '\n%s\n%s\n' "$marker" 'case ":$PATH:" in *":$PREFIX/bin:"*) ;; *) export PATH="$PREFIX/bin:$PATH" ;; esac' >> "$profile"; then
+            printf 'Added Termux PATH entry to %s.\n' "$profile"
+          fi
+        fi
+      fi
+      printf 'For this shell now: export PATH="$PREFIX/bin:$PATH" (or open a new Termux session).\n'
+    else
+      printf 'Add %s to PATH if needed.\n' "$INSTALL_DIR"
+    fi
+    ;;
+esac
 printf '\nIt defaults to the community Relay: https://chat-with-cli.iruanp.com\n'
 if [ "$OS" = android ]; then
   printf 'Termux setup: mkdir -p "$HOME/projects" && chat-with-cli agent setup --device termux-phone --root "$HOME/projects" --profile read-only\n'
