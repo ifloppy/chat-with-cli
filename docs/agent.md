@@ -11,6 +11,19 @@ CLI flags override config values. Secrets belong in environment variables or
 the 0600 credential store, not TOML. The generated file contains no account
 password.
 
+For temporary connection troubleshooting, use the built-in `--debug` flag
+with `connect` or `agent` (including Termux/Android):
+
+```sh
+chat-with-cli connect --debug --manual-oauth --approval-mode=configured \
+  --profile=read-only --root="$HOME/projects"
+```
+
+Debug output is disabled by default. When enabled, it logs only the connection
+stage, HTTP status, and sanitized error classification, rate-limited for repeated
+errors. It does not log token values, OAuth callback URLs, device proof headers,
+or HTTP response bodies. `--debug` never expands remote capabilities.
+
 ## Profiles
 
 | Profile | Enabled capabilities |

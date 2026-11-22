@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,6 +31,7 @@ type Client struct {
 	AuthorizeRequest func(context.Context, protocol.Request) error
 	OnToolCall       ToolCallObserver
 	Identity         *deviceidentity.Identity
+	DebugConnect     bool // Opt-in, redacted connection diagnostics; no sensitive values
 }
 
 // ToolCall contains the method name and raw arguments of an inbound MCP RPC.
@@ -49,6 +52,46 @@ const (
 	agentDialTimeout       = 5 * time.Second
 	agentChallengeTimeout  = 5 * time.Second
 )
+
+// connectionDiagnostics is opt-in and deliberately never logs raw errors,
+// URLs, HTTP bodies, OAuth credentials, device proof headers, or tokens.
+// This keeps Android / Termux connection troubleshooting safe to share.
+type connectionDiagnostics struct {
+	enabled bool
+	lastAt  map[string]time.Time
+}
+
+func (d *connectionDiagnostics) report(stage string, err error, resp *http.Response) {
+	if !d.enabled {
+		return
+	}
+	message := stage
+	if resp != nil {
+		message += fmt.Sprintf(" http=%d", resp.StatusCode)
+	}
+	if err != nil {
+		var httpErr *ChallengeHTTPError
+		var netErr net.Error
+		switch {
+		case errors.As(err, &httpErr):
+			message += fmt.Sprintf(" challenge_http=%d", httpErr.StatusCode)
+		case errors.Is(err, context.DeadlineExceeded):
+			message += " timeout"
+		case errors.As(err, &netErr):
+			message += " network-error"
+		default:
+			message += fmt.Sprintf(" error-type=%T", err)
+		}
+	}
+	if d.lastAt == nil {
+		d.lastAt = make(map[string]time.Time)
+	}
+	if time.Since(d.lastAt[message]) < 10*time.Second {
+		return
+	}
+	d.lastAt[message] = time.Now()
+	log.Printf("Agent connection diagnostic: %s", message)
+}
 
 func waitForReconnect(ctx context.Context) error {
 	timer := time.NewTimer(agentReconnectInterval)
@@ -84,6 +127,8 @@ func (c *Client) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	diagnostics := connectionDiagnostics{enabled: c.DebugConnect}
+	diagnostics.report("connect-start", nil, nil)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -95,6 +140,7 @@ func (c *Client) Run(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				diagnostics.report("oauth-token", err, nil)
 				// OAuth refresh/discovery can fail during a brief network or Relay
 				// outage. Treat that as a reconnect condition instead of dropping
 				// back to the interactive menu and requiring operator intervention.
@@ -114,6 +160,7 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 			challenge, proofErr := fetchAgentChallenge(ctx, resource, token)
 			if proofErr != nil {
+				diagnostics.report("device-challenge", proofErr, nil)
 				var statusErr *ChallengeHTTPError
 				if errors.As(proofErr, &statusErr) {
 					if statusErr.StatusCode == http.StatusUnauthorized && c.TokenProvider != nil && c.TokenRejected != nil {
@@ -148,12 +195,14 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		if err == nil {
 			dialCtx, cancelDial := context.WithTimeout(ctx, agentDialTimeout)
-			conn, _, dialErr := websocket.Dial(dialCtx, endpoint, &websocket.DialOptions{HTTPHeader: header})
+			conn, response, dialErr := websocket.Dial(dialCtx, endpoint, &websocket.DialOptions{HTTPHeader: header})
 			cancelDial()
+			diagnostics.report("websocket-handshake", dialErr, response)
 			err = dialErr
 			if err == nil {
 				conn.SetReadLimit(32 << 20)
 				err = c.serve(ctx, conn)
+				diagnostics.report("websocket-ended", err, nil)
 				// A transport disconnect is not an authorization revocation. Detached
 				// tasks intentionally survive so a reconnect can resume observing and
 				// controlling them. Explicit credential rejection still fails closed.

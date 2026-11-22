@@ -1274,6 +1274,7 @@ func runAgentCommand(command string, args []string) error {
 	redactLineTerms := new(stringList)
 	fs.Var(redactLineTerms, "redact-line-term", "best-effort case-insensitive term; redact returned text lines containing it (repeatable)")
 	manualOAuth := fs.Bool("manual-oauth", false, "use headless OAuth and paste the final callback URL instead of opening a local browser")
+	debug := fs.Bool("debug", false, "print rate-limited, redacted Agent connection diagnostics (never tokens or URLs)")
 	approvalMode := fs.String("approval-mode", approvalConfigured, "configured, ask, or allow-all; ask/allow-all temporarily expose all capabilities for this process")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1434,7 +1435,7 @@ func runAgentCommand(command string, args []string) error {
 	defer cancel()
 	audit := newToolAudit(os.Stderr)
 	audit.printInventory(*approvalMode, eng.Config())
-	client := &agent.Client{Engine: eng, URL: *relayURL, Device: *device, DeviceID: *deviceID, Token: *token, Identity: deviceIdentity}
+	client := &agent.Client{Engine: eng, URL: *relayURL, Device: *device, DeviceID: *deviceID, Token: *token, Identity: deviceIdentity, DebugConnect: *debug}
 	client.OnToolCall = audit.observe
 	if *approvalMode == approvalAsk {
 		approver, closer, err := newTTYRequestApprover()

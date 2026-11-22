@@ -9,7 +9,7 @@ and OAuth-enabled Relay. It provides bounded filesystem access, durable PTY
 tasks, checkpoints, privacy-preserving audit metadata, and optional Linux
 Computer Use controls.
 
-> Status: early alpha (`v0.1.0-alpha.6`). Linux is the primary host; Termux Android arm64 installation is experimental.
+> Status: early alpha (`v0.1.0-alpha.7`). Linux is the primary host; Termux Android arm64 installation is experimental.
 > Review [SECURITY.md](SECURITY.md) before exposing a Relay publicly.
 
 Run `chat-with-cli` (or `chat-with-cli ui`) in a terminal for the
